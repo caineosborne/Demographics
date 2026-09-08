@@ -3,6 +3,8 @@
 from pathlib import Path
 import sqlite3
 
+import requests
+from bs4 import BeautifulSoup
 from langchain_core.tools import tool
 
 
@@ -11,6 +13,22 @@ DB_PATH = (
     / "Data_Files"
     / "WPP2024_GEN_F01_DEMOGRAPHIC_INDICATORS_COMPACT.sqlite"
 )
+
+
+@tool
+def get_page_text(url: str) -> str:
+    """Retrieve the main text content of a web page from its URL."""
+    try:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        return f"Unable to access the page: {exc}"
+
+    soup = BeautifulSoup(response.content, "html.parser")
+    for tag in soup(["script", "style", "nav", "footer"]):
+        tag.decompose()
+    main = soup.find("main") or soup.find("article") or soup.body
+    return main.get_text(" ", strip=True) if main else ""
 
 
 def get_connection() -> sqlite3.Connection:
@@ -35,7 +53,8 @@ def get_population_forecast(
     """Retrieve demographic figures for a country across multiple years.
 
     Use historic=True to query historical estimates. Otherwise, query the
-    UN's medium-variant population projections.
+    UN's medium-variant population projections. Population, births, deaths,
+    migration, and natural-change values are reported in thousands of people.
     """
     if not years:
         return []
@@ -48,6 +67,7 @@ def get_population_forecast(
             Country,
             Year,
             "Population 1 Jan",
+            "Population 1 Jul",
             "Total Births",
             "Net Migration",
             "Total Deaths",
@@ -74,3 +94,5 @@ def get_list_of_countries() -> list[str]:
 
 
 tools = [get_population_forecast, get_list_of_countries]
+WEB_TOOLS = [get_page_text]
+SQL_TOOLS = tools
