@@ -10,3 +10,7 @@ wheels/
 .venv
 
 Data_Files/
+
+.env
+
+
