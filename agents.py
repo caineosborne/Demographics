@@ -58,6 +58,9 @@ class MetricComparison(BaseModel):
     difference: Optional[float] = None
     percentage_difference: Optional[float] = None
     assessment: Optional[str] = None
+    reference_field: Optional[str] = None
+    is_estimate: bool = False
+    estimate_basis: Optional[str] = None
 
 
 class ComparisonResult(BaseModel):
@@ -150,7 +153,15 @@ def compare_to_un(state: State):
         knowledge or memory. Use get_list_of_countries if the country name is
         uncertain, then get_population_forecast for the reported year. The
         SQL values are in thousands of people, so normalize units before
-        comparing them to newsletter values reported as people.
+        comparing them to newsletter values reported as people. The SQL result
+        includes both Population 1 Jan and Population 1 Jul. Select the field
+        that best matches the article's reference date: use 1 Jan for a
+        1 January reference, 1 Jul for a mid-year reference, and the following
+        1 Jan for an end-of-year reference when available. If the source is
+        annual without an exact date, use the closest field, set is_estimate
+        to true, and explain the assumption in estimate_basis. Never silently
+        average the two fields. Historic estimates end in 2024; use
+        medium-variant data for 2025 onward.
         """),
         HumanMessage(content=f"Research JSON:\n{research_json}"),
         *state["messages"],
@@ -203,7 +214,12 @@ def compare_to_un(state: State):
             Compare the research JSON to the SQL tool results. The SQL values
             are in thousands of people; convert them to people before comparing
             them to newsletter values. Populate separate comparisons for
-            population, births, deaths, natural change, and net migration.
+            population, births, deaths, natural change, and net migration. For
+            population, choose Population 1 Jan or Population 1 Jul based on
+            the article's reference date. Use the following 1 Jan for an
+            end-year reference when available. Never average fields silently;
+            mark is_estimate=true and explain estimate_basis for approximations.
+            Historic estimates end in 2024; use medium-variant data later.
             Identify which lever changed most. Treat net overseas migration
             and UN net migration as comparable only when definitions and
             periods align; explain caveats in notes. Do not use outside data.

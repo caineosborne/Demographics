@@ -55,6 +55,8 @@ def get_population_forecast(
     Use historic=True to query historical estimates. Otherwise, query the
     UN's medium-variant population projections. Population, births, deaths,
     migration, and natural-change values are reported in thousands of people.
+    In this database, the historic estimates table ends in 2024. Do not use
+    historic=True for 2025 or later; use the medium-variant table instead.
     """
     if not years:
         return []
