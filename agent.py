@@ -4,6 +4,7 @@ import os
 from typing import Annotated, TypedDict
 
 from dotenv import load_dotenv
+from langchain_core.messages import SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import START, StateGraph
@@ -11,6 +12,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from tools import tools
+from temporal_context import temporal_context
 
 
 load_dotenv(override=True)
@@ -33,7 +35,9 @@ llm_with_tools = llm.bind_tools(tools)
 
 
 def chatbot(state: State):
-    return {"messages": [llm_with_tools.invoke(state["messages"])]}
+    return {"messages": [llm_with_tools.invoke([
+        SystemMessage(content=temporal_context()), *state["messages"]
+    ])]}
 
 
 graph_builder = StateGraph(State)

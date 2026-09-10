@@ -1,11 +1,18 @@
 """Tools for querying the UN World Population Prospects database."""
 
 from pathlib import Path
+from io import BytesIO
 import sqlite3
+import time
+import json
+from datetime import datetime, timezone
+from typing import Any
 
 import requests
 from bs4 import BeautifulSoup
 from langchain_core.tools import tool
+from langgraph.config import get_stream_writer
+from pypdf import PdfReader
 
 
 DB_PATH = (
@@ -15,25 +22,363 @@ DB_PATH = (
 )
 
 
+class PageAccessError(RuntimeError):
+    """Neither fetch method could retrieve usable page content."""
+
+
+def report_activity(message: str) -> None:
+    """Write an activity message to the console and active streamed UI run."""
+    print(message, flush=True)
+    try:
+        writer = get_stream_writer()
+    except (RuntimeError, KeyError):
+        return  # The tool can also be called outside LangGraph.
+    writer({"log": message})
+
+
+def report_fetch_status(status: str) -> None:
+    """Send web-fetch progress to the console and active streamed UI run."""
+    message = f"[Web] {status}"
+    print(message, flush=True)
+    try:
+        writer = get_stream_writer()
+    except (RuntimeError, KeyError):
+        return  # The tool can also be called outside LangGraph.
+    writer({"fetch_status": status, "log": message})
+
+
+def extract_page_text(html: str | bytes) -> str:
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "nav", "footer", "noscript"]):
+        tag.decompose()
+    main = soup.find("main") or soup.find("article") or soup.body or soup
+    text = main.get_text(" ", strip=True)
+    # Common successful HTTP responses that contain a challenge or JS shell.
+    placeholders = (
+        "enable javascript", "javascript is required", "just a moment",
+        "verify you are human", "checking your browser", "access denied",
+        "please turn javascript on",
+    )
+    if (
+        not text
+        or text.lower().strip(" .…") == "loading"
+        or (len(text) < 1000 and any(p in text.lower() for p in placeholders))
+    ):
+        raise ValueError("The page contained no usable text or displayed an access challenge.")
+    return text
+
+
+def response_is_pdf(url: str, response: requests.Response) -> bool:
+    """Identify PDFs from their response content rather than the URL alone."""
+    content_type = str(response.headers.get("Content-Type", "")).lower()
+    return (
+        "application/pdf" in content_type
+        or response.content.startswith(b"%PDF-")
+        or url.split("?", 1)[0].lower().endswith(".pdf")
+    )
+
+
+def extract_pdf_text(pdf_bytes: bytes) -> str:
+    """Extract readable text from a PDF returned by Requests."""
+    reader = PdfReader(BytesIO(pdf_bytes))
+    if reader.is_encrypted:
+        raise ValueError("The PDF is encrypted and cannot be read without a password.")
+    text = "\n\n".join(page.extract_text() or "" for page in reader.pages).strip()
+    if not text:
+        raise ValueError("The PDF contains no extractable text; it may be a scanned document.")
+    return text
+
+
+def _fetch_pdf(url: str) -> str:
+    report_fetch_status("Trying Requests")
+    with requests.get(url, timeout=30) as response:
+        response.raise_for_status()
+        if not response_is_pdf(url, response):
+            raise ValueError("The URL did not return a PDF document.")
+        report_fetch_status("Reading PDF")
+        text = extract_pdf_text(response.content)
+    report_fetch_status("PDF loaded via Requests — summarising")
+    return text
+
+
+def fetch_with_playwright(url: str) -> str:
+    """Render the page in Chromium and extract text from the resulting HTML."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page()
+            response = page.goto(url, wait_until="load", timeout=30_000)
+            if response is None or not response.ok:
+                status = response.status if response else "no response"
+                raise ValueError(f"Browser navigation failed: {status}")
+            # Give asynchronously rendered content time to replace an empty shell.
+            deadline = time.monotonic() + 10
+            while True:
+                try:
+                    return extract_page_text(page.content())
+                except ValueError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    page.wait_for_timeout(250)
+        finally:
+            browser.close()
+
+
 @tool
 def get_page_text(url: str) -> str:
-    """Retrieve the main text content of a web page from its URL."""
+    """Retrieve HTML or PDF text using Requests, falling back to a rendered browser for HTML."""
+    report_fetch_status("Trying Requests")
     try:
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        return f"Unable to access the page: {exc}"
+        with requests.get(url, timeout=30) as response:
+            response.raise_for_status()
+            if response_is_pdf(url, response):
+                report_fetch_status("Reading PDF")
+                text = extract_pdf_text(response.content)
+                report_fetch_status("PDF loaded via Requests — summarising")
+                return text
+            text = extract_page_text(response.content)
+    except (requests.RequestException, ValueError) as exc:
+        requests_error = str(exc)
+    else:
+        report_fetch_status("Page loaded via Requests — summarising")
+        return text
 
-    soup = BeautifulSoup(response.content, "html.parser")
-    for tag in soup(["script", "style", "nav", "footer"]):
-        tag.decompose()
-    main = soup.find("main") or soup.find("article") or soup.body
-    return main.get_text(" ", strip=True) if main else ""
+    report_fetch_status("Trying Playwright")
+    try:
+        text = fetch_with_playwright(url)
+    except Exception as exc:
+        report_fetch_status("Failed — Requests and Playwright could not access the page")
+        raise PageAccessError(
+            f"Unable to access the page using Requests or Playwright. "
+            f"Requests: {requests_error}. Playwright: {exc}"
+        ) from exc
+    report_fetch_status("Page loaded via Playwright — summarising")
+    return text
+
+
+@tool
+def get_pdf_text(url: str) -> str:
+    """Retrieve and extract text from a PDF URL using Requests.
+
+    Use for a URL known to point to a PDF. This preserves the normal research
+    flow by returning the document text for summarisation.
+    """
+    try:
+        return _fetch_pdf(url)
+    except (requests.RequestException, ValueError) as exc:
+        report_fetch_status("Failed — the PDF could not be read")
+        raise PageAccessError(f"Unable to read the PDF: {exc}") from exc
 
 
 def get_connection() -> sqlite3.Connection:
     """Open a connection to the local demographics database."""
     return sqlite3.connect(DB_PATH)
+
+
+def initialise_findings_table() -> None:
+    """Create the durable store for webpage extraction results if needed."""
+    with get_connection() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS webpage_findings (
+                id INTEGER PRIMARY KEY,
+                source_url TEXT NOT NULL UNIQUE,
+                effective_date TEXT,
+                population_value REAL,
+                official_source INTEGER NOT NULL,
+                quoted_source TEXT,
+                quoted_source_url TEXT,
+                extracted_at TEXT NOT NULL,
+                finding_json TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_webpage_findings_report
+            ON webpage_findings (effective_date, population_value)
+        """)
+
+
+def store_webpage_finding(finding: dict[str, Any]) -> dict[str, str | int]:
+    """Store an extracted finding unless it matches an existing source or report.
+
+    A matching report has both the same extracted effective date and population
+    total. If either value is unavailable, only the exact-URL check is used.
+    """
+    initialise_findings_table()
+    canonical_country = normalise_country_name(finding.get("geography") or "")
+    if canonical_country:
+        finding = {**finding, "geography": canonical_country}
+    source_url = finding["url"]
+    population = (finding.get("statistics") or {}).get("population") or {}
+    effective_date = finding.get("effective_date")
+    population_value = population.get("value")
+
+    with get_connection() as conn:
+        duplicate_url = conn.execute(
+            "SELECT id FROM webpage_findings WHERE source_url = ?", (source_url,)
+        ).fetchone()
+        if duplicate_url:
+            return {"status": "excluded_duplicate_url", "existing_id": duplicate_url[0]}
+
+        if effective_date is not None and population_value is not None:
+            duplicate_report = conn.execute(
+                """SELECT id FROM webpage_findings
+                   WHERE effective_date = ? AND population_value = ?
+                   LIMIT 1""",
+                (effective_date, population_value),
+            ).fetchone()
+            if duplicate_report:
+                return {
+                    "status": "excluded_duplicate_report",
+                    "existing_id": duplicate_report[0],
+                }
+
+        cursor = conn.execute(
+            """INSERT INTO webpage_findings (
+                   source_url, effective_date, population_value, official_source,
+                   quoted_source, quoted_source_url, extracted_at, finding_json
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                source_url,
+                effective_date,
+                population_value,
+                int(bool(finding.get("official_source"))),
+                finding.get("quoted_source"),
+                finding.get("quoted_source_url"),
+                datetime.now(timezone.utc).isoformat(),
+                json.dumps(finding, sort_keys=True),
+            ),
+        )
+        return {"status": "stored", "id": cursor.lastrowid}
+
+
+def list_webpage_findings() -> list[dict[str, Any]]:
+    """Return the stored webpage findings in country/date order for debugging."""
+    initialise_findings_table()
+    with get_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT id, source_url, effective_date, population_value,
+                   official_source, quoted_source, quoted_source_url,
+                   extracted_at, finding_json
+            FROM webpage_findings
+        """).fetchall()
+
+    findings = []
+    for row in rows:
+        stored = dict(row)
+        finding = json.loads(stored.pop("finding_json"))
+        findings.append({
+            "ID": stored["id"],
+            "Country": finding.get("geography") or "",
+            "Effective date": stored["effective_date"] or "",
+            "Population": stored["population_value"],
+            "Official source": "Yes" if stored["official_source"] else "No",
+            "Source": finding.get("source") or "",
+            "Quoted source": stored["quoted_source"] or "",
+            "Quoted source URL": stored["quoted_source_url"] or "",
+            "Webpage URL": stored["source_url"],
+            "Extracted at (UTC)": stored["extracted_at"],
+            "Extracted JSON": json.dumps(finding, ensure_ascii=False, sort_keys=True),
+        })
+    return sorted(findings, key=lambda finding: (
+        finding["Country"].casefold(), finding["Effective date"], finding["ID"]
+    ))
+
+
+def get_webpage_finding(finding_id: int) -> dict[str, Any]:
+    """Return one stored finding for the database editor."""
+    initialise_findings_table()
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT finding_json FROM webpage_findings WHERE id = ?", (finding_id,)
+        ).fetchone()
+    if row is None:
+        raise ValueError(f"No stored finding exists with ID {finding_id}.")
+    return json.loads(row[0])
+
+
+def _finding_storage_fields(finding: dict[str, Any]) -> tuple:
+    if not isinstance(finding, dict) or not finding.get("url"):
+        raise ValueError("The finding JSON must be an object with a non-empty url.")
+    canonical_country = normalise_country_name(finding.get("geography") or "")
+    if canonical_country:
+        finding["geography"] = canonical_country
+    population = ((finding.get("statistics") or {}).get("population") or {})
+    return (
+        finding["url"],
+        finding.get("effective_date"),
+        population.get("value"),
+        int(bool(finding.get("official_source"))),
+        finding.get("quoted_source"),
+        finding.get("quoted_source_url"),
+        json.dumps(finding, sort_keys=True),
+    )
+
+
+def update_webpage_finding(finding_id: int, finding_json: str) -> None:
+    """Validate and save a manual edit to one stored extraction."""
+    try:
+        finding = json.loads(finding_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"The finding JSON is invalid: {exc.msg}.") from exc
+    source_url, effective_date, population_value, official_source, quoted_source, quoted_source_url, payload = _finding_storage_fields(finding)
+    initialise_findings_table()
+    with get_connection() as conn:
+        exists = conn.execute("SELECT 1 FROM webpage_findings WHERE id = ?", (finding_id,)).fetchone()
+        if not exists:
+            raise ValueError(f"No stored finding exists with ID {finding_id}.")
+        duplicate_url = conn.execute(
+            "SELECT id FROM webpage_findings WHERE source_url = ? AND id != ?", (source_url, finding_id)
+        ).fetchone()
+        if duplicate_url:
+            raise ValueError(f"This webpage URL is already stored as ID {duplicate_url[0]}.")
+        if effective_date is not None and population_value is not None:
+            duplicate_report = conn.execute(
+                """SELECT id FROM webpage_findings
+                   WHERE effective_date = ? AND population_value = ? AND id != ?""",
+                (effective_date, population_value, finding_id),
+            ).fetchone()
+            if duplicate_report:
+                raise ValueError(f"This effective date and population already exist in ID {duplicate_report[0]}.")
+        conn.execute(
+            """UPDATE webpage_findings SET
+                   source_url = ?, effective_date = ?, population_value = ?,
+                   official_source = ?, quoted_source = ?, quoted_source_url = ?,
+                   finding_json = ?
+               WHERE id = ?""",
+            (source_url, effective_date, population_value, official_source,
+             quoted_source, quoted_source_url, payload, finding_id),
+        )
+
+
+def delete_webpage_finding(finding_id: int) -> None:
+    """Delete one explicitly selected stored finding."""
+    initialise_findings_table()
+    with get_connection() as conn:
+        cursor = conn.execute("DELETE FROM webpage_findings WHERE id = ?", (finding_id,))
+        if cursor.rowcount != 1:
+            raise ValueError(f"No stored finding exists with ID {finding_id}.")
+
+
+def normalise_stored_finding_geographies() -> int:
+    """Migrate stored country labels from ISO3 codes to canonical names."""
+    initialise_findings_table()
+    updates = 0
+    with get_connection() as conn:
+        rows = conn.execute("SELECT id, finding_json FROM webpage_findings").fetchall()
+        for finding_id, payload in rows:
+            finding = json.loads(payload)
+            canonical_country = normalise_country_name(finding.get("geography") or "")
+            if canonical_country and canonical_country != finding.get("geography"):
+                finding["geography"] = canonical_country
+                conn.execute(
+                    "UPDATE webpage_findings SET finding_json = ? WHERE id = ?",
+                    (json.dumps(finding, sort_keys=True), finding_id),
+                )
+                updates += 1
+    return updates
 
 
 def run_query(sql: str, params: tuple = ()) -> list[dict]:
@@ -44,19 +389,67 @@ def run_query(sql: str, params: tuple = ()) -> list[dict]:
         return [dict(row) for row in rows]
 
 
+def resolve_country_iso3(country_name: str) -> str | None:
+    """Return the database's ISO3 code for an exact country-name match."""
+    sql = '''
+        SELECT DISTINCT "ISO3 Alpha-code" AS iso3
+        FROM medium_variant
+        WHERE Country = ?
+          AND "ISO3 Alpha-code" IS NOT NULL
+          AND "ISO3 Alpha-code" != ''
+    '''
+    rows = run_query(sql, (country_name,))
+    return rows[0]["iso3"] if len(rows) == 1 else None
+
+
+def normalise_country_name(country_name: str) -> str | None:
+    """Return the canonical database country name from a name or ISO3 code."""
+    candidate = country_name.strip().casefold()
+    if not candidate:
+        return None
+    try:
+        rows = run_query('''
+            SELECT DISTINCT Country, "ISO3 Alpha-code" AS ISO3
+            FROM medium_variant
+            ORDER BY Country
+        ''')
+    except sqlite3.OperationalError:
+        # Isolated storage tests and manually supplied databases may not include
+        # the UN reference tables. Preserve the supplied geography in that case.
+        return None
+    matches = [
+        row["Country"] for row in rows
+        if row["Country"].casefold() == candidate
+        or (row["ISO3"] or "").casefold() == candidate
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def list_country_names() -> list[str]:
+    """List canonical country names for user-interface selectors."""
+    return [row["Country"] for row in run_query(
+        "SELECT DISTINCT Country FROM medium_variant ORDER BY Country"
+    )]
+
+
 @tool
 def get_population_forecast(
-    country: str,
+    country_iso3: str,
     years: list[int],
     historic: bool = False,
 ) -> list[dict]:
-    """Retrieve demographic figures for a country across multiple years.
+    """Retrieve demographic figures for an ISO3 country code across multiple years.
 
     Use historic=True to query historical estimates. Otherwise, query the
     UN's medium-variant population projections. Population, births, deaths,
     migration, and natural-change values are reported in thousands of people.
-    In this database, the historic estimates table ends in 2024. Do not use
-    historic=True for 2025 or later; use the medium-variant table instead.
+    This is the UN WPP 2024 revision, created in 2024; its effective as-of
+    vintage is 2024, not the current date. In this database, the historical
+    estimates end in 2023. For 2024 or later use historic=False to retrieve
+    medium-variant projections made in the 2024 revision.
+    Use a three-letter ISO3 code from get_list_of_countries, such as JPN for
+    Japan. Do not pass a country name. The response includes the resolved
+    country name and ISO3 code for verification.
     """
     if not years:
         return []
@@ -67,6 +460,7 @@ def get_population_forecast(
     sql = f"""
         SELECT
             Country,
+            "ISO3 Alpha-code" AS ISO3,
             Year,
             "Population 1 Jan",
             "Population 1 Jul",
@@ -75,26 +469,34 @@ def get_population_forecast(
             "Total Deaths",
             "Natural Change"
         FROM "{table_name}"
-        WHERE Country = ?
+        WHERE "ISO3 Alpha-code" = ?
           AND Year IN ({year_placeholders})
         ORDER BY Year
     """
-    print("Getting population for", table_name, country, years)
-    return run_query(sql, (country, *years))
+    country_iso3 = country_iso3.strip().upper()
+    if len(country_iso3) != 3 or not country_iso3.isalpha():
+        raise ValueError("country_iso3 must be a three-letter ISO country code, such as JPN.")
+    report_activity(f"[UN query] table={table_name} ISO3={country_iso3} years={years}")
+    return run_query(sql, (country_iso3, *years))
 
 
 @tool
-def get_list_of_countries() -> list[str]:
-    """List the exact country and area names available in the UN dataset."""
-    sql = """
-        SELECT DISTINCT Country
-        FROM medium_variant
-        ORDER BY Country
+def get_list_of_countries() -> list[dict]:
+    """List country and area names with their ISO3 codes in the UN dataset.
+
+    Use this reference to resolve a country name before calling
+    get_population_forecast. Areas without an ISO3 code remain listed, but
+    cannot be queried by the ISO3-based forecast tool.
     """
-    print("Getting list of countries")
-    return [row["Country"] for row in run_query(sql)]
+    sql = """
+        SELECT DISTINCT Country, "ISO3 Alpha-code" AS ISO3
+        FROM medium_variant
+        ORDER BY Country, ISO3
+    """
+    report_activity("[UN query] listing country and ISO3 reference data")
+    return run_query(sql)
 
 
 tools = [get_population_forecast, get_list_of_countries]
-WEB_TOOLS = [get_page_text]
+WEB_TOOLS = [get_page_text, get_pdf_text]
 SQL_TOOLS = tools
