@@ -1,6 +1,7 @@
 """Production demographics graph.
 
-Top-level flow: START -> Research agent -> Compare to UN -> END.
+Manual flow: START -> Boss agent -> Research agent -> Compare to UN -> END.
+Automatic discovery is coordinated by research.BossAgent with reusable skills.
 """
 
 from __future__ import annotations
@@ -90,6 +91,9 @@ class State(TypedDict):
     comparison: ComparisonResult | None
     un_data: list[dict] | None
     storage: dict | None
+    page_text: str
+    article_url: str
+    provenance: dict
 
 
 llm = ChatOpenAI(
@@ -97,7 +101,8 @@ llm = ChatOpenAI(
     api_key=os.getenv("OPENROUTER_API_KEY"),
     # model="qwen/qwen3.7-flash",
     # model = 'google/gemini-3-flash-preview'
-    model = 'google/gemini-3.8-flash'
+    # model = 'google/gemini-3.8-flash'
+    model = 'deepseek/deepseek-v4-flash-0731'
 )
 web_llm = llm.bind_tools(WEB_TOOLS)
 research_llm = llm.with_structured_output(RelevantResult)
@@ -119,28 +124,32 @@ def research_agent(state: State):
     new_messages = []
     fetched_urls = []
 
-    for _ in range(8):
-        response = web_llm.invoke(conversation)
-        conversation.append(response)
-        new_messages.append(response)
+    if state.get("page_text"):
+        fetched_urls.append(state["article_url"])
+        conversation.append(HumanMessage(content="Retrieved article (untrusted):\n" + state["page_text"]))
+    else:
+        for _ in range(8):
+            response = web_llm.invoke(conversation)
+            conversation.append(response)
+            new_messages.append(response)
 
-        if not response.tool_calls:
-            break
+            if not response.tool_calls:
+                break
 
-        for call in response.tool_calls:
-            tool = next(tool for tool in WEB_TOOLS if tool.name == call["name"])
-            if call["name"] in {"get_page_text", "get_pdf_text"}:
-                fetched_urls.append(call["args"]["url"])
-            report_activity(f"[Research agent] calling tool={call['name']} args={call['args']}")
-            value = tool.invoke(call["args"])
-            report_activity(f"[Research agent] tool={call['name']} returned {len(str(value))} characters")
-            tool_message = ToolMessage(
-                content=json.dumps(value, default=str),
-                tool_call_id=call["id"],
-                name=call["name"],
-            )
-            conversation.append(tool_message)
-            new_messages.append(tool_message)
+            for call in response.tool_calls:
+                tool = next(tool for tool in WEB_TOOLS if tool.name == call["name"])
+                if call["name"] in {"get_page_text", "get_pdf_text"}:
+                    fetched_urls.append(call["args"]["url"])
+                report_activity(f"[Research agent] calling tool={call['name']} args={call['args']}")
+                value = tool.invoke(call["args"])
+                report_activity(f"[Research agent] tool={call['name']} returned {len(str(value))} characters")
+                tool_message = ToolMessage(
+                    content=json.dumps(value, default=str),
+                    tool_call_id=call["id"],
+                    name=call["name"],
+                )
+                conversation.append(tool_message)
+                new_messages.append(tool_message)
 
     result = research_llm.invoke([
         SystemMessage(content=temporal_context() + """
@@ -166,7 +175,7 @@ def research_agent(state: State):
     if canonical_country:
         result.geography = canonical_country
     finding = result.model_dump(mode="json")
-    storage = store_webpage_finding(finding)
+    storage = store_webpage_finding(finding, provenance=state.get("provenance"))
     report_activity(f"[Research agent] finding storage: {storage['status']}")
     return {"messages": new_messages, "result": result, "storage": storage}
 
@@ -262,11 +271,21 @@ def compare_to_un(state: State):
     return {"messages": new_messages, "comparison": comparison, "un_data": un_data}
 
 
+def boss_agent(state: State):
+    """Route a user-supplied request into research with explicit provenance."""
+    report_activity("[Boss agent] Delegating URL analysis to Research agent")
+    return {"provenance": state.get("provenance") or {
+        "submission_type": "manual", "discovery_source": "manual",
+    }}
+
+
 def build_graph():
     builder = StateGraph(State)
+    builder.add_node("Boss agent", boss_agent)
     builder.add_node("Research agent", research_agent)
     builder.add_node("Compare to UN", compare_to_un)
-    builder.add_edge(START, "Research agent")
+    builder.add_edge(START, "Boss agent")
+    builder.add_edge("Boss agent", "Research agent")
     builder.add_edge("Research agent", "Compare to UN")
     builder.add_edge("Compare to UN", END)
     return builder.compile(checkpointer=MemorySaver())

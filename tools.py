@@ -193,18 +193,28 @@ def initialise_findings_table() -> None:
                 finding_json TEXT NOT NULL
             )
         """)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(webpage_findings)")}
+        for name, definition in {
+            "submission_type": "TEXT NOT NULL DEFAULT 'legacy_unknown'",
+            "discovery_source": "TEXT",
+            "search_run_id": "TEXT",
+            "search_candidate_id": "INTEGER",
+        }.items():
+            if name not in columns:
+                conn.execute(f"ALTER TABLE webpage_findings ADD COLUMN {name} {definition}")
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_webpage_findings_report
             ON webpage_findings (effective_date, population_value)
         """)
 
 
-def store_webpage_finding(finding: dict[str, Any]) -> dict[str, str | int]:
+def store_webpage_finding(finding: dict[str, Any], provenance: dict | None = None) -> dict[str, str | int]:
     """Store an extracted finding unless it matches an existing source or report.
 
     A matching report has both the same extracted effective date and population
     total. If either value is unavailable, only the exact-URL check is used.
     """
+    provenance = provenance or {"submission_type": "manual", "discovery_source": "manual"}
     initialise_findings_table()
     canonical_country = normalise_country_name(finding.get("geography") or "")
     if canonical_country:
@@ -237,8 +247,9 @@ def store_webpage_finding(finding: dict[str, Any]) -> dict[str, str | int]:
         cursor = conn.execute(
             """INSERT INTO webpage_findings (
                    source_url, effective_date, population_value, official_source,
-                   quoted_source, quoted_source_url, extracted_at, finding_json
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   quoted_source, quoted_source_url, extracted_at, finding_json,
+                   submission_type, discovery_source, search_run_id, search_candidate_id
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 source_url,
                 effective_date,
@@ -248,6 +259,10 @@ def store_webpage_finding(finding: dict[str, Any]) -> dict[str, str | int]:
                 finding.get("quoted_source_url"),
                 datetime.now(timezone.utc).isoformat(),
                 json.dumps(finding, sort_keys=True),
+                provenance.get("submission_type", "manual"),
+                provenance.get("discovery_source", "manual"),
+                provenance.get("search_run_id"),
+                provenance.get("search_candidate_id"),
             ),
         )
         return {"status": "stored", "id": cursor.lastrowid}
@@ -261,7 +276,8 @@ def list_webpage_findings() -> list[dict[str, Any]]:
         rows = conn.execute("""
             SELECT id, source_url, effective_date, population_value,
                    official_source, quoted_source, quoted_source_url,
-                   extracted_at, finding_json
+                   extracted_at, finding_json, submission_type, discovery_source,
+                   search_run_id, search_candidate_id
             FROM webpage_findings
         """).fetchall()
 
@@ -271,6 +287,10 @@ def list_webpage_findings() -> list[dict[str, Any]]:
         finding = json.loads(stored.pop("finding_json"))
         findings.append({
             "ID": stored["id"],
+            "Submission type": stored["submission_type"],
+            "Discovery source": stored["discovery_source"],
+            "Search run ID": stored["search_run_id"],
+            "Search candidate ID": stored["search_candidate_id"],
             "Country": finding.get("geography") or "",
             "Effective date": stored["effective_date"] or "",
             "Population": stored["population_value"],

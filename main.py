@@ -6,6 +6,7 @@ import gradio as gr
 import pandas as pd
 
 from agents import graph
+from research_ui import build_search_tabs
 from tools import (
     PageAccessError, delete_webpage_finding, get_webpage_finding,
     list_country_names, list_webpage_findings, update_webpage_finding,
@@ -158,6 +159,8 @@ if __name__ == "__main__":
                 ]
                 run_button.click(run_pipeline, inputs=prompt, outputs=outputs)
                 prompt.submit(run_pipeline, inputs=prompt, outputs=outputs)
+
+            build_search_tabs()
 
             with gr.Tab("Visualise figures"):
                 visual_country = gr.Dropdown(
