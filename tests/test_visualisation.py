@@ -37,6 +37,17 @@ class VisualisationTests(unittest.TestCase):
             conn.execute('INSERT INTO webpage_findings VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
                          (1, finding['url'], '2026-06-30', 102000, 0, finding['quoted_source'], None,
                           '2026-09-10T00:00:00+00:00', json.dumps(finding)))
+            conn.execute('''CREATE TABLE wpp_release_history (
+                revision INTEGER, Country TEXT, "ISO3 Alpha-code" TEXT, Year INTEGER,
+                "Population 1 Jul" REAL, "Total Births" REAL, "Total Deaths" REAL,
+                "Natural Change" REAL, "Net Migration" REAL,
+                "Total Fertility Rate (live births per woman)" REAL,
+                cadence_years INTEGER, source_url TEXT)''')
+            for revision, years in ((2022, range(2018, 2023)), (2017, range(2010, 2021, 5)), (2012, range(2005, 2016, 5))):
+                for year in years:
+                    conn.execute('INSERT INTO wpp_release_history VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                                 (revision, 'Japan', 'JPN', year, 99, 1, 2, -1, 0, 1.5,
+                                  1 if revision == 2022 else 5, 'https://population.un.org/wpp'))
 
     def tearDown(self):
         self.tempdir.cleanup()
@@ -76,6 +87,18 @@ class VisualisationTests(unittest.TestCase):
             population, flows, _ = visualisation.build_visualisation('Japan', ['population'])
         self.assertTrue(population.data)
         self.assertFalse(flows.data)
+
+    def test_selected_prior_revisions_are_dotted_optional_overlays(self):
+        with patch.object(visualisation, 'get_connection', self.connection), patch.object(visualisation, 'initialise_findings_table'), patch.object(visualisation, 'resolve_country_iso3', return_value='JPN'):
+            population, _, message = visualisation.build_visualisation('Japan', ['population'], alternate_revisions=[2022, 2017, 2012])
+        traces = {trace.name: trace for trace in population.data}
+        self.assertEqual(traces['UN historic'].line.dash, 'solid')
+        self.assertEqual(traces['UN 2022 alternate history'].line.dash, 'dot')
+        self.assertEqual(traces['UN 2017 alternate history'].line.dash, 'dot')
+        self.assertEqual(traces['UN 2012 alternate history'].line.dash, 'dot')
+        self.assertEqual(list(traces['UN 2017 alternate history'].x), ['2015-07-01', '2020-07-01'])
+        self.assertIn('WPP 2024 remains primary', message)
+        self.assertIn('WPP 2022, 2017, 2012', message)
 
     def test_requires_country_before_querying(self):
         population, flows, message = visualisation.build_visualisation('', ['population'])

@@ -9,8 +9,8 @@ wheels/
 # Virtual environments
 .venv
 
-Data_Files/
+Data_Files/*
+!Data_Files/import_wpp_vintages.py
 
 .env
-
 

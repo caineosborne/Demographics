@@ -73,6 +73,16 @@ class FindingStorageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'No stored finding'):
             tools.get_webpage_finding(stored["id"])
 
+    def test_delete_and_block_prevents_the_same_article_returning(self):
+        stored = tools.store_webpage_finding({**self.finding, "url": "http://www.example.test/report?utm_source=search"})
+        canonical = tools.delete_and_block_webpage_finding(stored["id"])
+        self.assertEqual(canonical, "https://example.test/report")
+        self.assertIn(canonical, tools.blocked_source_urls())
+        self.assertEqual(
+            tools.store_webpage_finding({**self.finding, "url": "https://example.test/report"})["status"],
+            "excluded_blocked_source",
+        )
+
     def test_can_delete_one_metric_without_deleting_other_metrics(self):
         finding = {**self.finding, "statistics": {
             "population": {"value": 100}, "births": {"value": 2},
@@ -82,6 +92,19 @@ class FindingStorageTests(unittest.TestCase):
         updated = tools.get_webpage_finding(stored["id"])
         self.assertNotIn("births", updated["statistics"])
         self.assertEqual(updated["statistics"]["population"]["value"], 100)
+
+    def test_legacy_monthly_flows_are_removed_on_database_initialisation(self):
+        legacy = {**self.finding, "statistics": {
+            "births": {"value": 23_111, "time_period": "2026-06"},
+            "deaths": {"value": 27_794, "time_period": "2026-06"},
+        }}
+        stored = tools.store_webpage_finding({**legacy, "statistics": {"births": {"value": 277_332, "time_period": "annual"}}})
+        # Simulate the pre-normalisation payload that was already on disk.
+        with tools.get_connection() as conn:
+            conn.execute("UPDATE webpage_findings SET finding_json = ? WHERE id = ?", (json.dumps(legacy), stored["id"]))
+        tools.initialise_findings_table()
+        with self.assertRaisesRegex(ValueError, "No stored finding"):
+            tools.get_webpage_finding(stored["id"])
 
     def test_iso3_geography_is_normalised_before_storage(self):
         with patch.object(tools, "normalise_country_name", return_value="Japan"):

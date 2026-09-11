@@ -5,9 +5,11 @@ from io import BytesIO
 import sqlite3
 import time
 import json
+import re
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 from bs4 import BeautifulSoup
@@ -21,6 +23,37 @@ DB_PATH = (
     / "Data_Files"
     / "WPP2024_GEN_F01_DEMOGRAPHIC_INDICATORS_COMPACT.sqlite"
 )
+
+
+def initialise_wpp_vintages_table() -> None:
+    """Create the optional, release-specific UN history store.
+
+    This deliberately lives beside, rather than inside, the 2024 `estimates`
+    and `medium_variant` tables.  The latter remain the authoritative source
+    for extraction comparisons and all existing application behaviour.
+    """
+    with get_connection() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS wpp_release_history (
+                revision INTEGER NOT NULL,
+                Country TEXT NOT NULL,
+                "ISO3 Alpha-code" TEXT,
+                Year INTEGER NOT NULL,
+                "Population 1 Jul" REAL,
+                "Total Births" REAL,
+                "Total Deaths" REAL,
+                "Natural Change" REAL,
+                "Net Migration" REAL,
+                "Total Fertility Rate (live births per woman)" REAL,
+                cadence_years INTEGER NOT NULL,
+                source_url TEXT NOT NULL,
+                PRIMARY KEY (revision, Country, Year)
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_wpp_release_history_lookup
+            ON wpp_release_history (revision, "ISO3 Alpha-code", Year)
+        """)
 
 
 # Common article country names which differ from the World Population Prospects
@@ -246,6 +279,94 @@ def initialise_findings_table() -> None:
             CREATE INDEX IF NOT EXISTS idx_webpage_findings_report
             ON webpage_findings (effective_date, population_value)
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS blocked_sources (
+                canonical_url TEXT PRIMARY KEY,
+                original_url TEXT NOT NULL,
+                blocked_at TEXT NOT NULL
+            )
+        """)
+        _purge_legacy_partial_period_metrics(conn)
+
+
+def canonicalise_source_url(url: str) -> str:
+    """Match research deduplication so blocks survive tracking/HTTP variants."""
+    parts = urlsplit(str(url or "").strip())
+    if parts.scheme not in {"http", "https"} or not parts.hostname or parts.username or parts.password:
+        raise ValueError("Expected an HTTP(S) article URL without credentials.")
+    query = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True)
+             if not key.lower().startswith("utm_") and key.lower() not in {"fbclid", "gclid"}]
+    return urlunsplit(("https", parts.hostname.lower().removeprefix("www."), parts.path.rstrip("/") or "/", urlencode(query), ""))
+
+
+def blocked_source_urls() -> set[str]:
+    """Return canonical URLs intentionally excluded by the reviewer."""
+    initialise_findings_table()
+    with get_connection() as conn:
+        return {row[0] for row in conn.execute("SELECT canonical_url FROM blocked_sources")}
+
+
+def delete_and_block_webpage_finding(finding_id: int) -> str:
+    """Delete a finding and prevent the same canonical article from returning."""
+    initialise_findings_table()
+    with get_connection() as conn:
+        row = conn.execute("SELECT source_url FROM webpage_findings WHERE id = ?", (finding_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"No stored finding exists with ID {finding_id}.")
+        canonical_url = canonicalise_source_url(row[0])
+        conn.execute(
+            "INSERT OR REPLACE INTO blocked_sources (canonical_url, original_url, blocked_at) VALUES (?, ?, ?)",
+            (canonical_url, row[0], datetime.now(timezone.utc).isoformat()),
+        )
+        conn.execute("DELETE FROM webpage_findings WHERE id = ?", (finding_id,))
+    return canonical_url
+
+
+def _purge_legacy_partial_period_metrics(conn: sqlite3.Connection) -> None:
+    """Remove pre-normalisation monthly/quarterly flow values from old findings.
+
+    Current ingestion annualizes an explicitly monthly or quarterly source and
+    retains its original cadence in ``source_time_period``.  Older records
+    instead stored their raw partial-period value directly in ``time_period``;
+    those values are neither comparable to annual UN data nor valid chart
+    points, so remove them once from durable storage.
+    """
+    monthly_period = re.compile(r"^\d{4}-(?:0[1-9]|1[0-2])$")
+    flow_keys = {"births", "deaths", "natural_change", "net_overseas_migration"}
+    rows = conn.execute("SELECT id, finding_json FROM webpage_findings").fetchall()
+    for finding_id, payload in rows:
+        try:
+            finding = json.loads(payload)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        statistics = finding.get("statistics")
+        if not isinstance(statistics, dict):
+            continue
+        retained = dict(statistics)
+        changed = False
+        for key in flow_keys:
+            metric = retained.get(key)
+            if not isinstance(metric, dict):
+                continue
+            period = str(metric.get("time_period") or "").strip()
+            if monthly_period.fullmatch(period) or period.casefold() in {"daily", "monthly", "quarterly"}:
+                retained.pop(key, None)
+                changed = True
+        if not changed:
+            continue
+        if any(isinstance(metric, dict) and metric.get("value") is not None for metric in retained.values()):
+            finding["statistics"] = retained
+            source_url, effective_date, population_value, official_source, quoted_source, quoted_source_url, cleaned_payload, classification = _finding_storage_fields(finding)
+            conn.execute(
+                """UPDATE webpage_findings SET effective_date = ?, population_value = ?, official_source = ?,
+                   quoted_source = ?, quoted_source_url = ?, finding_json = ?, source_classification = ? WHERE id = ?""",
+                (effective_date, population_value, official_source, quoted_source, quoted_source_url,
+                 cleaned_payload, classification, finding_id),
+            )
+        else:
+            # No chartable data remains after removal, so do not keep an empty
+            # article record that can be mistaken for a valid estimate.
+            conn.execute("DELETE FROM webpage_findings WHERE id = ?", (finding_id,))
 
 
 def source_classification(finding: dict[str, Any]) -> str:
@@ -274,6 +395,9 @@ def store_webpage_finding(finding: dict[str, Any], provenance: dict | None = Non
     population_value = population.get("value")
 
     with get_connection() as conn:
+        canonical_url = canonicalise_source_url(source_url)
+        if conn.execute("SELECT 1 FROM blocked_sources WHERE canonical_url = ?", (canonical_url,)).fetchone():
+            return {"status": "excluded_blocked_source", "canonical_url": canonical_url}
         duplicate_url = conn.execute(
             "SELECT id FROM webpage_findings WHERE source_url = ?", (source_url,)
         ).fetchone()

@@ -510,6 +510,7 @@ class BossAgent:
                         known[canonical_url(url)] = finding_id
                     except ValueError:
                         pass
+                blocked = {row[0] for row in conn.execute('SELECT canonical_url FROM blocked_sources')}
             seen = {}
             domains_seen = {}
             processed = 0
@@ -518,6 +519,14 @@ class BossAgent:
                 try:
                     check_stopped()
                     url = canonical_url(candidate.get('url', ''))
+                    if url in blocked:
+                        store.update_candidate(
+                            candidate_id, status='excluded_blocked_source', canonical_url=url,
+                            full_reason='Blocked by reviewer; this source will not be fetched or re-added.',
+                        )
+                        record_outcome('excluded_blocked_source')
+                        yield run_id, f'BLOCKED — {candidate.get("title") or url}'
+                        continue
                     if url in seen or url in known:
                         duplicate_candidate_id = seen.get(url)
                         finding_id = known.get(url)
@@ -670,7 +679,14 @@ class BossAgent:
                                     original_access_error=str(original_error),
                                 )
                                 yield run_id, f'Access failed; searching for an alternative source: {retrieval_url}'
-                                alternatives = self.skills.find_alternative_sources(candidate)
+                                try:
+                                    alternatives = self.skills.find_alternative_sources(candidate)
+                                    recovery_search_error = None
+                                except Exception as recovery_error:
+                                    # Recovery must never turn an access issue into a
+                                    # pipeline error when the search provider is down.
+                                    alternatives = []
+                                    recovery_search_error = str(recovery_error)
                                 attempts = []
                                 page = None
                                 for alternative in alternatives:
@@ -694,6 +710,7 @@ class BossAgent:
                                     break
                                 store.update_candidate(
                                     candidate_id, alternative_sources=attempts,
+                                    alternative_search_error=recovery_search_error,
                                     recovered_from_url=candidate['url'] if page else None,
                                     replacement_url=retrieval_url if page else None,
                                 )

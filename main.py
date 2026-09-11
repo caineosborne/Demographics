@@ -9,7 +9,7 @@ import pandas as pd
 from agents import graph
 from research_ui import build_search_tabs
 from tools import (
-    PageAccessError, delete_finding_metric, delete_webpage_finding, get_webpage_finding,
+    PageAccessError, delete_and_block_webpage_finding, delete_finding_metric, delete_webpage_finding, get_webpage_finding,
     list_country_names, list_webpage_findings, update_webpage_finding,
 )
 from visualisation import (
@@ -298,6 +298,16 @@ def remove_database_record(finding_id: int, revision: int):
     return load_database_table(), load_database_country_summary(), revision + 1, "", "", "Record deleted.", ""
 
 
+def remove_database_record_and_block(finding_id: int, revision: int):
+    if finding_id in (None, ""):
+        return load_database_table(), load_database_country_summary(), revision, gr.skip(), gr.skip(), "Select a record first.", gr.skip()
+    try:
+        canonical_url = delete_and_block_webpage_finding(int(finding_id))
+    except ValueError as exc:
+        return load_database_table(), load_database_country_summary(), revision, gr.skip(), gr.skip(), f"Could not block: {exc}", gr.skip()
+    return load_database_table(), load_database_country_summary(), revision + 1, "", "", f"Record deleted and source blocked: {canonical_url}", ""
+
+
 def _visual_target(country, latest):
     return (country or latest or "").strip()
 
@@ -321,9 +331,9 @@ def select_visual_point(evt: gr.SelectData):
 GRAPH_CHOICES = [(label, key) for key, (label, *_rest) in __import__("visualisation").METRICS.items()]
 
 
-def refresh_simple_visualisation(country, latest, metrics):
+def refresh_simple_visualisation(country, latest, metrics, alternate_revisions=None):
     target = _visual_target(country, latest)
-    charts = build_visualisation_for_latest_analysis(country, latest, metrics or [], hidden_by_metric={})
+    charts = build_visualisation_for_latest_analysis(country, latest, metrics or [], hidden_by_metric={}, alternate_revisions=alternate_revisions or [])
     return charts[0], charts[1], gr.update(choices=all_finding_choices(target), value=None), gr.update(choices=[(label, key) for label, key in GRAPH_CHOICES if key in (metrics or [])], value=None), charts[2]
 
 
@@ -349,6 +359,18 @@ def delete_article_everywhere_simple(country, latest, metrics, finding_id, hidde
     charts = build_visualisation_for_latest_analysis(country, latest, metrics or [], hidden_by_metric=hidden_by_metric or {})
     target = _visual_target(country, latest)
     return charts[0], charts[1], gr.update(choices=all_finding_choices(target), value=None), hidden_by_metric or {}, charts[2], f"Article deleted from the database and graphs (finding #{int(finding_id)})."
+
+
+def delete_and_block_article_everywhere_simple(country, latest, metrics, finding_id, hidden_by_metric):
+    if not finding_id:
+        return gr.skip(), gr.skip(), gr.skip(), hidden_by_metric or {}, "Select an article first.", gr.skip()
+    try:
+        canonical_url = delete_and_block_webpage_finding(int(finding_id))
+    except Exception as exc:
+        return gr.skip(), gr.skip(), gr.skip(), hidden_by_metric or {}, f"Could not delete and block article: {exc}", gr.skip()
+    charts = build_visualisation_for_latest_analysis(country, latest, metrics or [], hidden_by_metric=hidden_by_metric or {})
+    target = _visual_target(country, latest)
+    return charts[0], charts[1], gr.update(choices=all_finding_choices(target), value=None), hidden_by_metric or {}, charts[2], f"Article deleted and blocked: {canonical_url}"
 
 
 def delete_metric_from_database(country, latest, metrics, finding_id, metric, hidden_by_metric):
@@ -477,6 +499,12 @@ if __name__ == "__main__":
                         ("Total fertility rate", "total_fertility_rate"),
                     ],
                 )
+                alternate_revisions = gr.CheckboxGroup(
+                    label="Add alternate UN database histories",
+                    choices=[("WPP 2022 — annual", 2022), ("WPP 2017 — five-year", 2017), ("WPP 2012 — five-year", 2012)],
+                    value=[],
+                    info="Optional dotted overlays. WPP 2024 remains the primary solid/dashed series and source for the rest of the app.",
+                )
                 draw_button = gr.Button("Draw charts", variant="primary")
                 chart_status = gr.Markdown()
                 population_chart = gr.Plot(label="Population")
@@ -484,17 +512,19 @@ if __name__ == "__main__":
                 with gr.Row():
                     article_picker = gr.Dropdown(label="Article", choices=[], allow_custom_value=False, scale=2)
                     graph_targets = gr.CheckboxGroup(label="Delete from graphs", choices=GRAPH_CHOICES, value=[key for _label, key in GRAPH_CHOICES], scale=3)
-                    hide_article = gr.Button("Delete for selected graphs")
-                    delete_everywhere = gr.Button("Delete everywhere", variant="stop")
+                    hide_article = gr.Button("Hide for selected graphs (this view)")
+                    delete_everywhere = gr.Button("Delete everywhere")
+                    delete_and_block_everywhere = gr.Button("Delete and block source", variant="stop")
                 article_link = gr.HTML(value="Select an article to open its source.")
                 draw_button.click(
                     refresh_simple_visualisation,
-                    inputs=[visual_country, latest_analysis_country, selected_metrics],
+                    inputs=[visual_country, latest_analysis_country, selected_metrics, alternate_revisions],
                     outputs=[population_chart, flows_chart, article_picker, graph_targets, chart_status],
                 )
                 article_picker.change(select_visual_article, inputs=[visual_country, latest_analysis_country, article_picker], outputs=article_link)
                 hide_article.click(hide_article_from_graphs, inputs=[visual_country, latest_analysis_country, selected_metrics, article_picker, graph_targets, visual_hidden], outputs=[population_chart, flows_chart, visual_hidden, chart_status, article_link])
                 delete_everywhere.click(delete_article_everywhere_simple, inputs=[visual_country, latest_analysis_country, selected_metrics, article_picker, visual_hidden], outputs=[population_chart, flows_chart, article_picker, visual_hidden, chart_status, article_link])
+                delete_and_block_everywhere.click(delete_and_block_article_everywhere_simple, inputs=[visual_country, latest_analysis_country, selected_metrics, article_picker, visual_hidden], outputs=[population_chart, flows_chart, article_picker, visual_hidden, chart_status, article_link])
 
             with gr.Tab("Database") as database_tab:
                 gr.Markdown("### Stored findings\nNewest first. Select any row to inspect or edit the complete record below.")
@@ -533,7 +563,8 @@ if __name__ == "__main__":
                     )
                 with gr.Row(elem_classes="record-actions"):
                     save_record = gr.Button("Save changes", variant="primary")
-                    delete_record = gr.Button("Delete selected record", variant="stop")
+                    delete_record = gr.Button("Delete selected record")
+                    delete_and_block_record = gr.Button("Delete and block source", variant="stop")
                 database_status = gr.Markdown()
                 database_tab.select(refresh_database, inputs=[database_revision, database_country], outputs=[database_table, database_summary, database_revision, record_picker])
                 refresh_database_button.click(refresh_database, inputs=[database_revision, database_country], outputs=[database_table, database_summary, database_revision, record_picker])
@@ -542,5 +573,6 @@ if __name__ == "__main__":
                 record_picker.change(load_database_record, inputs=record_picker, outputs=[selected_record_id, record_json, database_status, record_link])
                 save_record.click(save_database_record, inputs=[selected_record_id, record_json, database_revision], outputs=[database_table, database_summary, database_revision, database_status, record_link])
                 delete_record.click(remove_database_record, inputs=[selected_record_id, database_revision], outputs=[database_table, database_summary, database_revision, selected_record_id, record_json, database_status, record_link])
+                delete_and_block_record.click(remove_database_record_and_block, inputs=[selected_record_id, database_revision], outputs=[database_table, database_summary, database_revision, selected_record_id, record_json, database_status, record_link])
 
     demo.launch(css=APP_CSS)

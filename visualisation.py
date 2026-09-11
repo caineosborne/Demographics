@@ -12,7 +12,10 @@ import plotly.graph_objects as go
 import gradio as gr
 from plotly.subplots import make_subplots
 
-from tools import get_connection, initialise_findings_table, normalise_country_name, resolve_country_iso3
+from tools import (
+    get_connection, initialise_findings_table,
+    normalise_country_name, resolve_country_iso3,
+)
 
 
 METRICS = {
@@ -26,6 +29,11 @@ METRICS = {
         "Live births per woman", 1,
     ),
 }
+
+# Keep every UN vintage on the same visual comparison window.  The full series
+# remains in SQLite for later analysis/imports.
+CHART_START_YEAR = 2014
+CHART_END_YEAR = 2033
 
 
 def _number(value: Any) -> float | None:
@@ -45,8 +53,8 @@ def _empty_figure(title: str, y_axis: str, message: str) -> go.Figure:
 def _un_rows(country: str) -> tuple[list[dict], list[dict]]:
     # The local WPP 2024 revision has historical estimates through 2023 and
     # projections from 2024. Keep ten annual observations on each side.
-    historic_years = tuple(range(2014, 2024))
-    forecast_years = tuple(range(2024, 2034))
+    historic_years = tuple(range(CHART_START_YEAR, 2024))
+    forecast_years = tuple(range(2024, CHART_END_YEAR + 1))
     columns = ', '.join(f'"{column}"' for _, column, _, _ in METRICS.values())
     iso3 = resolve_country_iso3(country)
     with get_connection() as conn:
@@ -80,6 +88,43 @@ def _un_rows(country: str) -> tuple[list[dict], list[dict]]:
                 (country, *forecast_years),
             ).fetchall()
     return [dict(row) for row in historic], [dict(row) for row in forecast]
+
+
+def _release_rows(country: str, revisions: list[int] | None) -> dict[int, list[dict]]:
+    """Return selected historical WPP releases without touching 2024 tables."""
+    requested = tuple(sorted({int(revision) for revision in (revisions or []) if int(revision) in {2012, 2017, 2022}}))
+    if not requested:
+        return {}
+    iso3 = resolve_country_iso3(country)
+    placeholders = ",".join("?" for _ in requested)
+    columns = ', '.join(f'"{column}"' for _, column, _, _ in METRICS.values())
+    with get_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        try:
+            if iso3:
+                rows = conn.execute(
+                    f'''SELECT revision, Year, {columns}, cadence_years FROM wpp_release_history
+                        WHERE "ISO3 Alpha-code" = ? AND revision IN ({placeholders})
+                          AND CAST(Year AS INTEGER) BETWEEN ? AND ?
+                        ORDER BY revision DESC, Year''', (iso3, *requested, CHART_START_YEAR, CHART_END_YEAR)
+                ).fetchall()
+            else:
+                rows = []
+            # Earlier WPP releases use UN numeric location codes rather than
+            # ISO3.  Fall back to the stable canonical country label.
+            if not rows:
+                rows = conn.execute(
+                    f'''SELECT revision, Year, {columns}, cadence_years FROM wpp_release_history
+                        WHERE Country = ? AND revision IN ({placeholders})
+                          AND CAST(Year AS INTEGER) BETWEEN ? AND ?
+                        ORDER BY revision DESC, Year''', (country, *requested, CHART_START_YEAR, CHART_END_YEAR)
+                ).fetchall()
+        except sqlite3.OperationalError:
+            return {}
+    result: dict[int, list[dict]] = {revision: [] for revision in requested}
+    for row in rows:
+        result[int(row["revision"])].append(dict(row))
+    return result
 
 
 def _stored_findings(country: str) -> list[dict]:
@@ -190,6 +235,17 @@ def _add_un_trace(
         ), row=row, col=1)
 
 
+VINTAGE_COLORS = {2022: "#6f4e9b", 2017: "#3a8d7d", 2012: "#8b6f47"}
+
+
+def _add_release_trace(figure: go.Figure, rows: list[dict], metric: str, revision: int, row: int, showlegend: bool) -> None:
+    """Overlay a prior UN release, intentionally subordinate to WPP 2024."""
+    _add_un_trace(
+        figure, rows, metric, f"UN {revision} alternate history", "dot",
+        VINTAGE_COLORS[revision], row, showlegend,
+    )
+
+
 def _add_stored_traces(
     figure: go.Figure, findings: list[dict], metric: str, row: int, showlegend: bool,
 ) -> None:
@@ -253,7 +309,7 @@ def _add_stored_traces(
         ), row=row, col=1)
 
 
-def _make_figure(title: str, metrics: list[str], historic: list[dict], forecast: list[dict], findings: list[dict], hidden_by_metric: dict[str, set[int]] | None = None) -> go.Figure:
+def _make_figure(title: str, metrics: list[str], historic: list[dict], forecast: list[dict], release_rows: dict[int, list[dict]], findings: list[dict], hidden_by_metric: dict[str, set[int]] | None = None) -> go.Figure:
     if not metrics:
         return _empty_figure(title, "People", "Select at least one metric.")
     is_small_multiples = len(metrics) > 1
@@ -266,6 +322,8 @@ def _make_figure(title: str, metrics: list[str], historic: list[dict], forecast:
         showlegend = index == 1
         _add_un_trace(figure, historic, metric, "UN historic", "solid", "#4c78a8", index, showlegend)
         _add_un_trace(figure, forecast, metric, "UN forecast", "dash", "#f58518", index, showlegend)
+        for revision in sorted(release_rows, reverse=True):
+            _add_release_trace(figure, release_rows[revision], metric, revision, index, showlegend)
         hidden = (hidden_by_metric or {}).get(metric, set())
         _add_stored_traces(figure, [item for item in findings if item["id"] not in hidden], metric, index, showlegend)
         _, _, unit, scale = METRICS[metric]
@@ -288,7 +346,7 @@ def _make_figure(title: str, metrics: list[str], historic: list[dict], forecast:
     return figure
 
 
-def build_visualisation(country: str, selected_metrics: list[str], population_hidden: list[int] | None = None, flow_hidden: list[int] | None = None, hidden_by_metric: dict[str, list[int]] | None = None):
+def build_visualisation(country: str, selected_metrics: list[str], population_hidden: list[int] | None = None, flow_hidden: list[int] | None = None, hidden_by_metric: dict[str, list[int]] | None = None, alternate_revisions: list[int] | None = None):
     """Return the two requested interactive figures after the user presses draw."""
     entered_country = country.strip()
     if not entered_country:
@@ -301,6 +359,7 @@ def build_visualisation(country: str, selected_metrics: list[str], population_hi
         return _empty_figure("Population in context", "People", message), _empty_figure("Demographic flows in context", "People", message), message
 
     historic, forecast = _un_rows(country)
+    releases = _release_rows(country, alternate_revisions)
     all_findings = _stored_findings(country)
     metric_hidden = {metric: set(values or []) for metric, values in (hidden_by_metric or {}).items()}
     if population_hidden:
@@ -311,21 +370,28 @@ def build_visualisation(country: str, selected_metrics: list[str], population_hi
     if not historic and not forecast:
         message = f"No UN records were found for “{country}”. Use the exact UN country name."
     else:
-        message = f"Showing {len(historic)} UN historical years, {len(forecast)} UN forecast years, and {len(all_findings)} webpage finding(s) for {country}."
+        loaded_releases = [str(revision) for revision in sorted(releases, reverse=True) if releases[revision]]
+        if loaded_releases:
+            alternate_note = f" Alternate histories: WPP {', '.join(loaded_releases)}."
+        elif alternate_revisions:
+            alternate_note = " The selected alternate history data has not been imported yet."
+        else:
+            alternate_note = ""
+        message = f"Showing {len(historic)} UN historical years, {len(forecast)} UN forecast years, and {len(all_findings)} webpage finding(s) for {country}. WPP 2024 remains primary.{alternate_note}"
     population = ["population"] if "population" in selected_metrics else []
     flows = [metric for metric in selected_metrics if metric != "population"]
     return (
-        _make_figure(f"Population in context — {country}", population, historic, forecast, all_findings, metric_hidden),
-        _make_figure(f"Births, deaths, migration and fertility — {country}", flows, historic, forecast, all_findings, metric_hidden),
+        _make_figure(f"Population in context — {country}", population, historic, forecast, releases, all_findings, metric_hidden),
+        _make_figure(f"Births, deaths, migration and fertility — {country}", flows, historic, forecast, releases, all_findings, metric_hidden),
         message,
     )
 
 
 def build_visualisation_for_latest_analysis(
-    country: str, latest_analysis_country: str | None, selected_metrics: list[str], population_hidden: list[int] | None = None, flow_hidden: list[int] | None = None, hidden_by_metric: dict[str, list[int]] | None = None
+    country: str, latest_analysis_country: str | None, selected_metrics: list[str], population_hidden: list[int] | None = None, flow_hidden: list[int] | None = None, hidden_by_metric: dict[str, list[int]] | None = None, alternate_revisions: list[int] | None = None
 ):
     """Use the country from the most recent analysis when no override is entered."""
-    return build_visualisation(country or latest_analysis_country or "", selected_metrics, population_hidden, flow_hidden, hidden_by_metric)
+    return build_visualisation(country or latest_analysis_country or "", selected_metrics, population_hidden, flow_hidden, hidden_by_metric, alternate_revisions)
 
 
 def refresh_visualisation_controls(country: str, latest: str | None, metrics: list[str], population_hidden=None, flow_hidden=None):

@@ -78,6 +78,11 @@ fall back to Requests/Playwright where Tavily cannot provide usable text.
 Publisher bot blocks are retained as `relevant_access_blocked` or
 `unclear_access_blocked`, distinct from a processing error. Full-text review
 remains one article at a time.
+When an article cannot be accessed, the pipeline performs one bounded Tavily
+recovery search using its title and tries up to three distinct replacement URLs.
+The original access error and each attempted replacement are retained on the
+candidate audit record; if none is accessible, the original access-blocked
+outcome remains.
 Full-text uncertainty is retained as `needs_review`, without extracting or
 comparing unsupported facts. You can inspect it and manually submit the URL for
 analysis. Downloaded text is reused for extraction rather than fetched again.
@@ -141,3 +146,10 @@ the UN WPP `Total Fertility Rate (live births per woman)` field, and plotted on
 its own scale rather than as people. The chart country normaliser maps `Taiwan`
 to the WPP label `China, Taiwan Province of China`, so stored Taiwan articles
 now appear with the matching UN series.
+
+Stored findings also have a source-status label derived without changing the
+extraction JSON: **Official publisher**, **Secondary, official source named**,
+or **Secondary, source not named**. The database displays this status; charts
+use diamonds for official publisher pages, circles for attributed secondary
+reporting, and crosses for unattributed secondary reporting, with the detail
+available in each point's hover text.
