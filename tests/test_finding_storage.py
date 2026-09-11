@@ -73,6 +73,16 @@ class FindingStorageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'No stored finding'):
             tools.get_webpage_finding(stored["id"])
 
+    def test_can_delete_one_metric_without_deleting_other_metrics(self):
+        finding = {**self.finding, "statistics": {
+            "population": {"value": 100}, "births": {"value": 2},
+        }}
+        stored = tools.store_webpage_finding(finding)
+        tools.delete_finding_metric(stored["id"], "births")
+        updated = tools.get_webpage_finding(stored["id"])
+        self.assertNotIn("births", updated["statistics"])
+        self.assertEqual(updated["statistics"]["population"]["value"], 100)
+
     def test_iso3_geography_is_normalised_before_storage(self):
         with patch.object(tools, "normalise_country_name", return_value="Japan"):
             stored = tools.store_webpage_finding({**self.finding, "url": "https://example.test/iso", "geography": "JPN"})

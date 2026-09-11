@@ -57,11 +57,16 @@ compared to annual UN totals. Explain date uncertainty.'''
 
 
 class SearchSettings(BaseModel):
-    categories: list[SearchCategory] = Field(default_factory=list, max_length=20)
+    # Bulk gap hunts use one deliberately small search per country.  One-letter
+    # prefixes can contain more than the 20 manually configured categories.
+    categories: list[SearchCategory] = Field(default_factory=list, max_length=100)
     reddit_enabled: bool = True
     reddit_limit: int = Field(default=30, ge=1, le=100)
-    max_candidates: int = Field(default=20, ge=1, le=100)
+    # A bulk gap hunt can retain five results for each of up to 100 countries.
+    # The boss still processes candidates in bounded batches of 20.
+    max_candidates: int = Field(default=20, ge=1, le=500)
     max_per_domain: int = Field(default=2, ge=1, le=10)
+    domain_limit_scope: Literal['run', 'category'] = 'run'
     review_criteria: str = Field(default=CRITERIA, min_length=1)
 
 
@@ -268,6 +273,52 @@ def tavily_extract_articles(urls: list[str]) -> tuple[dict[str, str], dict[str, 
     return pages, failures
 
 
+def tavily_alternative_sources(candidate: dict, limit: int = 3) -> list[dict]:
+    """Find a small, auditable set of replacement pages after access fails.
+
+    This is intentionally a deterministic recovery step rather than another
+    model-led search loop. The original title is normally the most specific
+    available description of the release, and every proposed URL is retained
+    on the original candidate for review.
+    """
+    key = os.getenv('TAVILY_API_KEY')
+    title = str(candidate.get('title') or '').strip()
+    if not key or not title:
+        return []
+    original = canonical_url(str(candidate.get('url') or ''))
+    with requests.post(
+        'https://api.tavily.com/search',
+        headers={'Authorization': f'Bearer {key}'},
+        json={
+            'query': f'"{title[:300]}"', 'topic': 'news', 'search_depth': 'basic',
+            'max_results': limit, 'include_raw_content': False, 'include_answer': False,
+        },
+        timeout=60,
+    ) as response:
+        response.raise_for_status()
+        payload = response.json()
+    alternatives = []
+    seen = {original}
+    for row in payload.get('results', []):
+        url = str(row.get('url') or '')
+        try:
+            canonical = canonical_url(url)
+        except ValueError:
+            continue
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        alternatives.append({
+            'url': url,
+            'canonical_url': canonical,
+            'title': str(row.get('title') or ''),
+            'snippet': str(row.get('content') or ''),
+        })
+        if len(alternatives) >= limit:
+            break
+    return alternatives
+
+
 def reddit_links(limit):
     try:
         return reddit_json_links(limit)
@@ -398,6 +449,7 @@ class ResearchSkills:
     compare: object = compare_finding
     review_full_article: object = review_link
     extract_tavily_articles: object = tavily_extract_articles
+    find_alternative_sources: object = tavily_alternative_sources
 
 
 class BossAgent:
@@ -500,7 +552,8 @@ class BossAgent:
                         yield run_id, f'Excluded before model review: {candidate.get("title") or url} — {issue}'
                         continue
                     domain = publisher_domain(url)
-                    if domains_seen.get(domain, 0) >= settings.max_per_domain:
+                    domain_key = (domain, candidate.get('category')) if settings.domain_limit_scope == 'category' else domain
+                    if domains_seen.get(domain_key, 0) >= settings.max_per_domain:
                         store.update_candidate(
                             candidate_id, status='deferred_domain_limit',
                             full_reason=(f'Publisher limit of {settings.max_per_domain} reached for {domain}.'),
@@ -508,7 +561,7 @@ class BossAgent:
                         record_outcome('deferred_domain_limit')
                         yield run_id, f'Deferred due to publisher limit: {candidate.get("title") or url}'
                         continue
-                    domains_seen[domain] = domains_seen.get(domain, 0) + 1
+                    domains_seen[domain_key] = domains_seen.get(domain_key, 0) + 1
                     if processed >= settings.max_candidates:
                         store.update_candidate(
                             candidate_id, status='deferred_budget',
@@ -599,13 +652,53 @@ class BossAgent:
                     try:
                         check_stopped()
                         retrieval_url = candidate['url']
+                        analysis_candidate = candidate
                         store.update_candidate(candidate_id, status='fetching')
                         yield run_id, f'Fetch and review full article: {retrieval_url}'
                         started = perf_counter()
                         page = tavily_pages.get(url)
                         content_transport = 'tavily_extract' if page else 'direct_fetch'
                         if page is None:
-                            page = self.skills.fetch_article(retrieval_url)
+                            try:
+                                page = self.skills.fetch_article(retrieval_url)
+                            except tools.PageAccessError as original_error:
+                                # A blocked/timeout page should not end the research
+                                # attempt before checking for a syndicated or original
+                                # release. Search once, then try at most three URLs.
+                                store.update_candidate(
+                                    candidate_id, status='searching_alternative',
+                                    original_access_error=str(original_error),
+                                )
+                                yield run_id, f'Access failed; searching for an alternative source: {retrieval_url}'
+                                alternatives = self.skills.find_alternative_sources(candidate)
+                                attempts = []
+                                page = None
+                                for alternative in alternatives:
+                                    alternative_url = alternative['url']
+                                    try:
+                                        page = self.skills.fetch_article(alternative_url)
+                                    except tools.PageAccessError as alternative_error:
+                                        attempts.append({
+                                            **alternative, 'error': str(alternative_error),
+                                        })
+                                        continue
+                                    attempts.append({**alternative, 'status': 'accessed'})
+                                    retrieval_url = alternative_url
+                                    analysis_candidate = {
+                                        **candidate,
+                                        'url': alternative_url,
+                                        'title': alternative.get('title') or candidate.get('title'),
+                                        'snippet': alternative.get('snippet') or candidate.get('snippet'),
+                                    }
+                                    content_transport = 'alternative_source'
+                                    break
+                                store.update_candidate(
+                                    candidate_id, alternative_sources=attempts,
+                                    recovered_from_url=candidate['url'] if page else None,
+                                    replacement_url=retrieval_url if page else None,
+                                )
+                                if page is None:
+                                    raise original_error
                         check_stopped()
                         fetch_seconds = round(perf_counter() - started, 2)
                         model_page = compact_article_text(page)
@@ -618,7 +711,7 @@ class BossAgent:
                             tavily_extract_error=tavily_failures.get(url),
                         )
                         started = perf_counter()
-                        decision = self.skills.review_full_article(candidate, settings.review_criteria, model_page)
+                        decision = self.skills.review_full_article(analysis_candidate, settings.review_criteria, model_page)
                         check_stopped()
                         store.update_candidate(
                             candidate_id, full_decision=decision.decision, full_reason=decision.reason,
@@ -632,7 +725,7 @@ class BossAgent:
                         store.update_candidate(candidate_id, status='extracting')
                         yield run_id, f'Extract useful information (LLM structured extraction): {retrieval_url}'
                         started = perf_counter()
-                        state = self.skills.extract_useful_info({**candidate, 'url': retrieval_url}, model_page, {
+                        state = self.skills.extract_useful_info(analysis_candidate, model_page, {
                             'submission_type': 'automatic', 'discovery_source': candidate['source'],
                             'search_run_id': run_id, 'search_candidate_id': candidate_id,
                         })
@@ -750,7 +843,7 @@ class BossAgent:
             store.log_event(run_id, {'outcomes': outcomes})
             store.finish_run(run_id, status)
             finished = True
-            yield run_id, f'Boss agent: {status}; {len(candidates)} candidates; outcomes: {summary}'
+            yield run_id, f'Boss agent: {status} — RESEARCH RUN FINISHED: {len(candidates)} candidates; outcomes: {summary}'
         finally:
             if not finished:
                 store.finish_run(run_id, 'interrupted')

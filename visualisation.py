@@ -9,6 +9,7 @@ from datetime import date
 from typing import Any
 
 import plotly.graph_objects as go
+import gradio as gr
 from plotly.subplots import make_subplots
 
 from tools import get_connection, initialise_findings_table, normalise_country_name, resolve_country_iso3
@@ -86,15 +87,55 @@ def _stored_findings(country: str) -> list[dict]:
     with get_connection() as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT id, source_url, effective_date, extracted_at, finding_json FROM webpage_findings"
+            "SELECT id, source_url, effective_date, extracted_at, finding_json, "
+            "official_source, quoted_source FROM webpage_findings"
         ).fetchall()
     findings = []
     for row in rows:
         finding = json.loads(row["finding_json"])
         finding_country = normalise_country_name(finding.get("geography") or "")
         if finding_country == country:
-            findings.append({**dict(row), "finding": finding})
+            source_type = (
+                "Official publisher" if row["official_source"]
+                else "Secondary, official source named" if str(row["quoted_source"] or "").strip()
+                else "Secondary, source not named"
+            )
+            findings.append({**dict(row), "source_type": source_type, "finding": finding})
     return findings
+
+
+def finding_choices(country: str, metrics: list[str], hidden: list[int] | None = None) -> list[tuple[str, str]]:
+    """Return review-friendly article choices for the selected chart metrics."""
+    hidden = {int(value) for value in (hidden or [])}
+    choices = []
+    for item in _stored_findings(country):
+        if item["id"] in hidden:
+            continue
+        if not any(_metric_value(item["finding"], metric) is not None for metric in metrics):
+            continue
+        finding = item["finding"]
+        label = f'#{item["id"]} · {item["source_type"]} · {item["effective_date"] or "No date"} · {finding.get("title") or finding.get("source") or "Article"}'
+        choices.append((label[:180], str(item["id"])))
+    return choices
+
+
+def all_finding_choices(country: str) -> list[tuple[str, str]]:
+    return finding_choices(country, list(METRICS), [])
+
+
+def finding_link(country: str, finding_id: str | int | None) -> str:
+    """Render the selected article as a safe link below a chart."""
+    if not finding_id:
+        return "Select a plotted article to open its source."
+    try:
+        target = next(item for item in _stored_findings(country) if item["id"] == int(finding_id))
+    except (TypeError, ValueError, StopIteration):
+        return "The selected article is no longer available."
+    url = target["finding"].get("url") or target.get("source_url") or ""
+    from html import escape
+    if not url.startswith(("http://", "https://")):
+        return "No valid source URL is recorded for this finding."
+    return f'<a href="{escape(url, quote=True)}" target="_blank" rel="noopener">Open source article ↗</a>'
 
 
 def _metric_value(finding: dict, metric: str) -> float | None:
@@ -103,8 +144,9 @@ def _metric_value(finding: dict, metric: str) -> float | None:
         statistic = statistics.get("net_overseas_migration") or statistics.get("net_migration") or {}
     else:
         statistic = statistics.get(metric) or {}
-    if statistic.get("comparison_eligible") is False:
-        return None
+    # Comparison eligibility controls UN matching, not visibility. Monthly,
+    # partial-year, and projected article figures should remain reviewable on
+    # the chart with their period/caveat shown in the hover text.
     value = _number(statistic.get("value"))
     if value is None:
         return None
@@ -157,17 +199,10 @@ def _add_stored_traces(
         effective_date = item["effective_date"]
         if value is not None and effective_date:
             finding = item["finding"]
-            values.append((effective_date, value, item["id"], finding))
+            values.append((effective_date, value, item["id"], finding, item["source_type"]))
     label, _, _, scale = METRICS[metric]
     value_format = ",.2f" if scale == 1 else ",.0f"
     if not values:
-        # Keep the timing cue but do not add a long source annotation to every panel.
-        for item in findings:
-            if item["effective_date"]:
-                figure.add_vline(
-                    x=item["effective_date"], line_dash="dot", line_color="#8c8c8c",
-                    line_width=1, opacity=0.45, row=row, col=1,
-                )
         return
 
     values.sort(key=lambda item: (item[0], item[2]))
@@ -176,17 +211,35 @@ def _add_stored_traces(
     ))[2]
     customdata = [[
         item[3].get("source") or "Unknown source",
+        item[4],
         item[3].get("quoted_source") or "Not quoted",
         item[3].get("url") or "",
         _metric_period(item[3], metric),
+        item[2],
+        ((item[3].get("statistics") or {}).get(metric) or {}).get("comparison_reason") or "Comparable to UN series",
+        item[3].get("title") or "Untitled article",
     ] for item in values]
     figure.add_trace(go.Scatter(
         x=[item[0] for item in values], y=[item[1] for item in values],
-        mode="markers", name="Stored webpage estimate", legendgroup="stored",
-        showlegend=showlegend, marker={"size": 9, "symbol": "diamond", "color": "#2a9d8f"}, customdata=customdata,
-        hovertemplate=(f"{label}<br>%{{x}}: %{{y:{value_format}}}<br>Period: %{{customdata[3]}}<br>"
-                       "Source: %{customdata[0]}<br>Quoted: %{customdata[1]}<br>"
-                       "%{customdata[2]}<extra>Stored estimate</extra>"),
+        mode="markers", name="Stored estimates (◆ official · ● secondary)", legendgroup="stored",
+        showlegend=showlegend,
+        marker={
+            "size": 9,
+            "symbol": [
+                "diamond" if item[4] == "Official publisher" else "circle" if "official source named" in item[4] else "x"
+                for item in values
+            ],
+            "color": [
+                "#167d73" if item[4] == "Official publisher" else "#b7791f" if "official source named" in item[4] else "#6b7280"
+                for item in values
+            ],
+        },
+        customdata=customdata,
+        hovertemplate=(f"{label}<br>%{{x}}: %{{y:{value_format}}}<br>Period: %{{customdata[4]}}<br>"
+                       "Article: %{customdata[7]} (finding #%{customdata[5]})<br>"
+                       "Source: %{customdata[0]}<br>Source status: %{customdata[1]}<br>"
+                       "Quoted: %{customdata[2]}<br>Comparison: %{customdata[6]}<br>"
+                       "%{customdata[3]}<extra>Stored estimate</extra>"),
     ), row=row, col=1)
     latest = [item for item in values if item[2] == latest_id]
     if latest:
@@ -195,11 +248,12 @@ def _add_stored_traces(
             mode="markers", name="Current stored estimate", legendgroup="current",
             showlegend=showlegend, marker={"size": 13, "symbol": "star", "color": "#d1495b"}, customdata=[customdata[values.index(latest[0])]],
             hovertemplate=(f"Current {label.lower()}<br>%{{x}}: %{{y:{value_format}}}<br>"
-                           "Source: %{customdata[0]}<extra>Current stored estimate</extra>"),
+                           "Article: %{customdata[7]} (finding #%{customdata[5]})<br>"
+                           "Source: %{customdata[0]}<br>Source status: %{customdata[1]}<extra>Current stored estimate</extra>"),
         ), row=row, col=1)
 
 
-def _make_figure(title: str, metrics: list[str], historic: list[dict], forecast: list[dict], findings: list[dict]) -> go.Figure:
+def _make_figure(title: str, metrics: list[str], historic: list[dict], forecast: list[dict], findings: list[dict], hidden_by_metric: dict[str, set[int]] | None = None) -> go.Figure:
     if not metrics:
         return _empty_figure(title, "People", "Select at least one metric.")
     is_small_multiples = len(metrics) > 1
@@ -212,7 +266,8 @@ def _make_figure(title: str, metrics: list[str], historic: list[dict], forecast:
         showlegend = index == 1
         _add_un_trace(figure, historic, metric, "UN historic", "solid", "#4c78a8", index, showlegend)
         _add_un_trace(figure, forecast, metric, "UN forecast", "dash", "#f58518", index, showlegend)
-        _add_stored_traces(figure, findings, metric, index, showlegend)
+        hidden = (hidden_by_metric or {}).get(metric, set())
+        _add_stored_traces(figure, [item for item in findings if item["id"] not in hidden], metric, index, showlegend)
         _, _, unit, scale = METRICS[metric]
         figure.update_yaxes(
             title_text=unit,
@@ -225,11 +280,15 @@ def _make_figure(title: str, metrics: list[str], historic: list[dict], forecast:
         legend_title="Series", height=360 if not is_small_multiples else 250 * len(metrics),
         margin={"l": 80, "r": 180, "t": 70, "b": 55},
     )
-    figure.update_xaxes(title_text="Year / effective date", row=len(metrics), col=1)
+    # All series are plotted as dates (UN observations use 1 July; article
+    # findings use their effective date). Formatting the axis as a date while
+    # showing year ticks prevents partial-year article points from looking like
+    # extra annual observations or a broken 2023–2024 scale.
+    figure.update_xaxes(type="date", tickformat="%Y", title_text="Observation date", row=len(metrics), col=1)
     return figure
 
 
-def build_visualisation(country: str, selected_metrics: list[str]):
+def build_visualisation(country: str, selected_metrics: list[str], population_hidden: list[int] | None = None, flow_hidden: list[int] | None = None, hidden_by_metric: dict[str, list[int]] | None = None):
     """Return the two requested interactive figures after the user presses draw."""
     entered_country = country.strip()
     if not entered_country:
@@ -242,22 +301,36 @@ def build_visualisation(country: str, selected_metrics: list[str]):
         return _empty_figure("Population in context", "People", message), _empty_figure("Demographic flows in context", "People", message), message
 
     historic, forecast = _un_rows(country)
-    findings = _stored_findings(country)
+    all_findings = _stored_findings(country)
+    metric_hidden = {metric: set(values or []) for metric, values in (hidden_by_metric or {}).items()}
+    if population_hidden:
+        metric_hidden.setdefault("population", set()).update(population_hidden)
+    for metric in ("births", "deaths", "natural_change", "net_migration", "total_fertility_rate"):
+        if flow_hidden:
+            metric_hidden.setdefault(metric, set()).update(flow_hidden)
     if not historic and not forecast:
         message = f"No UN records were found for “{country}”. Use the exact UN country name."
     else:
-        message = f"Showing {len(historic)} UN historical years, {len(forecast)} UN forecast years, and {len(findings)} stored webpage finding(s) for {country}. The star marks the most recently stored finding that reports each metric."
+        message = f"Showing {len(historic)} UN historical years, {len(forecast)} UN forecast years, and {len(all_findings)} webpage finding(s) for {country}."
     population = ["population"] if "population" in selected_metrics else []
     flows = [metric for metric in selected_metrics if metric != "population"]
     return (
-        _make_figure(f"Population in context — {country}", population, historic, forecast, findings),
-        _make_figure(f"Births, deaths, migration and fertility — {country}", flows, historic, forecast, findings),
+        _make_figure(f"Population in context — {country}", population, historic, forecast, all_findings, metric_hidden),
+        _make_figure(f"Births, deaths, migration and fertility — {country}", flows, historic, forecast, all_findings, metric_hidden),
         message,
     )
 
 
 def build_visualisation_for_latest_analysis(
-    country: str, latest_analysis_country: str | None, selected_metrics: list[str]
+    country: str, latest_analysis_country: str | None, selected_metrics: list[str], population_hidden: list[int] | None = None, flow_hidden: list[int] | None = None, hidden_by_metric: dict[str, list[int]] | None = None
 ):
     """Use the country from the most recent analysis when no override is entered."""
-    return build_visualisation(country or latest_analysis_country or "", selected_metrics)
+    return build_visualisation(country or latest_analysis_country or "", selected_metrics, population_hidden, flow_hidden, hidden_by_metric)
+
+
+def refresh_visualisation_controls(country: str, latest: str | None, metrics: list[str], population_hidden=None, flow_hidden=None):
+    target = country or latest or ""
+    population_metrics = ["population"] if "population" in (metrics or []) else []
+    flow_metrics = [metric for metric in (metrics or []) if metric != "population"]
+    charts = build_visualisation_for_latest_analysis(country, latest, metrics or [], population_hidden or [], flow_hidden or [])
+    return (*charts[:2], gr.update(choices=finding_choices(target, population_metrics, population_hidden), value=None), gr.update(choices=finding_choices(target, flow_metrics, flow_hidden), value=None), charts[2])

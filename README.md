@@ -34,6 +34,23 @@ beyond the run limit are marked `deferred_budget` and can be reviewed later.
 **Save search settings** persists changes without running a search; running also
 saves them. Manual URLs still use **Analyse webpage**.
 
+### Finding data gaps
+
+The **Find missing data** panel in Automatic research has two on-demand modes.
+**Hunt for country data** searches one selected canonical country across the
+previous year, using release-oriented population, vital-statistics and migration
+terms. **Hunt all listed gaps** first selects countries whose names start with a
+prefix (for example `A` or `Viet`) and that have not had a finding *added to the
+local database* in the selected number of days (31 by default), then retrieves
+up to five one-year **news** results per selected country. The bulk controls
+also let you choose the batch size and one-based starting position in the
+eligible list—for example, count `5`, start `1` searches #1–5; start `6`
+searches #6–10. This freshness test is based on the
+time the finding was acquired, not the historical date of the statistic, so a
+newly found older release is not hunted again immediately. Preview the matching
+country list before running the bulk hunt. These modes use an isolated settings
+snapshot and never alter the saved automatic-discovery controls.
+
 Configure `TAVILY_API_KEY` and `OPENROUTER_API_KEY` in `.env`. The default model
 is `google/gemini-2.5-flash-lite`; set `LLM_MODEL` to override it without editing
 the application. The notebook now

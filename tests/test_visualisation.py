@@ -49,13 +49,13 @@ class VisualisationTests(unittest.TestCase):
             population, flows, message = visualisation.build_visualisation(
                 'Japan', list(visualisation.METRICS)
             )
-        self.assertIn('10 UN historical years, 10 UN forecast years, and 1 stored', message)
+        self.assertIn('10 UN historical years, 10 UN forecast years, and 1 webpage finding', message)
         self.assertEqual({trace.name for trace in population.data}, {
             'UN historic', 'UN forecast',
-            'Stored webpage estimate', 'Current stored estimate',
+            'Stored estimates (◆ official · ● secondary)', 'Current stored estimate',
         })
         self.assertEqual({trace.name for trace in flows.data}, {
-            'UN historic', 'UN forecast', 'Stored webpage estimate', 'Current stored estimate',
+            'UN historic', 'UN forecast', 'Stored estimates (◆ official · ● secondary)', 'Current stored estimate',
         })
         self.assertEqual(flows.layout.height, 1250)
 
@@ -63,12 +63,13 @@ class VisualisationTests(unittest.TestCase):
         with patch.object(visualisation, 'get_connection', self.connection), patch.object(visualisation, 'initialise_findings_table'):
             _, flows, _ = visualisation.build_visualisation('Japan', ['total_fertility_rate'])
         historic = next(trace for trace in flows.data if trace.name == 'UN historic')
-        stored = next(trace for trace in flows.data if trace.name == 'Stored webpage estimate')
+        stored = next(trace for trace in flows.data if trace.name == 'Stored estimates (◆ official · ● secondary)')
         self.assertEqual(historic.y[0], 1.5)
         self.assertEqual(stored.y[0], 1.2)
         self.assertEqual(flows.layout.yaxis.title.text, 'Live births per woman')
         self.assertIn('y:,.2f', historic.hovertemplate)
         self.assertIn('y:,.2f', stored.hovertemplate)
+        self.assertIn('Source status', stored.hovertemplate)
 
     def test_metrics_can_be_disabled(self):
         with patch.object(visualisation, 'get_connection', self.connection), patch.object(visualisation, 'initialise_findings_table'):

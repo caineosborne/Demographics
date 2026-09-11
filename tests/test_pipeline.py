@@ -5,11 +5,19 @@ from unittest.mock import MagicMock, patch
 
 # Tests use fake model results and must not load local credentials or tracing.
 with patch('dotenv.load_dotenv'), patch.dict(os.environ, {'OPENROUTER_API_KEY': 'test-key'}):
-    from main import load_database_table_row, run_pipeline
-from tools import PageAccessError
+    from main import delete_article_everywhere_simple, load_database_table_row, run_pipeline
+    from tools import PageAccessError
 
 
 class PipelineTests(unittest.TestCase):
+    def test_delete_everywhere_removes_the_database_finding(self):
+        with patch('main.delete_webpage_finding') as delete, \
+             patch('main.build_visualisation_for_latest_analysis', return_value=('population', 'flows', 'status')):
+            result = delete_article_everywhere_simple('Algeria', None, ['population'], '42', {})
+        delete.assert_called_once_with(42)
+        self.assertIn('database and graphs', result[-1])
+        self.assertIn('#42', result[-1])
+
     def test_database_selection_uses_the_id_in_the_displayed_row(self):
         event = SimpleNamespace(index=[0, 0], row_value=[7, 'Taiwan'])
         with patch('main.load_database_record', return_value=('7', '{}', 'loaded', 'link')) as load:

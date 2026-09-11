@@ -30,6 +30,33 @@ from temporal_context import temporal_context
 load_dotenv(override=True)
 
 
+def _coerce_number(value):
+    """Parse common human-formatted numbers returned by extraction models."""
+    if value is None or isinstance(value, (int, float)):
+        return value
+    if not isinstance(value, str):
+        return None
+    text = value.strip().casefold().replace(',', '')
+    if not text or '%' in text or text in {'near zero', 'n/a', 'unknown'}:
+        return None
+    match = re.search(r'[-+]?\d+(?:\.\d+)?', text)
+    if not match:
+        return None
+    try:
+        number = float(match.group(0))
+    except ValueError:
+        return None
+    multiplier = 1
+    if re.search(r'(?:\b|\d)(billion|bn|b)\b', text):
+        multiplier = 1_000_000_000
+    elif re.search(r'(?:\b|\d)(million|mn|m)\b', text):
+        multiplier = 1_000_000
+    elif re.search(r'(?:\b|\d)(thousand|k)\b', text):
+        multiplier = 1_000
+    result = number * multiplier
+    return int(result) if result.is_integer() else result
+
+
 def _llm_timeout_seconds() -> int:
     try:
         return max(10, int(os.getenv('LLM_TIMEOUT_SECONDS', '120')))
@@ -39,28 +66,22 @@ def _llm_timeout_seconds() -> int:
 
 class Statistic(BaseModel):
     value: Optional[float] = None
+    source_value: Optional[float] = None
     published_date: Optional[str] = None
     period_start: Optional[str] = None
     period_end: Optional[str] = None
     time_period: Optional[str] = None
+    source_time_period: Optional[str] = None
+    conversion_factor: Optional[float] = None
+    normalization_note: Optional[str] = None
     comparison_eligible: bool = True
     comparison_reason: Optional[str] = None
 
-    @field_validator("value", mode="before")
+    @field_validator("value", "source_value", mode="before")
     @classmethod
     def coerce_value(cls, value):
         """Prevent percentage changes or qualitative phrases breaking parsing."""
-        if value is None or isinstance(value, (int, float)):
-            return value
-        if isinstance(value, str):
-            cleaned = value.strip().replace(",", "")
-            if "%" in cleaned or cleaned.lower() in {"near zero", "n/a", "unknown"}:
-                return None
-            try:
-                return float(cleaned)
-            except ValueError:
-                return None
-        return None
+        return _coerce_number(value)
 
 
 class Statistics(BaseModel):
@@ -104,6 +125,23 @@ class MetricComparison(BaseModel):
     period_excluded: bool = False
     period_source_value: Optional[float] = None
     period_reason: Optional[str] = None
+
+    @field_validator(
+        "reported", "un_expected", "difference", "percentage_difference",
+        "outlier_source_value", "period_source_value", mode="before",
+    )
+    @classmethod
+    def coerce_optional_number(cls, value):
+        """Keep explanatory model text out of numeric comparison fields."""
+        if value is None or isinstance(value, (int, float)):
+            return value
+        if isinstance(value, str):
+            cleaned = value.strip().replace(",", "")
+            try:
+                return float(cleaned)
+            except ValueError:
+                return None
+        return None
 
 
 class ComparisonResult(BaseModel):
@@ -201,6 +239,95 @@ FLOW_STATISTICS = {
     'natural_change': 'natural_change',
     'net_migration': 'net_overseas_migration',
 }
+
+# Only these count-based flows can sensibly be converted to an annualized
+# total. Population and fertility are levels/rates, not flows, and must remain
+# exactly as reported.
+ANNUALISABLE_FLOW_STATISTICS = set(FLOW_STATISTICS.values())
+
+
+def _flow_cadence(value: str | None) -> str | None:
+    """Return a canonical cadence when the article explicitly states one."""
+    if not isinstance(value, str):
+        return None
+    period = value.strip().casefold()
+    if re.search(r'\b(?:daily|day|per day|a day)\b', period):
+        return 'daily'
+    if re.search(r'\b(?:monthly|month|per month|a month)\b', period):
+        return 'monthly'
+    if re.search(r'\b(?:quarterly|quarter|per quarter|q[1-4])\b', period):
+        return 'quarterly'
+    if re.search(r'\b(?:annual|annually|yearly|year|per year|a year)\b', period) or re.fullmatch(r'\d{4}', period):
+        return 'annual'
+    return None
+
+
+def _annual_period_days(statistic: Statistic, effective_date: str | None) -> tuple[int, int] | None:
+    """Find the calendar year and number of days used for a daily run rate."""
+    if statistic.period_start and statistic.period_end:
+        try:
+            start = date.fromisoformat(statistic.period_start)
+            end = date.fromisoformat(statistic.period_end)
+            if start.year == end.year and start <= end:
+                year = start.year
+                return year, (date(year, 12, 31) - date(year, 1, 1)).days + 1
+        except ValueError:
+            pass
+    effective_day = _effective_day(effective_date)
+    if effective_day:
+        year = effective_day.year
+        return year, (date(year, 12, 31) - date(year, 1, 1)).days + 1
+    return None
+
+
+def annualize_flow_statistics(result: RelevantResult) -> None:
+    """Convert explicitly daily/monthly/quarterly source flows to annual totals.
+
+    The original figure and cadence remain in the finding so reviewers can
+    distinguish a source-reported value from the deterministic annualization.
+    Nothing outside ``ANNUALISABLE_FLOW_STATISTICS`` is changed.
+    """
+    if not isinstance(result, RelevantResult):
+        return
+    for field in ANNUALISABLE_FLOW_STATISTICS:
+        statistic = getattr(result.statistics, field)
+        if not statistic or statistic.value is None:
+            continue
+        cadence = _flow_cadence(statistic.time_period)
+        if cadence not in {'daily', 'monthly', 'quarterly'}:
+            continue
+
+        if cadence == 'daily':
+            annual_period = _annual_period_days(statistic, result.effective_date)
+            if not annual_period:
+                # Do not invent a year for a daily rate without a usable date.
+                statistic.comparison_eligible = False
+                statistic.comparison_reason = 'Daily source figure has no reporting year to annualize.'
+                continue
+            year, factor = annual_period
+        else:
+            effective_day = _effective_day(result.effective_date)
+            if not effective_day:
+                statistic.comparison_eligible = False
+                statistic.comparison_reason = f'{cadence.title()} source figure has no reporting year to annualize.'
+                continue
+            year = effective_day.year
+            factor = 12 if cadence == 'monthly' else 4
+
+        source_value = statistic.value
+        statistic.source_value = source_value
+        statistic.source_time_period = cadence
+        statistic.conversion_factor = float(factor)
+        statistic.value = source_value * factor
+        statistic.time_period = 'annual'
+        statistic.period_start = f'{year}-01-01'
+        statistic.period_end = f'{year}-12-31'
+        statistic.comparison_eligible = True
+        statistic.comparison_reason = None
+        statistic.normalization_note = (
+            f'Annualized from the article’s {cadence} figure of {source_value:g} '
+            f'using a factor of {factor:g}.'
+        )
 
 
 def is_full_year_statistic(statistic: Statistic) -> bool:
@@ -314,6 +441,14 @@ def research_agent(state: State):
         SystemMessage(content=temporal_context() + """
         Return a RelevantResult with a concise 2–4 sentence summary and only
         facts supported by the retrieved page. Use null for missing values.
+        Set geography to the country described by the extracted demographic
+        figures. If an article discusses a city, state, or local policy but
+        reports national figures, use the country (for example, Japan), not
+        the city or region (for example, Tokyo). If it compares multiple
+        countries, do not concatenate them into one geography; use the country
+        tied to the extracted statistic and explain the other countries in
+        comments. If no single country owns the statistic, leave country-
+        specific statistics unfilled.
         Keep comments to material caveats only. Extract effective_date as the
         reporting date or period-end date in ISO 8601 format when available.
         Set official_source=true only when this page is published by the
@@ -332,6 +467,16 @@ def research_agent(state: State):
         those fields. Put rates and changes in the summary or comments instead.
         When both an absolute count and a rate/change are present, preserve the
         absolute count. If only a rate is reported, leave the count value null.
+        For births, deaths, natural change, and net overseas migration, identify
+        the cadence of each individual figure from its wording, not from a
+        nearby population year or projection table. Set time_period to one of
+        daily, monthly, quarterly, or annual when explicitly stated. A phrase
+        such as "1,397 births per day in 2026" is daily, even though the page
+        also contains 2026 annual population projections. Do not annualize or
+        otherwise change the numeric value yourself: preserve the published
+        figure and cadence; deterministic post-processing will annualize only
+        eligible flow counts. Population, total fertility rate, and every other
+        non-flow statistic must remain exactly as reported.
         """),
         *conversation[1:],
         # Gemini rejects generation requests ending with an assistant turn.
@@ -343,6 +488,7 @@ def research_agent(state: State):
     canonical_country = normalise_country_name(result.geography)
     if canonical_country:
         result.geography = canonical_country
+    annualize_flow_statistics(result)
     mark_partial_periods(result)
     finding = result.model_dump(mode="json")
     provenance = state.get("provenance") or {}
@@ -362,18 +508,24 @@ def research_agent(state: State):
             "result": result,
             "storage": {"status": "excluded_unattributed_source", "reason": reason},
         }
-    has_data_point = any(
-        isinstance(metric, dict) and metric.get("value") is not None
+    # Keep the findings database focused on figures that can actually be
+    # reviewed against the UN series. A value explicitly marked ineligible
+    # (for example, an unclear or partial migration period) remains visible in
+    # the audit log but is not persisted as a comparable finding.
+    has_usable_data_point = any(
+        isinstance(metric, dict)
+        and metric.get("value") is not None
+        and metric.get("comparison_eligible", True) is not False
         for metric in (finding.get("statistics") or {}).values()
     )
-    if not has_data_point:
+    if not has_usable_data_point:
         report_activity("[Research agent] excluded: no extractable demographic data points")
         return {
             "messages": new_messages,
             "result": result,
             "storage": {
                 "status": "excluded_no_data",
-                "reason": "No extractable demographic data points; finding was not saved.",
+                "reason": "No usable comparable demographic data points; finding was not saved.",
             },
         }
     storage = store_webpage_finding(finding, provenance=state.get("provenance"))
@@ -442,6 +594,10 @@ def compare_to_un(state: State):
             Identify which lever changed most. Treat net overseas migration
             and UN net migration as comparable only when definitions and
             periods align; explain caveats in notes. Do not use outside data.
+            Numeric fields (reported, un_expected, difference, percentage_difference,
+            outlier_source_value, period_source_value) must contain numbers or
+            null only. Put explanations such as partial-period caveats or
+            metric names in period_reason, outlier_reason, or notes.
             """),
             HumanMessage(content=f"Research JSON:\n{research_json}"),
             HumanMessage(content=f"UN SQL results:\n{json.dumps(un_data, default=str)}"),

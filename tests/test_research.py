@@ -184,6 +184,23 @@ class ResearchTests(unittest.TestCase):
         self.assertIn('Reddit blocked', store.list_runs()[0]['events_json'])
         self.compare.assert_called_once()
 
+    def test_access_failure_uses_an_accessible_alternative_source(self):
+        alternative = 'https://official.example.test/release'
+        self.fetch.side_effect = [tools.PageAccessError('Timed out'), 'Official release text']
+        self.skills.find_alternative_sources = MagicMock(return_value=[{
+            'url': alternative, 'canonical_url': alternative,
+            'title': 'Official release', 'snippet': 'Official figures',
+        }])
+
+        row = self.run_boss([candidate()])[0]
+
+        self.assertEqual(row['status'], 'complete')
+        stored = store.get_candidate(row['id'])['details']
+        self.assertEqual(stored['recovered_from_url'], 'https://example.test/article')
+        self.assertEqual(stored['replacement_url'], alternative)
+        self.assertEqual(stored['alternative_sources'][0]['status'], 'accessed')
+        self.assertEqual(self.extract.call_args.args[0]['url'], alternative)
+
     def test_existing_finding_is_not_downloaded_or_relabelled(self):
         tools.store_webpage_finding({'url': 'https://example.test/article', 'statistics': {}})
         row = self.run_boss([candidate()])[0]
@@ -291,6 +308,48 @@ class ResearchTests(unittest.TestCase):
         )
         self.assertEqual({category['time_range'] for category in settings['categories']}, {'week'})
         self.assertEqual({category['topic'] for category in settings['categories']}, {'news'})
+
+    def test_country_hunt_uses_a_one_year_country_specific_query(self):
+        import research_ui
+
+        with patch.object(research_ui, 'list_country_names', return_value=['Japan']):
+            settings = research_ui.country_hunt_settings('Japan')
+        category = settings['categories'][0]
+        self.assertEqual(category['time_range'], 'year')
+        self.assertEqual(category['topic'], 'news')
+        self.assertIn('Japan', category['query'])
+        self.assertFalse(settings['reddit_enabled'])
+        self.assertEqual(settings['domain_limit_scope'], 'category')
+        self.assertEqual(settings['max_per_domain'], 5)
+
+    def test_bulk_hunt_selects_only_countries_without_a_recent_finding(self):
+        import research_ui
+        from datetime import datetime, timezone
+
+        findings = [
+            {'Country': 'Australia', 'Extracted at (UTC)': datetime.now(timezone.utc).isoformat()},
+            {'Country': 'Austria', 'Extracted at (UTC)': '2020-01-01T00:00:00+00:00'},
+        ]
+        with patch.object(research_ui, 'list_country_names', return_value=['Australia', 'Austria', 'Japan']), \
+             patch.object(research_ui, 'list_webpage_findings', return_value=findings):
+            settings, countries = research_ui.bulk_country_hunt_settings('Aus', 31)
+        self.assertEqual(countries, ['Austria'])
+        self.assertEqual(settings['categories'][0]['name'], 'Gap hunt: Austria')
+        self.assertEqual(settings['categories'][0]['time_range'], 'year')
+        self.assertEqual(settings['categories'][0]['topic'], 'news')
+        self.assertEqual(settings['categories'][0]['max_results'], 5)
+        self.assertEqual(settings['max_candidates'], 5)
+        self.assertEqual(settings['domain_limit_scope'], 'category')
+        self.assertEqual(settings['max_per_domain'], 5)
+
+    def test_bulk_hunt_supports_numbered_batches(self):
+        import research_ui
+
+        matching = [f'Country {index:02d}' for index in range(1, 11)]
+        with patch.object(research_ui, 'countries_missing_recent_data', return_value=matching):
+            settings, countries = research_ui.bulk_country_hunt_settings('C', 31, 5, 6)
+        self.assertEqual(countries, matching[5:10])
+        self.assertEqual(settings['max_candidates'], 25)
 
     def test_candidate_table_names_duplicate_target_and_reason(self):
         import research_ui

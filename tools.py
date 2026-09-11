@@ -41,6 +41,9 @@ COUNTRY_ALIASES = {
     "korea, republic of": "Republic of Korea",
     "sk": "Republic of Korea",
     "turkey": "Türkiye",
+    # Common article labels which differ from the WPP country names.
+    "russia": "Russian Federation",
+    "russian federation": "Russian Federation",
 }
 
 
@@ -225,13 +228,33 @@ def initialise_findings_table() -> None:
             "discovery_source": "TEXT",
             "search_run_id": "TEXT",
             "search_candidate_id": "INTEGER",
+            "source_classification": "TEXT NOT NULL DEFAULT 'secondary_unattributed'",
         }.items():
             if name not in columns:
                 conn.execute(f"ALTER TABLE webpage_findings ADD COLUMN {name} {definition}")
+        # The label is presentation/audit metadata derived from existing fields,
+        # so older records receive the same treatment as new ones.
+        conn.execute("""
+            UPDATE webpage_findings
+            SET source_classification = CASE
+                WHEN official_source THEN 'official_publisher'
+                WHEN quoted_source IS NOT NULL AND trim(quoted_source) <> '' THEN 'secondary_attributed'
+                ELSE 'secondary_unattributed'
+            END
+        """)
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_webpage_findings_report
             ON webpage_findings (effective_date, population_value)
         """)
+
+
+def source_classification(finding: dict[str, Any]) -> str:
+    """Return a display/audit label without changing the extraction contract."""
+    if finding.get("official_source"):
+        return "official_publisher"
+    if str(finding.get("quoted_source") or "").strip():
+        return "secondary_attributed"
+    return "secondary_unattributed"
 
 
 def store_webpage_finding(finding: dict[str, Any], provenance: dict | None = None) -> dict[str, str | int]:
@@ -274,8 +297,9 @@ def store_webpage_finding(finding: dict[str, Any], provenance: dict | None = Non
             """INSERT INTO webpage_findings (
                    source_url, effective_date, population_value, official_source,
                    quoted_source, quoted_source_url, extracted_at, finding_json,
-                   submission_type, discovery_source, search_run_id, search_candidate_id
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   submission_type, discovery_source, search_run_id, search_candidate_id,
+                   source_classification
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 source_url,
                 effective_date,
@@ -289,6 +313,7 @@ def store_webpage_finding(finding: dict[str, Any], provenance: dict | None = Non
                 provenance.get("discovery_source", "manual"),
                 provenance.get("search_run_id"),
                 provenance.get("search_candidate_id"),
+                source_classification(finding),
             ),
         )
         return {"status": "stored", "id": cursor.lastrowid}
@@ -303,7 +328,7 @@ def list_webpage_findings() -> list[dict[str, Any]]:
             SELECT id, source_url, effective_date, population_value,
                    official_source, quoted_source, quoted_source_url,
                    extracted_at, finding_json, submission_type, discovery_source,
-                   search_run_id, search_candidate_id
+                   search_run_id, search_candidate_id, source_classification
             FROM webpage_findings
         """).fetchall()
 
@@ -322,6 +347,7 @@ def list_webpage_findings() -> list[dict[str, Any]]:
             "Population": stored["population_value"],
             "TFR": ((finding.get("statistics") or {}).get("total_fertility_rate") or {}).get("value"),
             "Official source": "Yes" if stored["official_source"] else "No",
+            "Source classification": stored["source_classification"],
             "Source": finding.get("source") or "",
             "Quoted source": stored["quoted_source"] or "",
             "Quoted source URL": stored["quoted_source_url"] or "",
@@ -359,6 +385,7 @@ def _finding_storage_fields(finding: dict[str, Any]) -> tuple:
         finding.get("quoted_source"),
         finding.get("quoted_source_url"),
         json.dumps(finding, sort_keys=True),
+        source_classification(finding),
     )
 
 
@@ -368,7 +395,7 @@ def update_webpage_finding(finding_id: int, finding_json: str) -> None:
         finding = json.loads(finding_json)
     except json.JSONDecodeError as exc:
         raise ValueError(f"The finding JSON is invalid: {exc.msg}.") from exc
-    source_url, effective_date, population_value, official_source, quoted_source, quoted_source_url, payload = _finding_storage_fields(finding)
+    source_url, effective_date, population_value, official_source, quoted_source, quoted_source_url, payload, classification = _finding_storage_fields(finding)
     initialise_findings_table()
     with get_connection() as conn:
         exists = conn.execute("SELECT 1 FROM webpage_findings WHERE id = ?", (finding_id,)).fetchone()
@@ -391,10 +418,10 @@ def update_webpage_finding(finding_id: int, finding_json: str) -> None:
             """UPDATE webpage_findings SET
                    source_url = ?, effective_date = ?, population_value = ?,
                    official_source = ?, quoted_source = ?, quoted_source_url = ?,
-                   finding_json = ?
+                   finding_json = ?, source_classification = ?
                WHERE id = ?""",
             (source_url, effective_date, population_value, official_source,
-             quoted_source, quoted_source_url, payload, finding_id),
+             quoted_source, quoted_source_url, payload, classification, finding_id),
         )
 
 
@@ -405,6 +432,29 @@ def delete_webpage_finding(finding_id: int) -> None:
         cursor = conn.execute("DELETE FROM webpage_findings WHERE id = ?", (finding_id,))
         if cursor.rowcount != 1:
             raise ValueError(f"No stored finding exists with ID {finding_id}.")
+
+
+def delete_finding_metric(finding_id: int, metric: str) -> None:
+    """Remove one metric from a stored finding while preserving its other data."""
+    metric_keys = {
+        'population': 'population',
+        'births': 'births',
+        'deaths': 'deaths',
+        'natural_change': 'natural_change',
+        'net_migration': 'net_overseas_migration',
+        'total_fertility_rate': 'total_fertility_rate',
+    }
+    key = metric_keys.get(str(metric or '').strip())
+    if not key:
+        raise ValueError(f"Unknown finding metric: {metric}.")
+    finding = get_webpage_finding(finding_id)
+    statistics = finding.get('statistics')
+    if not isinstance(statistics, dict) or key not in statistics:
+        raise ValueError(f"Finding #{finding_id} has no {metric} datapoint.")
+    statistics = dict(statistics)
+    statistics.pop(key, None)
+    finding['statistics'] = statistics
+    update_webpage_finding(finding_id, json.dumps(finding, ensure_ascii=False))
 
 
 def normalise_stored_finding_geographies() -> int:
@@ -481,7 +531,10 @@ def normalise_country_name(country_name: str) -> str | None:
 def list_country_names() -> list[str]:
     """List canonical country names for user-interface selectors."""
     return [row["Country"] for row in run_query(
-        "SELECT DISTINCT Country FROM medium_variant ORDER BY Country"
+        '''SELECT DISTINCT Country FROM medium_variant
+           WHERE "ISO3 Alpha-code" IS NOT NULL
+             AND length(trim("ISO3 Alpha-code")) = 3
+           ORDER BY Country'''
     )]
 
 
