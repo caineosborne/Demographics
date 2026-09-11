@@ -6,6 +6,7 @@ import sqlite3
 import time
 import json
 from datetime import datetime, timezone
+from functools import lru_cache
 from typing import Any
 
 import requests
@@ -20,6 +21,27 @@ DB_PATH = (
     / "Data_Files"
     / "WPP2024_GEN_F01_DEMOGRAPHIC_INDICATORS_COMPACT.sqlite"
 )
+
+
+# Common article country names which differ from the World Population Prospects
+# labels. Keep this deliberately small and explicit: these aliases determine
+# which UN series is shown and used for comparison.
+COUNTRY_ALIASES = {
+    "taiwan": "China, Taiwan Province of China",
+    "twn": "China, Taiwan Province of China",
+    "us": "United States of America",
+    "usa": "United States of America",
+    "united states": "United States of America",
+    "united states of america": "United States of America",
+    "uk": "United Kingdom",
+    "gb": "United Kingdom",
+    "gbr": "United Kingdom",
+    "britain": "United Kingdom",
+    "south korea": "Republic of Korea",
+    "korea, republic of": "Republic of Korea",
+    "sk": "Republic of Korea",
+    "turkey": "Türkiye",
+}
 
 
 class PageAccessError(RuntimeError):
@@ -51,8 +73,12 @@ def extract_page_text(html: str | bytes) -> str:
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "nav", "footer", "noscript"]):
         tag.decompose()
-    main = soup.find("main") or soup.find("article") or soup.body or soup
-    text = main.get_text(" ", strip=True)
+    # Some publishers put the article body in sibling sections rather than
+    # inside <main>. Prefer the longest cleaned content container so that a
+    # valid article is not silently truncated just because its markup is
+    # unconventional.
+    containers = [node for node in (soup.find("main"), soup.find("article"), soup.body, soup) if node]
+    text = max((node.get_text(" ", strip=True) for node in containers), key=len, default="")
     # Common successful HTTP responses that contain a challenge or JS shell.
     placeholders = (
         "enable javascript", "javascript is required", "just a moment",
@@ -269,7 +295,7 @@ def store_webpage_finding(finding: dict[str, Any], provenance: dict | None = Non
 
 
 def list_webpage_findings() -> list[dict[str, Any]]:
-    """Return the stored webpage findings in country/date order for debugging."""
+    """Return stored findings with the newest numeric ID first for review."""
     initialise_findings_table()
     with get_connection() as conn:
         conn.row_factory = sqlite3.Row
@@ -294,6 +320,7 @@ def list_webpage_findings() -> list[dict[str, Any]]:
             "Country": finding.get("geography") or "",
             "Effective date": stored["effective_date"] or "",
             "Population": stored["population_value"],
+            "TFR": ((finding.get("statistics") or {}).get("total_fertility_rate") or {}).get("value"),
             "Official source": "Yes" if stored["official_source"] else "No",
             "Source": finding.get("source") or "",
             "Quoted source": stored["quoted_source"] or "",
@@ -302,9 +329,7 @@ def list_webpage_findings() -> list[dict[str, Any]]:
             "Extracted at (UTC)": stored["extracted_at"],
             "Extracted JSON": json.dumps(finding, ensure_ascii=False, sort_keys=True),
         })
-    return sorted(findings, key=lambda finding: (
-        finding["Country"].casefold(), finding["Effective date"], finding["ID"]
-    ))
+    return sorted(findings, key=lambda finding: finding["ID"], reverse=True)
 
 
 def get_webpage_finding(finding_id: int) -> dict[str, Any]:
@@ -410,7 +435,10 @@ def run_query(sql: str, params: tuple = ()) -> list[dict]:
 
 
 def resolve_country_iso3(country_name: str) -> str | None:
-    """Return the database's ISO3 code for an exact country-name match."""
+    """Return the database's ISO3 code for a name, alias, or ISO3 input."""
+    canonical = normalise_country_name(country_name)
+    if not canonical:
+        return None
     sql = '''
         SELECT DISTINCT "ISO3 Alpha-code" AS iso3
         FROM medium_variant
@@ -418,8 +446,19 @@ def resolve_country_iso3(country_name: str) -> str | None:
           AND "ISO3 Alpha-code" IS NOT NULL
           AND "ISO3 Alpha-code" != ''
     '''
-    rows = run_query(sql, (country_name,))
+    rows = run_query(sql, (canonical,))
     return rows[0]["iso3"] if len(rows) == 1 else None
+
+
+@lru_cache(maxsize=1)
+def _country_reference() -> tuple[tuple[str, str], ...]:
+    """Cache the small, static UN country/name-to-ISO reference in-process."""
+    rows = run_query('''
+        SELECT DISTINCT Country, "ISO3 Alpha-code" AS ISO3
+        FROM medium_variant
+        ORDER BY Country
+    ''')
+    return tuple((str(row["Country"]), str(row["ISO3"] or "")) for row in rows)
 
 
 def normalise_country_name(country_name: str) -> str | None:
@@ -427,21 +466,15 @@ def normalise_country_name(country_name: str) -> str | None:
     candidate = country_name.strip().casefold()
     if not candidate:
         return None
+    candidate = COUNTRY_ALIASES.get(candidate, candidate).casefold()
     try:
-        rows = run_query('''
-            SELECT DISTINCT Country, "ISO3 Alpha-code" AS ISO3
-            FROM medium_variant
-            ORDER BY Country
-        ''')
+        rows = _country_reference()
     except sqlite3.OperationalError:
         # Isolated storage tests and manually supplied databases may not include
         # the UN reference tables. Preserve the supplied geography in that case.
         return None
-    matches = [
-        row["Country"] for row in rows
-        if row["Country"].casefold() == candidate
-        or (row["ISO3"] or "").casefold() == candidate
-    ]
+    matches = [name for name, iso3 in rows
+               if name.casefold() == candidate or iso3.casefold() == candidate]
     return matches[0] if len(matches) == 1 else None
 
 
@@ -488,6 +521,7 @@ def get_population_forecast(
             "Net Migration",
             "Total Deaths",
             "Natural Change"
+            , "Total Fertility Rate (live births per woman)"
         FROM "{table_name}"
         WHERE "ISO3 Alpha-code" = ?
           AND Year IN ({year_placeholders})

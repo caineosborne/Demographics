@@ -51,7 +51,7 @@ class FindingStorageTests(unittest.TestCase):
         other_url = {**finding, "url": "https://mirror.test/report"}
         self.assertEqual(tools.store_webpage_finding(other_url)["status"], "stored")
 
-    def test_database_dump_is_sorted_by_country_then_effective_date(self):
+    def test_database_dump_is_sorted_by_descending_numeric_id(self):
         japan_later = {**self.finding, "url": "https://example.test/japan-later", "geography": "Japan"}
         australia = {**self.finding, "url": "https://example.test/australia", "geography": "Australia", "effective_date": "2026-07-01"}
         japan_earlier = {**self.finding, "url": "https://example.test/japan-earlier", "geography": "Japan", "effective_date": "2026-01-01"}
@@ -59,9 +59,9 @@ class FindingStorageTests(unittest.TestCase):
             tools.store_webpage_finding(finding)
         dump = tools.list_webpage_findings()
         self.assertEqual([(row["Country"], row["Effective date"]) for row in dump], [
-            ("Australia", "2026-07-01"), ("Japan", "2026-01-01"), ("Japan", "2026-06-30"),
+            ("Japan", "2026-01-01"), ("Australia", "2026-07-01"), ("Japan", "2026-06-30"),
         ])
-        self.assertIn('"geography": "Japan"', dump[1]["Extracted JSON"])
+        self.assertIn('"geography": "Japan"', dump[0]["Extracted JSON"])
 
     def test_can_edit_and_delete_a_selected_record(self):
         stored = tools.store_webpage_finding({**self.finding, "geography": "Japan"})

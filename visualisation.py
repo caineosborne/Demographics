@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import date
 from typing import Any
@@ -10,15 +11,19 @@ from typing import Any
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from tools import get_connection, initialise_findings_table, normalise_country_name
+from tools import get_connection, initialise_findings_table, normalise_country_name, resolve_country_iso3
 
 
 METRICS = {
-    "population": ("Population", "Population 1 Jul"),
-    "births": ("Births", "Total Births"),
-    "deaths": ("Deaths", "Total Deaths"),
-    "natural_change": ("Natural change", "Natural Change"),
-    "net_migration": ("Net migration", "Net Migration"),
+    "population": ("Population", "Population 1 Jul", "People", 1_000),
+    "births": ("Births", "Total Births", "People", 1_000),
+    "deaths": ("Deaths", "Total Deaths", "People", 1_000),
+    "natural_change": ("Natural change", "Natural Change", "People", 1_000),
+    "net_migration": ("Net migration", "Net Migration", "People", 1_000),
+    "total_fertility_rate": (
+        "Total fertility rate", "Total Fertility Rate (live births per woman)",
+        "Live births per woman", 1,
+    ),
 }
 
 
@@ -41,21 +46,38 @@ def _un_rows(country: str) -> tuple[list[dict], list[dict]]:
     # projections from 2024. Keep ten annual observations on each side.
     historic_years = tuple(range(2014, 2024))
     forecast_years = tuple(range(2024, 2034))
-    columns = ', '.join(f'"{column}"' for _, column in METRICS.values())
+    columns = ', '.join(f'"{column}"' for _, column, _, _ in METRICS.values())
+    iso3 = resolve_country_iso3(country)
     with get_connection() as conn:
         conn.row_factory = sqlite3.Row
-        historic = conn.execute(
-            f'''SELECT Year, {columns} FROM estimates
-                WHERE Country = ? AND CAST(Year AS INTEGER) IN ({','.join('?' * len(historic_years))})
-                ORDER BY CAST(Year AS INTEGER)''',
-            (country, *historic_years),
-        ).fetchall()
-        forecast = conn.execute(
-            f'''SELECT Year, {columns} FROM medium_variant
-                WHERE Country = ? AND CAST(Year AS INTEGER) IN ({','.join('?' * len(forecast_years))})
-                ORDER BY CAST(Year AS INTEGER)''',
-            (country, *forecast_years),
-        ).fetchall()
+        has_iso = any(row[1] == "ISO3 Alpha-code" for row in conn.execute("PRAGMA table_info(estimates)"))
+        if has_iso and iso3:
+            historic = conn.execute(
+                f'''SELECT Year, {columns} FROM estimates
+                    WHERE "ISO3 Alpha-code" = ? AND CAST(Year AS INTEGER) IN ({','.join('?' * len(historic_years))})
+                    ORDER BY CAST(Year AS INTEGER)''',
+                (iso3, *historic_years),
+            ).fetchall()
+            forecast = conn.execute(
+                f'''SELECT Year, {columns} FROM medium_variant
+                    WHERE "ISO3 Alpha-code" = ? AND CAST(Year AS INTEGER) IN ({','.join('?' * len(forecast_years))})
+                    ORDER BY CAST(Year AS INTEGER)''',
+                (iso3, *forecast_years),
+            ).fetchall()
+        else:
+            # Small isolated databases used by callers may only contain names.
+            historic = conn.execute(
+                f'''SELECT Year, {columns} FROM estimates
+                    WHERE Country = ? AND CAST(Year AS INTEGER) IN ({','.join('?' * len(historic_years))})
+                    ORDER BY CAST(Year AS INTEGER)''',
+                (country, *historic_years),
+            ).fetchall()
+            forecast = conn.execute(
+                f'''SELECT Year, {columns} FROM medium_variant
+                    WHERE Country = ? AND CAST(Year AS INTEGER) IN ({','.join('?' * len(forecast_years))})
+                    ORDER BY CAST(Year AS INTEGER)''',
+                (country, *forecast_years),
+            ).fetchall()
     return [dict(row) for row in historic], [dict(row) for row in forecast]
 
 
@@ -81,7 +103,22 @@ def _metric_value(finding: dict, metric: str) -> float | None:
         statistic = statistics.get("net_overseas_migration") or statistics.get("net_migration") or {}
     else:
         statistic = statistics.get(metric) or {}
-    return _number(statistic.get("value"))
+    if statistic.get("comparison_eligible") is False:
+        return None
+    value = _number(statistic.get("value"))
+    if value is None:
+        return None
+    if metric == "population":
+        # A common extraction error is storing a reported change as the total.
+        # Keep the original evidence, but do not plot a misleading point.
+        text = f"{finding.get('title') or ''} {finding.get('summary') or ''}".casefold()
+        if re.search(r"(?:increase|decrease|change|gain|loss)\s+(?:of|by)\s+(?:approximately\s+)?[\d,.]+\s*(?:million|m)", text):
+            return None
+        # Articles often report population in millions while the UN series is
+        # in people. Convert the unambiguous small values at chart time.
+        if value < 10_000 and re.search(r"\bmillions?\b", text):
+            return value * 1_000_000
+    return value
 
 
 def _metric_period(finding: dict, metric: str) -> str:
@@ -97,16 +134,17 @@ def _add_un_trace(
     figure: go.Figure, rows: list[dict], metric: str, name: str, dash: str,
     color: str, row: int, showlegend: bool,
 ) -> None:
-    label, column = METRICS[metric]
+    label, column, _, scale = METRICS[metric]
+    value_format = ",.2f" if scale == 1 else ",.0f"
     values = [(f'{int(row["Year"])}-07-01', _number(row[column])) for row in rows]
-    values = [(year, value * 1_000) for year, value in values if value is not None]
+    values = [(year, value * scale) for year, value in values if value is not None]
     if values:
         figure.add_trace(go.Scatter(
             x=[year for year, _ in values], y=[value for _, value in values],
             mode="lines+markers", name=name, legendgroup=name, showlegend=showlegend,
             line={"dash": dash, "color": color, "width": 2},
             marker={"size": 6, "color": color},
-            hovertemplate=f"{label}<br>%{{x}}: %{{y:,.0f}}<extra>{name}</extra>",
+            hovertemplate=f"{label}<br>%{{x}}: %{{y:{value_format}}}<extra>{name}</extra>",
         ), row=row, col=1)
 
 
@@ -120,7 +158,8 @@ def _add_stored_traces(
         if value is not None and effective_date:
             finding = item["finding"]
             values.append((effective_date, value, item["id"], finding))
-    label = METRICS[metric][0]
+    label, _, _, scale = METRICS[metric]
+    value_format = ",.2f" if scale == 1 else ",.0f"
     if not values:
         # Keep the timing cue but do not add a long source annotation to every panel.
         for item in findings:
@@ -145,7 +184,7 @@ def _add_stored_traces(
         x=[item[0] for item in values], y=[item[1] for item in values],
         mode="markers", name="Stored webpage estimate", legendgroup="stored",
         showlegend=showlegend, marker={"size": 9, "symbol": "diamond", "color": "#2a9d8f"}, customdata=customdata,
-        hovertemplate=(f"{label}<br>%{{x}}: %{{y:,.0f}}<br>Period: %{{customdata[3]}}<br>"
+        hovertemplate=(f"{label}<br>%{{x}}: %{{y:{value_format}}}<br>Period: %{{customdata[3]}}<br>"
                        "Source: %{customdata[0]}<br>Quoted: %{customdata[1]}<br>"
                        "%{customdata[2]}<extra>Stored estimate</extra>"),
     ), row=row, col=1)
@@ -155,7 +194,7 @@ def _add_stored_traces(
             x=[item[0] for item in latest], y=[item[1] for item in latest],
             mode="markers", name="Current stored estimate", legendgroup="current",
             showlegend=showlegend, marker={"size": 13, "symbol": "star", "color": "#d1495b"}, customdata=[customdata[values.index(latest[0])]],
-            hovertemplate=(f"Current {label.lower()}<br>%{{x}}: %{{y:,.0f}}<br>"
+            hovertemplate=(f"Current {label.lower()}<br>%{{x}}: %{{y:{value_format}}}<br>"
                            "Source: %{customdata[0]}<extra>Current stored estimate</extra>"),
         ), row=row, col=1)
 
@@ -174,7 +213,13 @@ def _make_figure(title: str, metrics: list[str], historic: list[dict], forecast:
         _add_un_trace(figure, historic, metric, "UN historic", "solid", "#4c78a8", index, showlegend)
         _add_un_trace(figure, forecast, metric, "UN forecast", "dash", "#f58518", index, showlegend)
         _add_stored_traces(figure, findings, metric, index, showlegend)
-        figure.update_yaxes(title_text="People", tickformat=",", row=index, col=1)
+        _, _, unit, scale = METRICS[metric]
+        figure.update_yaxes(
+            title_text=unit,
+            tickformat=("," if scale == 1_000 else ".2f"),
+            row=index,
+            col=1,
+        )
     figure.update_layout(
         title=title, template="plotly_white", hovermode="closest",
         legend_title="Series", height=360 if not is_small_multiples else 250 * len(metrics),
@@ -206,7 +251,7 @@ def build_visualisation(country: str, selected_metrics: list[str]):
     flows = [metric for metric in selected_metrics if metric != "population"]
     return (
         _make_figure(f"Population in context — {country}", population, historic, forecast, findings),
-        _make_figure(f"Births, deaths, natural change and migration — {country}", flows, historic, forecast, findings),
+        _make_figure(f"Births, deaths, migration and fertility — {country}", flows, historic, forecast, findings),
         message,
     )
 

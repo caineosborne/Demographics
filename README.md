@@ -24,12 +24,19 @@ Open **Automatic research**, edit the category table, then click **Search and
 analyse**. The defaults request up to 30 Tavily results across population,
 births/deaths and migration, plus external links from the newest 30 r/Natalism
 submissions. These are retrieval limits, not guaranteed numbers of relevant
-articles. Add/delete category rows and change query, topic, count, time range,
-search depth and domain filters. The relevance criteria are editable too.
+articles. Add/delete category rows and change query, topic, count, search depth
+and domain filters. The search-window dropdown applies one window
+to every Tavily category and defaults to the previous 24 hours. The relevance
+criteria are editable too.
+The **Maximum unique articles to process** setting bounds expensive page fetches
+and model calls. Every discovered link still appears in Search results; links
+beyond the run limit are marked `deferred_budget` and can be reviewed later.
 **Save search settings** persists changes without running a search; running also
 saves them. Manual URLs still use **Analyse webpage**.
 
-Configure `TAVILY_API_KEY` and `OPENROUTER_API_KEY` in `.env`. The notebook now
+Configure `TAVILY_API_KEY` and `OPENROUTER_API_KEY` in `.env`. The default model
+is `google/gemini-2.5-flash-lite`; set `LLM_MODEL` to override it without editing
+the application. The notebook now
 reads the same Tavily environment variable. Search parameters follow the
 [Tavily Search API](https://docs.tavily.com/documentation/api-reference/endpoint/search):
 1–20 results per category in this UI; advanced depth costs more than basic.
@@ -44,10 +51,25 @@ errors while Tavily processing continues.
 The bounded boss coordinator in `research.py` delegates to reusable research
 skills: extract links → review summary → fetch and review full text → extract
 facts → existing UN comparison agent. Summary decisions are relevant,
-irrelevant, or unclear; relevant and unclear both trigger full-text fetching.
+irrelevant, or unclear. `unclear` is reserved for a source that plausibly has
+national demographic figures but cannot be decided from its snippet; clearly
+off-topic results stop before download. Eligible search summaries are reviewed
+in batches of up to 20 and returned with their individual candidate IDs,
+reducing model round trips while retaining one decision and reason per article.
+Eligible Tavily links are extracted in batches before direct retrieval, then
+fall back to Requests/Playwright where Tavily cannot provide usable text.
+Publisher bot blocks are retained as `relevant_access_blocked` or
+`unclear_access_blocked`, distinct from a processing error. Full-text review
+remains one article at a time.
 Full-text uncertainty is retained as `needs_review`, without extracting or
 comparing unsupported facts. You can inspect it and manually submit the URL for
 analysis. Downloaded text is reused for extraction rather than fetched again.
+Long articles are kept in the audit but a bounded, evidence-focused extract is
+sent to the model for the full-text decision and extraction. This reduces token
+use without losing the original text for troubleshooting. The UN lookup is
+deterministic from the normalised country and effective date. It retrieves the
+reported and following year, then identifies the closest available 1 January or
+1 July population observation before the comparison call.
 The boss controls routing and budgets in code; model decisions are limited to
 relevance, extraction and comparison. No scheduling or unbounded tool loop is
 introduced.
@@ -57,8 +79,9 @@ outcomes. Select a run, then inspect a candidate ID for the original provider
 payload, full text, both decisions/reasons, extraction, storage result and UN
 comparison. Empty and failed searches are visible in the run history too.
 Tracking parameters/fragments are removed for deduplication. Repeated URLs are
-recorded with links to their original candidate or stored finding. The existing
-finding/report deduplication rules remain in effect.
+shown as `🔁 DUPLICATE` with an explanation and the ID of their original
+candidate or stored finding. The existing finding/report deduplication rules
+remain in effect.
 
 SQLite tables in the existing demographics database:
 
@@ -79,9 +102,25 @@ Pass a `ResearchSkills` instance to replace review, fetch, extraction or compari
 without changing routing or persistence. These are application-level Python
 skills, independent of Codex's editor skills.
 
-Runs execute sequentially with one automatic run at a time per app process.
-Errors are isolated per provider/article. Closing a running generator records
-`interrupted`; a hard process crash may leave a run marked `running`. There is no
-automatic resume. Known stored URLs are skipped on later runs; use manual URL
-analysis to re-run a comparison. Search history shows the latest 100 runs and
-1,000 candidates per view; the complete history remains in SQLite.
+Runs execute in a background worker, sequentially with one automatic run at a
+time per app process. Browser navigation, refreshes and temporary disconnects do
+not stop that worker. The Automatic research table polls SQLite every two
+seconds; Search results polls every five seconds and can reconnect to a running
+job after a page reload. **Stop current run** signals the worker between stages
+and records `interrupted`; in-flight model calls use the `LLM_TIMEOUT_SECONDS`
+setting (120 seconds by default) so a provider cannot hang the run indefinitely.
+On application startup, runs left as `running` or `stopping` by a previous
+process are recorded as interrupted with a recovery event. There is no automatic
+resume after the Python process itself stops. Known stored URLs are skipped on
+later runs; use manual URL analysis to re-run a comparison. Search history shows
+the latest 100 runs and 1,000 candidates per view; the complete history remains
+in SQLite.
+
+## Fertility and country labels
+
+The extraction, comparison and charts support `total_fertility_rate`, measured
+in live births per woman. It is stored as a separate statistic, compared with
+the UN WPP `Total Fertility Rate (live births per woman)` field, and plotted on
+its own scale rather than as people. The chart country normaliser maps `Taiwan`
+to the WPP label `China, Taiwan Province of China`, so stored Taiwan articles
+now appear with the matching UN series.

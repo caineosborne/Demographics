@@ -1,14 +1,22 @@
 import unittest
 import os
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 # Tests use fake model results and must not load local credentials or tracing.
 with patch('dotenv.load_dotenv'), patch.dict(os.environ, {'OPENROUTER_API_KEY': 'test-key'}):
-    from main import run_pipeline
+    from main import load_database_table_row, run_pipeline
 from tools import PageAccessError
 
 
 class PipelineTests(unittest.TestCase):
+    def test_database_selection_uses_the_id_in_the_displayed_row(self):
+        event = SimpleNamespace(index=[0, 0], row_value=[7, 'Taiwan'])
+        with patch('main.load_database_record', return_value=('7', '{}', 'loaded', 'link')) as load:
+            result = load_database_table_row(event)
+        load.assert_called_once_with(7)
+        self.assertEqual(result[0], '7')
+
     def test_status_stream_and_original_outputs(self):
         research = MagicMock()
         research.model_dump.return_value = {'summary': 'Summary', 'comments': None, 'title': 'Article'}

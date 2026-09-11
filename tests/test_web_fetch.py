@@ -23,6 +23,12 @@ class FetchTests(unittest.TestCase):
             self.assertEqual(get_page_text.invoke({'url': 'https://example.test'}), 'Population 100')
             browser.assert_not_called()
 
+    def test_requests_keeps_article_text_outside_main(self):
+        html = b'<body><main>Navigation shell</main><section><article>National births were 100.</article></section></body>'
+        with patch('tools.requests.get', return_value=self.response(html)), patch('tools.fetch_with_playwright') as browser:
+            self.assertIn('National births were 100.', get_page_text.invoke({'url': 'https://example.test'}))
+            browser.assert_not_called()
+
     def test_request_errors_fall_back(self):
         for error in (requests.Timeout('timeout'), requests.ConnectionError('offline'), requests.HTTPError('403')):
             with self.subTest(error=error), patch('tools.requests.get', side_effect=error), patch(

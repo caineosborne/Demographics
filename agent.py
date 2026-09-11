@@ -29,6 +29,8 @@ llm = ChatOpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=api_key,
     model="qwen/qwen3.7-flash",
+    timeout=max(10, int(os.getenv('LLM_TIMEOUT_SECONDS', '120'))),
+    max_retries=0,
 )
 
 llm_with_tools = llm.bind_tools(tools)

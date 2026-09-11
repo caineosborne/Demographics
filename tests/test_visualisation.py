@@ -13,13 +13,13 @@ class VisualisationTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.tempdir.name) / "visualisation.sqlite"
         with sqlite3.connect(self.db_path) as conn:
-            columns = ', '.join(f'"{column}" TEXT' for _, column in visualisation.METRICS.values())
+            columns = ', '.join(f'"{column}" TEXT' for _, column, _, _ in visualisation.METRICS.values())
             for table in ("estimates", "medium_variant"):
                 conn.execute(f'CREATE TABLE {table} (Country TEXT, Year TEXT, {columns})')
             for year in range(2014, 2024):
-                conn.execute('INSERT INTO estimates VALUES (?, ?, ?, ?, ?, ?, ?)', ('Japan', str(year), '100', '1', '2', '-1', '0'))
+                conn.execute('INSERT INTO estimates VALUES (?, ?, ?, ?, ?, ?, ?, ?)', ('Japan', str(year), '100', '1', '2', '-1', '0', '1.5'))
             for year in range(2024, 2034):
-                conn.execute('INSERT INTO medium_variant VALUES (?, ?, ?, ?, ?, ?, ?)', ('Japan', str(year), '101', '1.1', '2.1', '-1', '-0.1'))
+                conn.execute('INSERT INTO medium_variant VALUES (?, ?, ?, ?, ?, ?, ?, ?)', ('Japan', str(year), '101', '1.1', '2.1', '-1', '-0.1', '1.4'))
             conn.execute('''CREATE TABLE webpage_findings (
                 id INTEGER PRIMARY KEY, source_url TEXT, effective_date TEXT,
                 population_value REAL, official_source INTEGER, quoted_source TEXT,
@@ -31,6 +31,7 @@ class VisualisationTests(unittest.TestCase):
                     'population': {'value': 102000}, 'births': {'value': 1000},
                     'deaths': {'value': 2000}, 'natural_change': {'value': -1000},
                     'net_overseas_migration': {'value': 200},
+                    'total_fertility_rate': {'value': 1.2},
                 },
             }
             conn.execute('INSERT INTO webpage_findings VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
@@ -56,7 +57,18 @@ class VisualisationTests(unittest.TestCase):
         self.assertEqual({trace.name for trace in flows.data}, {
             'UN historic', 'UN forecast', 'Stored webpage estimate', 'Current stored estimate',
         })
-        self.assertEqual(flows.layout.height, 1000)
+        self.assertEqual(flows.layout.height, 1250)
+
+    def test_tfr_uses_births_per_woman_without_people_scaling(self):
+        with patch.object(visualisation, 'get_connection', self.connection), patch.object(visualisation, 'initialise_findings_table'):
+            _, flows, _ = visualisation.build_visualisation('Japan', ['total_fertility_rate'])
+        historic = next(trace for trace in flows.data if trace.name == 'UN historic')
+        stored = next(trace for trace in flows.data if trace.name == 'Stored webpage estimate')
+        self.assertEqual(historic.y[0], 1.5)
+        self.assertEqual(stored.y[0], 1.2)
+        self.assertEqual(flows.layout.yaxis.title.text, 'Live births per woman')
+        self.assertIn('y:,.2f', historic.hovertemplate)
+        self.assertIn('y:,.2f', stored.hovertemplate)
 
     def test_metrics_can_be_disabled(self):
         with patch.object(visualisation, 'get_connection', self.connection), patch.object(visualisation, 'initialise_findings_table'):
@@ -82,3 +94,11 @@ class VisualisationTests(unittest.TestCase):
         self.assertIn('for Japan', message)
         self.assertIn('UN historic', {trace.name for trace in population.data})
         self.assertIn('Current stored estimate', {trace.name for trace in population.data})
+
+    def test_population_millions_are_scaled_and_changes_are_not_plotted_as_totals(self):
+        millions = {'title': 'Population reaches 342 million', 'summary': 'The population was 342.28 million.',
+                    'statistics': {'population': {'value': 342.28}}}
+        change = {'title': 'Population increase by 21.5 million', 'summary': 'An increase by 21.5 million is expected.',
+                  'statistics': {'population': {'value': 21500000}}}
+        self.assertEqual(visualisation._metric_value(millions, 'population'), 342280000)
+        self.assertIsNone(visualisation._metric_value(change, 'population'))

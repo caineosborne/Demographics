@@ -37,10 +37,16 @@ def save_settings(settings):
 
 
 def load_settings(default):
+    """Load saved controls, adding defaults introduced by newer app versions."""
     initialise()
     with tools.get_connection() as conn:
         row = conn.execute('SELECT settings_json FROM research_settings WHERE id = 1').fetchone()
-    return json.loads(row[0]) if row else default
+    if not row:
+        return default
+    saved = json.loads(row[0])
+    if not isinstance(saved, dict):
+        return default
+    return {**default, **saved}
 
 
 def start_run(settings):
@@ -55,6 +61,22 @@ def start_run(settings):
 def finish_run(run_id, status):
     with tools.get_connection() as conn:
         conn.execute('UPDATE search_runs SET status = ?, finished_at = ? WHERE id = ?', (status, now(), run_id))
+
+
+def recover_orphaned_runs():
+    """Close runs left as running when the previous app process disappeared."""
+    initialise()
+    with tools.get_connection() as conn:
+        rows = conn.execute("SELECT id, events_json FROM search_runs WHERE status IN ('running', 'stopping')").fetchall()
+        for run_id, events_json in rows:
+            events = json.loads(events_json or '[]')
+            events.append({'at': now(), 'event': 'recovered_orphan',
+                           'message': 'Marked interrupted when the application started.'})
+            conn.execute(
+                'UPDATE search_runs SET status = ?, finished_at = ?, events_json = ? WHERE id = ?',
+                ('interrupted', now(), json.dumps(events), run_id),
+            )
+    return len(rows)
 
 
 def log_event(run_id, event):
@@ -87,13 +109,23 @@ def list_runs():
         return [dict(row) for row in conn.execute('SELECT * FROM search_runs ORDER BY started_at DESC LIMIT 100')]
 
 
+def get_run(run_id):
+    initialise()
+    with tools.get_connection() as conn:
+        conn.row_factory = tools.sqlite3.Row
+        row = conn.execute('SELECT * FROM search_runs WHERE id = ?', (run_id,)).fetchone()
+    return dict(row) if row else None
+
+
 def list_candidates(run_id=None):
     initialise()
     with tools.get_connection() as conn:
         conn.row_factory = tools.sqlite3.Row
         rows = conn.execute('SELECT * FROM search_candidates' + (' WHERE run_id = ?' if run_id else '') + ' ORDER BY id DESC LIMIT 1000', (run_id,) if run_id else ()).fetchall()
     return [{**{key: value for key, value in dict(row).items() if key != 'details_json'}, **{key: value for key, value in json.loads(row['details_json']).items()
-                           if key in {'title', 'snippet', 'summary_decision', 'summary_reason', 'full_decision', 'full_reason', 'error', 'finding_id'}}}
+                           if key in {'title', 'snippet', 'summary_decision', 'summary_reason', 'full_decision',
+                                      'full_reason', 'error', 'finding_id', 'duplicate_candidate_id',
+                                      'duplicate_of', 'duplicate_kind', 'canonical_url'}}}
             for row in rows]
 
 
