@@ -225,11 +225,18 @@ class FindingStorageTests(unittest.TestCase):
             'published_date': (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
         })
         self.assertEqual(stored['status'], 'stored')
-        providers = tools.run_query('SELECT domain, max_age_days, only_when_country_blank_days FROM fallback_providers ORDER BY domain')
+        providers = tools.run_query('SELECT domain, max_age_days, only_when_country_blank_days, allow_undated_seed FROM fallback_providers ORDER BY domain')
         self.assertEqual(providers, [
-            {'domain': 'ourworldindata.org', 'max_age_days': 90, 'only_when_country_blank_days': 90},
-            {'domain': 'statista.com', 'max_age_days': 90, 'only_when_country_blank_days': 90},
+            {'domain': 'ourworldindata.org', 'max_age_days': 90, 'only_when_country_blank_days': 90, 'allow_undated_seed': 1},
+            {'domain': 'statista.com', 'max_age_days': 90, 'only_when_country_blank_days': 90, 'allow_undated_seed': 1},
         ])
+
+    def test_undated_fallback_profile_can_seed_an_empty_country_gap(self):
+        stored = tools.store_webpage_finding({
+            **self.finding, 'url': 'https://ourworldindata.org/profile/population-demography/sweden',
+            'geography': 'Sweden',
+        }, {'submission_type': 'automatic', 'published_date': None})
+        self.assertEqual(stored['status'], 'stored')
 
     def test_fallback_provider_is_excluded_when_country_has_recent_article_data(self):
         tools.store_webpage_finding({**self.finding, 'url': 'https://official.test/japan', 'geography': 'Japan'})

@@ -20,10 +20,12 @@ Run the regression checks with `uv run python -m unittest discover -s tests`.
 
 ## Database storage and Phase 1.1 rollback
 
-The runtime SQLite database is stored under `databases/`. `Data_Files/` is an
-offline source/archive location and is excluded from the production path. The
-runtime path can be overridden explicitly with `DEMOGRAPHICS_DB_PATH`; there
-is no fallback to `Data_Files`.
+The writable research SQLite database is stored under `databases/`; WPP
+comparisons use the generated read-only `databases/wpp_serving.sqlite` file.
+`Data_Files/` is an offline source/archive location and is excluded from the
+production path. Override these locations explicitly with
+`DEMOGRAPHICS_DB_PATH` and `DEMOGRAPHICS_WPP_DB_PATH`; neither has a fallback
+to `Data_Files`.
 
 Before changing any table or record, create a dated read-only backup and
 inventory with:
@@ -74,6 +76,15 @@ newly found older release is not hunted again immediately. Preview the matching
 country list before running the bulk hunt. These modes use an isolated settings
 snapshot and never alter the saved automatic-discovery controls.
 
+A country hunt describes how a link was found; it does not force the extracted
+finding to be for that country. If a Thailand hunt naturally returns a valid
+China article, it is retained as China evidence unless the normal processing
+limit has already been reached. The results table shows the extracted country
+and article summary; selecting a row opens its compact audit record. An
+undated enabled OWID/Statista country profile can seed a country with no recent
+article datapoint, but it remains secondary evidence and is excluded once that
+country has recent data.
+
 Configure `TAVILY_API_KEY` and `OPENROUTER_API_KEY` in `.env`. The default model
 is `google/gemini-2.5-flash-lite`; set `LLM_MODEL` to override it without editing
 the application. The notebook now
@@ -109,9 +120,10 @@ outcome remains.
 Full-text uncertainty is retained as `needs_review`, without extracting or
 comparing unsupported facts. You can inspect it and manually submit the URL for
 analysis. Downloaded text is reused for extraction rather than fetched again.
-Long articles are kept in the audit but a bounded, evidence-focused extract is
-sent to the model for the full-text decision and extraction. This reduces token
-use without losing the original text for troubleshooting. The UN lookup is
+Long articles are held only while the run needs them; the durable audit keeps
+the outcome, reasons, timings, loaded marker and structured extraction rather
+than an article copy. A bounded, evidence-focused extract is sent to the model
+for full-text decision and extraction. The UN lookup is
 deterministic from the normalised country and effective date. It retrieves the
 reported and following year, then identifies the closest available 1 January or
 1 July population observation before the comparison call.
@@ -120,9 +132,9 @@ relevance, extraction and comparison. No scheduling or unbounded tool loop is
 introduced.
 
 **Search results** exposes run settings, provider counts/errors and all candidate
-outcomes. Select a run, then inspect a candidate ID for the original provider
-payload, full text, both decisions/reasons, extraction, storage result and UN
-comparison. Empty and failed searches are visible in the run history too.
+outcomes. Select a run, then select a candidate row (or enter its ID) to inspect
+the provider snippet, both decisions/reasons, extraction, storage result and
+fallback decision. Empty and failed searches are visible in the run history too.
 Tracking parameters/fragments are removed for deduplication. Repeated URLs are
 shown as `🔁 DUPLICATE` with an explanation and the ID of their original
 candidate or stored finding. The existing finding/report deduplication rules
@@ -132,7 +144,8 @@ SQLite tables in the existing demographics database:
 
 - `research_settings`: saved controls.
 - `search_runs`: immutable settings snapshot, timestamps, status and provider events.
-- `search_candidates`: every discovery, review, fetched text, error and comparison.
+- `search_candidates`: every discovery, review, compact outcome, loaded marker,
+  error and structured extraction; it is not a durable article-text archive.
 - `webpage_findings`: new `submission_type`, `discovery_source`, `search_run_id`
   and `search_candidate_id` columns link automatic extractions to their audit.
   Existing rows are `legacy_unknown`; new submissions are `manual` or `automatic`.

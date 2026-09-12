@@ -17,6 +17,7 @@ class CountryNormalisationTests(unittest.TestCase):
         self.assertEqual(normalise_country_name('USA'), 'United States of America')
         self.assertEqual(normalise_country_name('United States'), 'United States of America')
         self.assertEqual(normalise_country_name('UK'), 'United Kingdom')
+        self.assertEqual(normalise_country_name('Vietnam'), 'Viet Nam')
 
     def test_country_names_are_available_for_dropdowns(self):
         self.assertIn('Japan', list_country_names())

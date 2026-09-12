@@ -4,6 +4,16 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 import tools
+from database_maintenance import compact_candidate_details
+
+
+def candidate_audit_is_final(status):
+    """Whether a candidate has reached an outcome that must not retain content."""
+    return (
+        status in {"complete", "duplicate", "discovery_only", "error"}
+        or status.startswith(("excluded_", "irrelevant_", "needs_review", "deferred_"))
+        or status.endswith("_access_blocked")
+    )
 
 
 def now():
@@ -98,8 +108,14 @@ def update_candidate(candidate_id, **updates):
     with tools.get_connection() as conn:
         row = conn.execute('SELECT details_json, status FROM search_candidates WHERE id = ?', (candidate_id,)).fetchone()
         details = {**json.loads(row[0]), **updates}
+        status = updates.get('status', row[1])
+        # Retain a page body only while it is needed by the active review and
+        # extraction steps.  Finished, failed, and deferred candidates are an
+        # outcome audit, not an article-content archive.
+        if candidate_audit_is_final(status):
+            details = compact_candidate_details(details)
         conn.execute('UPDATE search_candidates SET details_json = ?, status = ?, updated_at = ? WHERE id = ?',
-                     (json.dumps(details, default=str), updates.get('status', row[1]), now(), candidate_id))
+                     (json.dumps(details, default=str), status, now(), candidate_id))
 
 
 def list_runs():
@@ -122,11 +138,24 @@ def list_candidates(run_id=None):
     with tools.get_connection() as conn:
         conn.row_factory = tools.sqlite3.Row
         rows = conn.execute('SELECT * FROM search_candidates' + (' WHERE run_id = ?' if run_id else '') + ' ORDER BY id DESC LIMIT 1000', (run_id,) if run_id else ()).fetchall()
-    return [{**{key: value for key, value in dict(row).items() if key != 'details_json'}, **{key: value for key, value in json.loads(row['details_json']).items()
-                           if key in {'title', 'snippet', 'summary_decision', 'summary_reason', 'full_decision',
-                                      'full_reason', 'error', 'finding_id', 'duplicate_candidate_id',
-                                      'duplicate_of', 'duplicate_kind', 'canonical_url', 'source_classification'}}}
-            for row in rows]
+    displayed = []
+    visible_fields = {
+        'title', 'snippet', 'summary_decision', 'summary_reason', 'full_decision',
+        'full_reason', 'error', 'finding_id', 'duplicate_candidate_id',
+        'duplicate_of', 'duplicate_kind', 'canonical_url', 'source_classification',
+    }
+    for row in rows:
+        details = json.loads(row['details_json'])
+        extraction = details.get('extraction')
+        result = {
+            **{key: value for key, value in dict(row).items() if key != 'details_json'},
+            **{key: value for key, value in details.items() if key in visible_fields},
+        }
+        if isinstance(extraction, dict):
+            result['extracted_country'] = extraction.get('geography') or ''
+            result['extracted_summary'] = extraction.get('summary') or ''
+        displayed.append(result)
+    return displayed
 
 
 def list_historical_candidate_urls(exclude_run_id):

@@ -13,7 +13,7 @@ import gradio as gr
 from plotly.subplots import make_subplots
 
 from tools import (
-    get_connection, initialise_findings_table,
+    get_connection, get_wpp_connection, initialise_findings_table,
     normalise_country_name, resolve_country_iso3,
 )
 
@@ -57,7 +57,7 @@ def _un_rows(country: str) -> tuple[list[dict], list[dict]]:
     forecast_years = tuple(range(2024, CHART_END_YEAR + 1))
     columns = ', '.join(f'"{column}"' for _, column, _, _ in METRICS.values())
     iso3 = resolve_country_iso3(country)
-    with get_connection() as conn:
+    with get_wpp_connection() as conn:
         conn.row_factory = sqlite3.Row
         has_iso = any(row[1] == "ISO3 Alpha-code" for row in conn.execute("PRAGMA table_info(estimates)"))
         if has_iso and iso3:
@@ -98,7 +98,7 @@ def _release_rows(country: str, revisions: list[int] | None) -> dict[int, list[d
     iso3 = resolve_country_iso3(country)
     placeholders = ",".join("?" for _ in requested)
     columns = ', '.join(f'"{column}"' for _, column, _, _ in METRICS.values())
-    with get_connection() as conn:
+    with get_wpp_connection() as conn:
         conn.row_factory = sqlite3.Row
         try:
             if iso3:

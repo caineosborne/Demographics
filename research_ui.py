@@ -275,12 +275,14 @@ def candidate_table(run_id):
             'Outcome': '🔁 DUPLICATE' if status == 'duplicate' else status.replace('_', ' ').upper(),
             'Relevance': relevance_label,
             'Geography status': geography_status,
+            'Extracted country': row.get('extracted_country') or '',
             'Duplicate of': duplicate_of,
             'Title': row.get('title') or '',
             'Source': row.get('source') or '',
             'Source class': row.get('source_classification') or '',
             'Category': row.get('category') or '',
             'URL': row.get('url') or '',
+            'Extracted summary': row.get('extracted_summary') or '',
             'Explanation': explanation,
             'Updated (UTC)': row.get('updated_at') or '',
         })
@@ -489,6 +491,15 @@ def inspect_candidate(candidate_id):
         return {'error': str(exc)}
 
 
+def inspect_candidate_row(evt: gr.SelectData):
+    """Open a candidate audit entry by selecting its visible row."""
+    try:
+        candidate_id = int(evt.row_value[0])
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return gr.skip(), {'error': 'Could not determine the selected candidate.'}
+    return candidate_id, inspect_candidate(candidate_id)
+
+
 def recommended_category_rows():
     return settings_rows({'categories': [category.model_dump() for category in recommended_categories()]})
 
@@ -576,7 +587,7 @@ def build_search_tabs():
             label='This run — every candidate and its outcome', interactive=False, wrap=False,
             line_breaks=False, max_height=360, pinned_columns=2, show_search='filter',
             max_chars=120,
-            column_widths=[60, 175, 115, 155, 230, 500, 110, 190, 360, 420, 180],
+            column_widths=[60, 175, 115, 155, 160, 230, 360, 110, 190, 360, 420, 460, 180],
             elem_classes='research-candidates',
         )
         run_monitor = gr.Timer(2, active=True)
@@ -596,8 +607,8 @@ def build_search_tabs():
         stop.click(stop_search, inputs=run_id, outputs=run_summary)
         run_monitor.tick(poll_run, inputs=run_id, outputs=[log, results, run_id, run_summary], show_progress='hidden')
     with gr.Tab('Search results') as history_tab:
-        gr.Markdown('Inspect accepted, rejected, unclear, duplicate and failed results. The detailed record contains '
-                    'the original provider response, full article text when fetched, review reasons, extracted facts, and fallback decisions.')
+        gr.Markdown('Inspect accepted, rejected, unclear, duplicate and failed results. Select a candidate row to open '
+                    'its compact audit record, including provider snippet, review reasons, extracted summary/facts, and fallback decisions.')
         refresh = gr.Button('Refresh search history')
         runs_table = gr.Dataframe(
             label='Runs (latest 100)', interactive=False, wrap=False, max_height=220,
@@ -626,3 +637,4 @@ def build_search_tabs():
                              show_progress='hidden')
         selected_run.change(load_history, inputs=selected_run, outputs=[candidates, run_detail])
         inspect.click(inspect_candidate, inputs=candidate_id, outputs=detail)
+        candidates.select(inspect_candidate_row, outputs=[candidate_id, detail])

@@ -134,9 +134,19 @@ in a search category's Include domains control), has a usable publication date
 within the configured limit, and the country has no article datapoint acquired
 in the preceding configured gap period.
 
+An undated country profile from an enabled fallback provider may instead be
+stored as a secondary seed only when the country is blank in that same gap
+window. This is how an OWID country profile can establish an initial Sweden
+datapoint; it does not make undated fallback pages generally eligible.
+
 The Include domains control remains an administrator choice. It is not blocked
 for fallback domains. Configuring such a domain does not make it official or
 independent corroboration.
+
+DataReportal is excluded before model review: its digital reports commonly
+repeat an external population headline rather than provide a demographic source
+or national release. This is a configured discovery-quality decision, not a
+claim that every non-official publisher is unusable.
 
 When an inaccessible automatic result is recovered through an alternative
 page, that alternative passes the same blocked-URL, source-rule, duplicate,
@@ -184,6 +194,13 @@ multi-month, or dated count flows are annualised deterministically and retain
 the original value, cadence, factor, and note. Population stocks, fertility
 rates, and unclear-duration partial figures remain as reported and carry a
 not-comparable-to-annual-WPP explanation instead.
+
+The metric must still represent the national total or total national flow.
+Asylum/visa/refugee applications, migration or population subgroups, and
+birth/death subsets by cause, age, origin, religion, or programme are not
+stored as national demographic metrics. This rule is applied per metric, not
+by broadly blocking institutions such as CDC that can also publish valid total
+national figures.
 
 ## 9. Legacy migration behavior
 

@@ -8,41 +8,50 @@
   - [x] **Step 1.3 — Include and rank every source type**
   - [x] **Step 1.4 — Add fallback providers and manual-only comparison**
   - [x] **Step 1.7 — Verify record and metric deletion**
-  - [ ] **Step 1.5 — Reduce the candidate audit**
-  - [ ] **Step 1.6 — Prepare the full and filtered WPP databases**
-- [ ] **Phase 2 — Build the local FastAPI application layer**
-  - [ ] **Step 2.1 — Build the new data model and separate workflows from Gradio**
-  - [ ] **Step 2.2 — Add FastAPI endpoints and Jinja page shells**
-  - [ ] **Step 2.3 — Add durable worker commands**
-  - [ ] **Step 2.4 — Define the frontend and export JSON contracts**
-  - [ ] **Step 2.5 — Prove local behavioural parity**
-- [ ] **Phase 3 — Replace the local Gradio frontend**
+  - [x] **Step 1.5 — Reduce the candidate audit**
+  - [x] **Step 1.6 — Prepare the full and filtered WPP databases**
+- [ ] **Phase 2 — Replace the backend behind the retained Gradio client**
+  - [ ] **Step 2.1 — Establish the FastAPI application boundary**
+  - [ ] **Step 2.2 — Extract read-only query and graph services**
+  - [ ] **Step 2.3 — Extract finding administration services**
+  - [ ] **Step 2.4 — Extract manual webpage analysis**
+  - [ ] **Step 2.5 — Extract research and country-hunt services**
+  - [ ] **Step 2.6 — Add durable worker commands and job state**
+  - [ ] **Step 2.7 — Add versioned JSON endpoints and fixtures**
+  - [ ] **Step 2.8 — Route Gradio through services and prove parity**
+- [ ] **Phase 3 — Build the admin interface and retire Gradio**
   - [ ] **Step 3.1 — Build the admin application shell**
   - [ ] **Step 3.2 — Rebuild manual webpage analysis**
   - [ ] **Step 3.3 — Rebuild research and country-hunt controls**
-  - [ ] **Step 3.4 — Rebuild findings, review, and conflict management**
+  - [ ] **Step 3.4 — Rebuild findings and administration**
   - [ ] **Step 3.5 — Rebuild the graphs and reporting**
-- [ ] **Phase 4 — Deploy the private admin application to Railway**
-  - [ ] **Step 4.1 — Provision and migrate the Postgres application database**
-  - [ ] **Step 4.2 — Package the filtered WPP database**
-  - [ ] **Step 4.3 — Deploy the API, admin frontend, and worker**
-  - [ ] **Step 4.4 — Add authentication, backups, and operational safeguards**
-  - [ ] **Step 4.5 — Verify all manual workflows online**
-- [ ] **Phase 5 — Automate discovery and country coverage**
-  - [ ] **Step 5.1 — Automate the daily news search**
-  - [ ] **Step 5.2 — Run the initial 20-country-per-day coverage sweep**
-  - [ ] **Step 5.3 — Introduce the steady-state country schedule**
-  - [ ] **Step 5.4 — Apply the tested fallback-provider rule to scheduled hunts**
-  - [ ] **Step 5.5 — Add spend, run, and failure dashboards**
-- [ ] **Phase 6 — Publish the database-free public site**
-  - [ ] **Step 6.1 — Build the static JSON exporter**
-  - [ ] **Step 6.2 — Build the read-only public frontend**
-  - [ ] **Step 6.3 — Automate the weekly Vercel release**
-  - [ ] **Step 6.4 — Verify publication, attribution, and rollback**
-- [ ] **Phase 7 — Add public URL submissions**
-  - [ ] **Step 7.1 — Build the submission form**
-  - [ ] **Step 7.2 — Build the admin moderation queue**
-  - [ ] **Step 7.3 — Add submission security and abuse controls**
+  - [ ] **Step 3.6 — Cut over and retire Gradio**
+- [ ] **Phase 4 — Add the claims and conflict framework**
+  - [ ] **Step 4.1 — Introduce source documents, claims, and observation groups**
+  - [ ] **Step 4.2 — Migrate legacy records and extend backend contracts**
+  - [ ] **Step 4.3 — Add conflict review and provenance views**
+  - [ ] **Step 4.4 — Verify claim and graph semantics**
+- [ ] **Phase 5 — Deploy the private admin application to Railway**
+  - [ ] **Step 5.1 — Provision and migrate the Postgres application database**
+  - [ ] **Step 5.2 — Package the filtered WPP database**
+  - [ ] **Step 5.3 — Deploy the API, admin frontend, and worker**
+  - [ ] **Step 5.4 — Add authentication, backups, and operational safeguards**
+  - [ ] **Step 5.5 — Verify all manual workflows online**
+- [ ] **Phase 6 — Automate discovery and country coverage**
+  - [ ] **Step 6.1 — Automate the daily news search**
+  - [ ] **Step 6.2 — Run the initial 20-country-per-day coverage sweep**
+  - [ ] **Step 6.3 — Introduce the steady-state country schedule**
+  - [ ] **Step 6.4 — Apply the tested fallback-provider rule to scheduled hunts**
+  - [ ] **Step 6.5 — Add spend, run, and failure dashboards**
+- [ ] **Phase 7 — Publish the database-free public site**
+  - [ ] **Step 7.1 — Build the static JSON exporter**
+  - [ ] **Step 7.2 — Build the read-only public frontend**
+  - [ ] **Step 7.3 — Automate the weekly Vercel release**
+  - [ ] **Step 7.4 — Verify publication, attribution, and rollback**
+- [ ] **Phase 8 — Add public URL submissions**
+  - [ ] **Step 8.1 — Build the submission form**
+  - [ ] **Step 8.2 — Build the admin moderation queue**
+  - [ ] **Step 8.3 — Add submission security and abuse controls**
 
 ---
 
@@ -118,14 +127,14 @@ Historic WPP release overlays retain the same chart metrics plus revision and ca
 Phase 1 changes and tests the existing Python/Gradio application. It does **not**
 introduce FastAPI, Postgres, a new frontend, or the full source/claim/conflict
 model. The objective is to make the research rules correct and observable in the
-current tool first; Phase 2 then ports those proven rules into the new
-application architecture.
+current tool first; Phase 2 then ports those proven rules into the new backend
+architecture.
 
 Phase 1 does not change the existing effective-date plus population duplicate
 safeguard, and does not group different webpages that report the same statistic
 into a single graph observation. It adds canonical-URL handling alongside that
 existing safeguard. Retaining different URLs as corroborating sources, and
-source-to-source conflict grouping, are deliberate Phase 2 work.
+source-to-source conflict grouping, are deliberate Phase 4 work.
 
 ### Step 1.1 — Preserve and inventory the current database
 
@@ -178,7 +187,7 @@ canonical URL is a duplicate.
   unchanged. The canonical URL check is an earlier, simpler duplicate gate;
   this existing value/date safeguard remains the later storage-time check.
   Do not try to attach a second URL as corroborating evidence in the current
-  SQLite finding model. Phase 2 replaces this safeguard with claims grouped
+  SQLite finding model. Phase 4 replaces this safeguard with claims grouped
   under a shared observation.
 - At discovery time, check the canonical URL before summary review, fetching,
   model extraction, or Tavily extraction. A duplicate remains visible in the
@@ -256,7 +265,7 @@ are blank.
 Phase 1 does not automatically choose a winner when separately stored rank-1
 and rank-3 sources report different values. It displays those separate current
 findings. The existing Phase 1.2 date-plus-population safeguard is unchanged;
-Phase 2 introduces observation groups, conflicts, and corroborating sources.
+Phase 4 introduces observation groups, conflicts, and corroborating sources.
 
 #### Search, database, and graph output
 
@@ -282,7 +291,7 @@ graphs; it is not just a database classification change.
   reserved for legacy evidence under this rule; “latest” can remain a hover or
   detail label instead.
 - Keep conflict halos and a preferred claim out of this step: those require
-  the Phase 2 claim model.
+  the Phase 4 claim model.
 
 #### Configurable source rules
 
@@ -455,6 +464,12 @@ non-comparable numeric national evidence is stored with its comparison caveat,
 and documented partial count periods are annualised while retaining their
 source value, cadence, factor, and note.
 
+An undated Statista/OWID country profile may be retained as a secondary seed
+only when the country has no article-derived datapoint in the configured gap
+window. A dated fallback result still has to meet the configured publication
+age limit. This permits a blank-country OWID profile without turning fallback
+providers into a general evergreen search target.
+
 ### Post-1.4 implementation order
 
 The checklist order is intentional: after Step 1.4, complete **Step 1.7**
@@ -492,6 +507,14 @@ working database after the verified backup exists.
 
 **Complete when:** the current audit remains useful for outcomes and debugging without accumulating full article text, and no accepted finding or source URL has been removed.
 
+**Completed 2026-09-12:** candidates now retain page bodies only during active
+review and extraction. Every finished, failed, or deferred outcome is reduced
+to compact decision, extraction, timing, identity, and alternative-attempt
+metadata; successful loads retain only the durable `page_loaded` marker and
+actual loaded URL. The maintenance command performs the one-time legacy JSON
+sanitisation, logs removed bytes in `audit_cleanup_log`, and vacuums only after
+creating its rollback backup.
+
 ### Step 1.6 — Prepare the full and filtered WPP databases
 
 - Retain the complete WPP database offline as the authoritative source archive.
@@ -509,12 +532,16 @@ working database after the verified backup exists.
 
 **Complete when:** the filtered database can be rebuilt from scratch and passes comparison tests against the full archive, without changing the running Gradio application.
 
-**Review 2026-09-12:** this remains required. Step 1.5 is now safe because
-historical URL suppression uses the compact `page_loaded` marker rather than
-the retained article text. Step 1.6 remains required to reduce the 65-column
-WPP tables before deployment. The current source archive is one SQLite file
-with two WPP tables, so the recommended target is likewise one generated
-read-only serving file with two filtered tables—not four physical SQLite files.
+**Completed 2026-09-12:** the complete 65-column `estimates` and
+`medium_variant` archive, with the WPP revision-history overlay, is now held
+offline in `Data_Files/WPP2024_GEN_F01_DEMOGRAPHIC_INDICATORS_COMPACT.sqlite`.
+The repeatable maintenance build creates the read-only
+`databases/wpp_serving.sqlite`, retaining the two logical WPP tables and only
+the ten columns used by comparisons and graphs. Numeric measures and years are
+converted during generation; source placeholders become SQL `NULL`, and ISO3/
+year lookup indexes plus a checksum manifest are included. The writable
+research database remains under `databases/`, while WPP reads use the serving
+copy, preserving application behaviour without a fallback to `Data_Files`.
 
 ### Step 1.7 — Verify record and metric deletion
 
@@ -546,7 +573,7 @@ Federation`.
 ### Phase 1 SQLite database shape after completion
 
 Phase 1 keeps the existing SQLite application database. It adds small tables
-and fields; it does not yet introduce Postgres or the Phase 2 claim tables.
+and fields; it does not yet introduce Postgres or the Phase 4 claim tables.
 
 | Table | Phase 1 state |
 |---|---|
@@ -560,111 +587,100 @@ and fields; it does not yet introduce Postgres or the Phase 2 claim tables.
 | `search_runs` / `research_settings` | Existing job and search controls, with links to source/fallback configuration where needed. |
 | WPP SQLite files | Full offline archive plus a generated read-only serving copy; neither stores article findings. |
 
-The proposed Phase 2 tables (`source_documents`, `metric_claims`, and
-`observation_groups`) are intentionally not added in Phase 1. This keeps the
-current Gradio data model stable while its logic is being corrected and tested.
+The proposed claims tables (`source_documents`, `metric_claims`, and
+`observation_groups`) are intentionally deferred to Phase 4. Phase 2 keeps the
+current finding model and business rules stable while replacing its backend.
 
-## Phase 2 — Build the local FastAPI application layer
+## Phase 2 — Replace the backend behind the retained Gradio client
 
-### Step 2.1 — Build the new data model and separate workflows from Gradio
+### Step 2.1 — Establish the FastAPI application boundary
 
-Build this alongside the retained legacy records rather than changing their meaning in place.
+Add the FastAPI application, configuration, health check, dependency wiring,
+and a test client without changing any current workflow. Keep Gradio as the
+only user interface. FastAPI owns HTTP validation, authentication hooks, and
+response serialization; it contains no research business logic.
 
-Replace the current assumption that one webpage finding is one graph point with three related concepts:
+**Complete when:** the API starts locally, its health endpoint is tested, and
+the existing Gradio application remains unchanged.
 
-- **Source document:** the article or webpage, identified by a unique canonical URL.
-- **Metric claim:** one source's reported country, metric, period, value, unit, and definition.
-- **Observation group:** claims which refer to the same country, metric, period, unit, and definition.
+### Step 2.2 — Extract read-only query and graph services
 
-At the Phase 2 cutover, retire the Phase 1 effective-date plus population
-exclusion for new writes. Canonical URL uniqueness remains the only rule that
-rejects a source document outright. A different canonical URL instead creates a
-source document and one or more claims, which are then associated with an
-observation group. Do not manufacture missing legacy corroborating sources:
-only migrate the documents that were retained in Phase 1, and allow later
-searches or manual submissions to add further evidence.
+Move country lookup, WPP queries, stored-finding reads, and graph-data assembly
+into framework-independent Python services. Add read-only endpoints for country
+choices, findings, graph series, run history, and candidate history.
 
-Same statistic from a different source:
+**Complete when:** service and endpoint tests return the same values as the
+current graphs and selectors, with no Gradio imports in the service code.
 
-- Keep the new source document.
-- Attach its claim to the existing observation group.
-- Draw one graph point when the normalized value is the same, with every supporting source listed in its details.
+### Step 2.3 — Extract finding administration services
 
-Different value from a different source:
+Move finding edits, metric deletion, record deletion, source suppression,
+unblock, source rules, provider settings, and existing audit actions behind
+services. Add validated mutation endpoints while retaining the current SQLite
+finding schema and Phase 1 rules.
 
-- Retain both claims.
-- Mark the observation group as conflicting when the values materially disagree.
-- Do not treat harmless unit conversion or obvious rounding as a conflict.
-- Allow the administrator to select a preferred claim, mark claims as equivalent/rounded, separate claims with different definitions, or reject a claim.
-- Keep divergence from the WPP reference separate from disagreement between article claims.
+**Complete when:** every existing administration action has service and API
+coverage and preserves the current behaviour.
 
-Carry the Phase 1 source priorities, fallback-provider rule, compact audit policy, and manual-only comparison policy into the new service layer without changing their behaviour.
+### Step 2.4 — Extract manual webpage analysis
 
-- Move manual webpage analysis, news discovery, country discovery, extraction, optional deterministic UN lookup, and storage behind framework-independent Python services.
-- Keep the comparison mode explicit: manual/admin-approved URLs use the comparison agent; scheduled/bulk URLs do not.
-- Preserve the current bounded processing, domain limits, duplicate checks, access recovery, and model timeouts.
-- Replace Gradio-specific progress events with structured job events.
-- Make the storage layer selectable so local development can use a temporary application database while production uses Postgres.
+Move the manual URL analysis workflow, fetching progress, extraction, optional
+manual-only comparison, and storage decision into a service. Expose it through
+a single asynchronous API operation and a status/result endpoint.
 
-**Complete when:** all three source classes can be stored, existing legacy records remain neutral, and every workflow can be invoked from Python without importing Gradio.
+**Complete when:** a representative manual URL can be analysed through Python
+and FastAPI with the same stored result as the current Gradio flow.
 
-### Step 2.2 — Add FastAPI endpoints and Jinja page shells
+### Step 2.5 — Extract research and country-hunt services
 
-Use **FastAPI + Jinja** for the first version. FastAPI supplies the JSON API and Jinja renders the initial admin page shells. Small browser-side JavaScript fetches JSON and draws Plotly charts; no React or separate frontend framework is required initially.
+Move news discovery, country hunts, stop handling, bounded processing,
+duplicate checks, domain limits, fallback-provider eligibility, and access
+recovery into services. Preserve the rule that automatic and bulk routes do
+not invoke the comparison agent.
 
-Provide private/admin endpoints for:
+**Complete when:** research and country-hunt regression cases run through the
+service layer with unchanged outcomes.
 
-- Manual webpage analysis
-- Starting and stopping research jobs
-- Direct country hunts and bulk country hunts
-- Search settings
-- Run and candidate history
-- Findings, claims, and source documents
-- Conflict review and preferred-claim selection
-- Graph data
-- URL block-list management
-- Submission moderation
-- Export status
-- Source-rule settings
+### Step 2.6 — Add durable worker commands and job state
 
-Long-running calls create jobs and return job IDs. Request handlers do not keep research work alive inside the web process.
-
-**Complete when:** API tests cover authentication boundaries, validation, errors, and all existing admin operations; Jinja pages can use the same JSON endpoints as the future static site.
-
-### Step 2.3 — Add durable worker commands
-
-- Add explicit commands for manual analysis jobs, news search, country search, static export, and maintenance.
-- Store job state and progress in the application database.
-- Make jobs idempotent so a retry cannot create duplicate findings or claims.
+- Add explicit commands for manual analysis, news search, country search,
+  maintenance, and later export work.
+- Store structured job state and progress in the application database.
+- Make jobs idempotent within the current finding model.
 - Add a database lock preventing overlapping discovery runs.
 - Mark interrupted jobs clearly and allow a safe retry.
-- Ensure every scheduled command terminates when its work finishes.
 
-**Complete when:** stopping the API does not corrupt job state and rerunning a failed command is safe.
+**Complete when:** stopping the API does not corrupt job state and rerunning a
+failed command is safe.
 
-### Step 2.4 — Define the frontend and export JSON contracts
+### Step 2.7 — Add versioned JSON endpoints and fixtures
 
-- Use typed, versioned response models.
-- Return chart series, findings, source classifications, conflicts, and provenance as JSON rather than server-rendered Gradio state.
-- Include stable IDs and ISO3 codes so the admin and public interfaces do not depend on display labels.
-- Keep internal audit fields out of public response models.
+- Use typed, versioned response models for every extracted service.
+- Include stable IDs and ISO3 codes, with internal audit fields excluded from
+  externally consumable response models.
+- Save representative JSON fixtures for the Phase 3 frontend.
+- Add endpoint validation and error tests.
 
-**Complete when:** the frontend can be developed using saved JSON fixtures without direct database access.
+**Complete when:** a frontend can be developed from fixtures without direct
+database access.
 
-### Step 2.5 — Prove local behavioural parity
+### Step 2.8 — Route Gradio through services and prove parity
 
-- Run the existing tests against the service layer.
-- Add regression fixtures for current representative URLs and countries.
-- Compare old and new graph values for a sample of countries and every supported metric.
-- Verify manual analysis, automatic search, country hunt, editing, deletion, blocking, and conflict handling.
+Make Gradio a thin temporary client of the Phase 2 services. Run existing and
+new regression cases through both routes, including manual analysis, automatic
+search, country hunt, editing, deletion, blocking, rerun behaviour, and graph
+values.
 
-**Complete when:** the FastAPI/service version covers the current application behaviour before Gradio is retired.
+**Complete when:** FastAPI and the retained Gradio client produce the same
+current outcomes, making the browser-client replacement in Phase 3 low risk.
 
-## Phase 3 — Replace the local Gradio frontend
+## Phase 3 — Build the admin interface and retire Gradio
 
 ### Step 3.1 — Build the admin application shell
 
-- Create a responsive, non-Gradio admin interface backed only by the FastAPI JSON API.
+- Use **FastAPI + Jinja** for responsive, non-Gradio page shells backed only
+  by the FastAPI JSON API. Small browser-side JavaScript modules fetch JSON,
+  poll jobs, and draw Plotly charts; no separate frontend framework is needed.
 - Establish navigation for Overview, Analyse webpage, Research, Country coverage, Findings, Conflicts, Submissions, Exports, and Settings.
 - Add clear loading, running, completed, empty, and failed states.
 
@@ -689,17 +705,18 @@ Long-running calls create jobs and return job IDs. Request handlers do not keep 
 
 **Complete when:** the current research controls and the new country scheduling state are operable locally.
 
-### Step 3.4 — Rebuild findings, review, and conflict management
+### Step 3.4 — Rebuild findings and administration
 
 - Provide country and metric filters.
-- Display source documents separately from their metric claims.
-- Show corroborating sources under one observation.
-- Provide a conflict queue with side-by-side values, periods, definitions, and source classifications.
-- Support preferred-claim selection and all delete/block/rerun actions.
+- Display the existing findings, source classifications, comparisons, and
+  source URLs without changing their meaning.
+- Support all current edit, metric-delete, record-delete, block, unblock, and
+  rerun actions.
 - Provide source-rule management: exact canonical URL blocks, domain blocks, and source classifications/official-publisher overrides.
 - Keep every source-rule change auditable and reversible.
 
-**Complete when:** every stored or disputed value can be traced to its sources and resolved from the admin UI.
+**Complete when:** every current finding and its administration controls work
+through the new UI without Gradio.
 
 ### Step 3.5 — Rebuild the graphs and reporting
 
@@ -708,21 +725,73 @@ Graph markers:
 - Diamond: official publisher
 - Outlined circle: secondary publisher with a named source, including accepted fallback datapoints
 - Cross: secondary publisher without a named source
-- Red outline/halo: an unresolved conflicting claim, independent of source type
 
 Graph behaviour:
 
-- Show one point for an observation with identical corroborating claims.
-- List all supporting sources in the detail view.
-- Show the preferred value by default for resolved conflicts.
-- Provide a control to reveal every conflicting claim.
-- Keep UN WPP as a labelled reference series, not as an article-source claim.
+- Reproduce the current graph values, existing source classifications, and
+  WPP reference series exactly.
+- Defer corroboration grouping, preferred claims, and conflict overlays to
+  Phase 4.
 
-**Complete when:** the new graphs reproduce current values and communicate provenance/conflicts without relying on Gradio.
+**Complete when:** the new graphs reproduce current values and provenance
+without relying on Gradio.
 
-## Phase 4 — Deploy the private admin application to Railway
+### Step 3.6 — Cut over and retire Gradio
 
-### Step 4.1 — Provision and migrate the Postgres application database
+- Run the FastAPI/Jinja admin alongside Gradio during the Phase 3 rebuild.
+- Use the Phase 2 fixtures and parity checks to verify each migrated workflow.
+- Make the Jinja admin the default local application only after the full
+  current workflow is available.
+- Remove Gradio dependencies, entry points, and UI-specific adapters after a
+  rollback-capable cutover check.
+
+**Complete when:** the local admin application runs entirely through the
+FastAPI/Jinja interface and Gradio has been retired.
+
+## Phase 4 — Add the claims and conflict framework
+
+### Step 4.1 — Introduce source documents, claims, and observation groups
+
+Build this alongside retained legacy findings rather than changing their
+meaning in place:
+
+- **Source document:** an article or webpage identified by canonical URL.
+- **Metric claim:** a source's country, metric, period, value, unit, and
+  definition.
+- **Observation group:** claims for the same country, metric, period, unit,
+  and definition.
+
+Canonical URL uniqueness remains the only rule that rejects a source document
+outright. Different URLs create additional documents and claims. Do not invent
+missing legacy corroborating sources.
+
+### Step 4.2 — Migrate legacy records and extend backend contracts
+
+- Migrate retained Phase 1 findings without changing their source evidence.
+- Associate new claims with observation groups.
+- Retain materially different values as conflicts; harmless rounding and unit
+  conversion are not conflicts.
+- Keep WPP divergence separate from disagreement between article claims.
+- Extend the FastAPI contracts without breaking the existing finding views.
+
+### Step 4.3 — Add conflict review and provenance views
+
+- Display corroborating sources under one observation.
+- Provide a conflict queue with values, periods, definitions, and source
+  classifications side by side.
+- Allow preferred-claim selection, equivalent/rounded marking, separation of
+  definitions, and claim rejection.
+- Add graph controls for corroboration and unresolved conflicts.
+
+### Step 4.4 — Verify claim and graph semantics
+
+**Complete when:** every claim is traceable to a source document, legacy data
+is preserved, and graphs distinguish corroboration, conflicts, and the WPP
+reference series correctly.
+
+## Phase 5 — Deploy the private admin application to Railway
+
+### Step 5.1 — Provision and migrate the Postgres application database
 
 - Define version-controlled database migrations.
 - Create Postgres tables for users, sources, claims, observation groups, runs, candidates, country schedule state, submissions, blocks, settings, and audit events.
@@ -732,7 +801,7 @@ Graph behaviour:
 
 **Complete when:** Postgres contains the verified application data and a repeatable migration can rebuild its schema.
 
-### Step 4.2 — Package the filtered WPP database
+### Step 5.2 — Package the filtered WPP database
 
 - Generate `wpp_serving.sqlite` during a controlled build step.
 - Package it read-only with the Railway API/worker image.
@@ -741,7 +810,7 @@ Graph behaviour:
 
 **Complete when:** Railway comparisons and graphs use the same immutable WPP values as local development.
 
-### Step 4.3 — Deploy the API, admin frontend, and worker
+### Step 5.3 — Deploy the API, admin frontend, and worker
 
 - Deploy FastAPI and the admin frontend.
 - Deploy research processing as a separate worker/service command.
@@ -751,7 +820,7 @@ Graph behaviour:
 
 **Complete when:** the hosted admin application can perform every manual workflow through the Railway services.
 
-### Step 4.4 — Add authentication, backups, and operational safeguards
+### Step 5.4 — Add authentication, backups, and operational safeguards
 
 - Use Google/OpenID Connect sign-in for the private admin application rather than storing administrator passwords ourselves.
 - Store users, roles, active status, and the email allowlist in Postgres. The database is the source of authorization: initially the only required role is `admin`; a `contributor` role can be added later if needed.
@@ -764,7 +833,7 @@ Graph behaviour:
 
 **Complete when:** unauthenticated users cannot scan, modify, export, or inspect private operational data and a recovery test has succeeded.
 
-### Step 4.5 — Verify all manual workflows online
+### Step 5.5 — Verify all manual workflows online
 
 - Analyse a representative HTML article and PDF.
 - Verify direct and fallback fetching.
@@ -775,9 +844,9 @@ Graph behaviour:
 
 **Complete when:** Railway becomes the trusted admin environment and local Gradio is no longer needed for normal use.
 
-## Phase 5 — Automate discovery and country coverage
+## Phase 6 — Automate discovery and country coverage
 
-### Step 5.1 — Automate the daily news search
+### Step 6.1 — Automate the daily news search
 
 - Run the approved news-search settings once per day.
 - Keep the retrieval window aligned with the schedule so coverage neither overlaps excessively nor leaves gaps.
@@ -787,7 +856,7 @@ Graph behaviour:
 
 **Complete when:** daily news discovery runs unattended and every run has a visible status and cost record.
 
-### Step 5.2 — Run the initial 20-country-per-day coverage sweep
+### Step 6.2 — Run the initial 20-country-per-day coverage sweep
 
 - Freeze a canonical country list for the sweep.
 - Search up to 20 not-yet-attempted countries per day.
@@ -798,7 +867,7 @@ Graph behaviour:
 
 **Complete when:** every country has one recorded baseline attempt, expected to take approximately ten days.
 
-### Step 5.3 — Introduce the steady-state country schedule
+### Step 6.3 — Introduce the steady-state country schedule
 
 - After the initial sweep, run up to five eligible countries per day.
 - Base eligibility on the last attempt as well as the last successful finding.
@@ -815,14 +884,14 @@ Initial cadence defaults:
 
 **Complete when:** Samoa-like no-result countries do not recur continually, while high-interest countries can be checked more often.
 
-### Step 5.4 — Apply the tested fallback-provider rule to scheduled hunts
+### Step 6.4 — Apply the tested fallback-provider rule to scheduled hunts
 
 Use the Phase 1 fallback-provider rule in unattended country hunts:
 
 - “No datapoints” means no stored article-derived datapoints for the country; the WPP reference series does not count.
 - When a candidate is processed, check whether the country currently has any stored article-derived datapoint.
 - If it has a datapoint, exclude configured fallback providers such as Statista and Our World in Data from this country-scan route.
-- If it has no datapoints, allow a configured fallback provider only when the candidate is from the previous three months.
+- If it has no datapoints, allow a configured fallback provider when the candidate is from the previous three months, or when it is an enabled undated country-profile seed.
 - Store the result using its actual source classification: named secondary as an outlined circle; unnamed secondary as a cross.
 - Do not promote the fallback publisher to official status.
 - If the fallback reproduces the same WPP dataset already used as the baseline, retain the source relationship but do not treat it as independent corroboration.
@@ -832,7 +901,7 @@ The result is intentionally dependent on the data already stored when the candid
 
 **Complete when:** an otherwise empty country can receive a recent fallback datapoint with a visible source-priority marker, without using those providers for countries that already have findings.
 
-### Step 5.5 — Add spend, run, and failure dashboards
+### Step 6.5 — Add spend, run, and failure dashboards
 
 - Record Tavily search and extraction credits by job and provider request.
 - Record model, token, request, and estimated-cost usage where available.
@@ -843,9 +912,9 @@ The result is intentionally dependent on the data already stored when the candid
 
 **Complete when:** scheduled work cannot silently exceed configured budgets and failures are visible without reading server logs.
 
-## Phase 6 — Publish the database-free public site
+## Phase 7 — Publish the database-free public site
 
-### Step 6.1 — Build the static JSON exporter
+### Step 7.1 — Build the static JSON exporter
 
 Export only public, published data. At minimum produce:
 
@@ -862,7 +931,7 @@ Generate the complete release in a temporary directory and validate it before pu
 
 **Complete when:** the entire public experience can run locally from exported files with both Postgres and FastAPI unavailable.
 
-### Step 6.2 — Build the read-only public frontend
+### Step 7.2 — Build the read-only public frontend
 
 - Load all content through static JSON files.
 - Provide country navigation, graphs, source/article details, data freshness, WPP vintage, and methodology.
@@ -872,7 +941,7 @@ Generate the complete release in a temporary directory and validate it before pu
 
 **Complete when:** the public site displays the graphs and published articles without any live database or research access.
 
-### Step 6.3 — Automate the weekly Vercel release
+### Step 7.3 — Automate the weekly Vercel release
 
 - Schedule one weekly export after normal discovery processing.
 - Validate JSON schemas, required files, source URLs, and record counts.
@@ -883,7 +952,7 @@ Generate the complete release in a temporary directory and validate it before pu
 
 **Complete when:** the public site updates weekly without exposing Railway or requiring manual file movement.
 
-### Step 6.4 — Verify publication, attribution, and rollback
+### Step 7.4 — Verify publication, attribution, and rollback
 
 - Compare a sample of public points with the admin values and their original sources.
 - Confirm that unpublished or rejected records never enter the release.
@@ -892,9 +961,9 @@ Generate the complete release in a temporary directory and validate it before pu
 
 **Complete when:** a release can be independently verified and safely rolled back.
 
-## Phase 7 — Add public URL submissions
+## Phase 8 — Add public URL submissions
 
-### Step 7.1 — Build the submission form
+### Step 8.1 — Build the submission form
 
 - Accept an HTTP/HTTPS URL and an optional short note.
 - Store the URL as a pending submission only.
@@ -903,7 +972,7 @@ Generate the complete release in a temporary directory and validate it before pu
 
 **Complete when:** a public user can propose a source without triggering research or modifying published data.
 
-### Step 7.2 — Build the admin moderation queue
+### Step 8.2 — Build the admin moderation queue
 
 - Show pending URLs, canonical duplicates, notes, submission time, and moderation status.
 - Allow the administrator to analyse, approve for processing, reject, or suppress a URL.
@@ -912,7 +981,7 @@ Generate the complete release in a temporary directory and validate it before pu
 
 **Complete when:** no submitted URL reaches the research worker or findings database without an explicit admin action.
 
-### Step 7.3 — Add submission security and abuse controls
+### Step 8.3 — Add submission security and abuse controls
 
 - Validate scheme, host, redirects, and resolved network destinations before any later fetch.
 - Block private, loopback, link-local, credential-bearing, and otherwise unsafe URLs.

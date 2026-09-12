@@ -9,14 +9,14 @@ with official archive files (or their direct download URLs), for example:
       --revision 2012 --source /path/to/WPP2012_DB1_Medium.xlsx
 
 `--source` also accepts an https URL. Raw source copies are retained under
-``Data_Files/UN_archives`` as offline source material. The mutable SQLite
-database is written under ``databases``; the legacy data folder is never used
-as a runtime database location.
+``Data_Files/UN_archives`` as offline source material. The offline archive is
+updated first, then its generated serving copy under ``databases`` is rebuilt.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sqlite3
 import sys
@@ -26,9 +26,12 @@ from urllib.parse import urlparse
 import pandas as pd
 import requests
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from database_maintenance import build_wpp_serving_database
+
 ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = ROOT.parent
-DB_PATH = PROJECT_ROOT / "databases" / "WPP2024_GEN_F01_DEMOGRAPHIC_INDICATORS_COMPACT.sqlite"
+DB_PATH = PROJECT_ROOT / "Data_Files" / "WPP2024_GEN_F01_DEMOGRAPHIC_INDICATORS_COMPACT.sqlite"
 ARCHIVE_DIR = ROOT / "UN_archives"
 
 FIELDS = {
@@ -164,6 +167,7 @@ def import_release(revision: int, source: str) -> int:
     rows["cadence_years"] = cadence
     rows["source_url"] = source
     columns = ["revision", "Country", "ISO3 Alpha-code", "Year", *FIELDS, "cadence_years", "source_url"]
+    os.chmod(DB_PATH, 0o644)
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""CREATE TABLE IF NOT EXISTS wpp_release_history (
             revision INTEGER NOT NULL, Country TEXT NOT NULL, "ISO3 Alpha-code" TEXT,
@@ -174,6 +178,8 @@ def import_release(revision: int, source: str) -> int:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_wpp_release_history_lookup ON wpp_release_history (revision, \"ISO3 Alpha-code\", Year)")
         conn.execute("DELETE FROM wpp_release_history WHERE revision = ?", (revision,))
         rows[columns].to_sql("wpp_release_history", conn, if_exists="append", index=False)
+    os.chmod(DB_PATH, 0o444)
+    build_wpp_serving_database(DB_PATH, PROJECT_ROOT / "databases" / "wpp_serving.sqlite")
     return len(rows)
 
 

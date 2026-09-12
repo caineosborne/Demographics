@@ -5,6 +5,7 @@ import sqlite3
 import time
 import json
 import re
+import unicodedata
 from datetime import datetime, timezone, timedelta
 from functools import lru_cache
 from typing import Any
@@ -16,10 +17,11 @@ from langchain_core.tools import tool
 from langgraph.config import get_stream_writer
 from pypdf import PdfReader
 
-from database_config import configured_database_path
+from database_config import configured_database_path, configured_wpp_database_path
 
 
 DB_PATH = configured_database_path()
+WPP_DB_PATH = configured_wpp_database_path()
 
 
 def initialise_wpp_vintages_table() -> None:
@@ -236,6 +238,16 @@ def get_connection() -> sqlite3.Connection:
     return sqlite3.connect(DB_PATH)
 
 
+def get_wpp_connection() -> sqlite3.Connection:
+    """Open the generated WPP serving database without granting write access."""
+    if not WPP_DB_PATH.is_file():
+        raise FileNotFoundError(
+            f"WPP serving database not found: {WPP_DB_PATH}. Run database_maintenance.py "
+            "--build-wpp-serving after preparing the archive."
+        )
+    return sqlite3.connect(f"file:{WPP_DB_PATH.resolve().as_posix()}?mode=ro", uri=True)
+
+
 def canonicalise_source_url(url: str) -> str:
     """Return the shared canonical key used for URL deduplication."""
     parts = urlsplit(str(url or "").strip())
@@ -308,16 +320,22 @@ def initialise_findings_table() -> None:
                 max_age_days INTEGER NOT NULL DEFAULT 90 CHECK(max_age_days >= 0),
                 only_when_country_blank_days INTEGER NOT NULL DEFAULT 90
                     CHECK(only_when_country_blank_days >= 0),
+                allow_undated_seed INTEGER NOT NULL DEFAULT 0 CHECK(allow_undated_seed IN (0, 1)),
                 note TEXT
             )
         """)
+        fallback_columns = {row[1] for row in conn.execute("PRAGMA table_info(fallback_providers)")}
+        if "allow_undated_seed" not in fallback_columns:
+            conn.execute(
+                "ALTER TABLE fallback_providers ADD COLUMN allow_undated_seed INTEGER NOT NULL DEFAULT 0"
+            )
         # These are deliberately seeds, rather than a migration which replaces
         # rows: an administrator's changes must survive future application
         # starts and deployments.
         conn.executemany(
             """INSERT OR IGNORE INTO fallback_providers
-               (domain, enabled, max_age_days, only_when_country_blank_days, note)
-               VALUES (?, 1, 90, 90, ?)""",
+               (domain, enabled, max_age_days, only_when_country_blank_days, allow_undated_seed, note)
+               VALUES (?, 1, 90, 90, 1, ?)""",
             [
                 ('statista.com', 'Allowed only to fill a recent country-data gap; preserve attribution caveats.'),
                 ('ourworldindata.org', 'Allowed only to fill a recent country-data gap; linked WPP series is not independent corroboration.'),
@@ -340,6 +358,18 @@ def initialise_findings_table() -> None:
             conn.execute(
                 "INSERT INTO findings_schema_migrations(name, applied_at) VALUES (?, ?)",
                 ('source_classification_v1', datetime.now(timezone.utc).isoformat()),
+            )
+        fallback_seed_migrated = conn.execute(
+            "SELECT 1 FROM findings_schema_migrations WHERE name = 'fallback_undated_seed_v1'"
+        ).fetchone()
+        if not fallback_seed_migrated:
+            conn.execute(
+                """UPDATE fallback_providers SET allow_undated_seed = 1
+                   WHERE domain IN ('statista.com', 'ourworldindata.org')"""
+            )
+            conn.execute(
+                "INSERT INTO findings_schema_migrations(name, applied_at) VALUES (?, ?)",
+                ('fallback_undated_seed_v1', datetime.now(timezone.utc).isoformat()),
             )
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_webpage_findings_report
@@ -765,22 +795,35 @@ def _fallback_exclusion(finding: dict[str, Any], provenance: dict[str, Any], con
     provider = fallback_provider_for_url(finding['url'])
     if provider is None:
         return None
-    published = _parse_publication_date(provenance.get('published_date'))
-    if published is None:
-        return {
-            'reason': f"Fallback provider {provider['domain']} requires a parseable publication date.",
-        }
-    age = datetime.now(timezone.utc) - published
-    if age > timedelta(days=int(provider['max_age_days'])):
-        return {
-            'reason': (f"Fallback provider {provider['domain']} article is older than "
-                       f"{provider['max_age_days']} days."),
-        }
     country = finding.get('geography') or ''
     if _has_recent_article_datapoint(conn, country, int(provider['only_when_country_blank_days'])):
         return {
             'reason': (f"{country} already has an article-derived datapoint acquired in the preceding "
                        f"{provider['only_when_country_blank_days']} days."),
+        }
+    published = _parse_publication_date(provenance.get('published_date'))
+    if published is None:
+        parsed = urlsplit(str(finding.get("url") or ""))
+        is_undated_profile = (
+            str(provider["domain"]).casefold() == "ourworldindata.org"
+            and parsed.path.casefold().startswith("/profile/")
+        )
+        if not provider.get('allow_undated_seed') or not is_undated_profile:
+            return {
+                'reason': (
+                    f"Fallback provider {provider['domain']} requires a parseable publication date "
+                    "unless it is an enabled undated country profile."
+                ),
+            }
+        # Evergreen country profiles can be a useful first seed when this
+        # country has no recent article data. They remain secondary evidence,
+        # not a substitute for a dated release or an official source.
+        return None
+    age = datetime.now(timezone.utc) - published
+    if age > timedelta(days=int(provider['max_age_days'])):
+        return {
+            'reason': (f"Fallback provider {provider['domain']} article is older than "
+                       f"{provider['max_age_days']} days."),
         }
     return None
 
@@ -1063,8 +1106,16 @@ def normalise_stored_finding_geographies() -> int:
 
 
 def run_query(sql: str, params: tuple = ()) -> list[dict]:
-    """Run a parameterized query and return rows as dictionaries."""
+    """Run an operational-database query and return rows as dictionaries."""
     with get_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+
+def run_wpp_query(sql: str, params: tuple = ()) -> list[dict]:
+    """Run a parameterized read against the generated WPP serving database."""
+    with get_wpp_connection() as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
@@ -1082,14 +1133,14 @@ def resolve_country_iso3(country_name: str) -> str | None:
           AND "ISO3 Alpha-code" IS NOT NULL
           AND "ISO3 Alpha-code" != ''
     '''
-    rows = run_query(sql, (canonical,))
+    rows = run_wpp_query(sql, (canonical,))
     return rows[0]["iso3"] if len(rows) == 1 else None
 
 
 @lru_cache(maxsize=1)
 def _country_reference() -> tuple[tuple[str, str], ...]:
     """Cache the small, static UN country/name-to-ISO reference in-process."""
-    rows = run_query('''
+    rows = run_wpp_query('''
         SELECT DISTINCT Country, "ISO3 Alpha-code" AS ISO3
         FROM medium_variant
         ORDER BY Country
@@ -1111,12 +1162,24 @@ def normalise_country_name(country_name: str) -> str | None:
         return None
     matches = [name for name, iso3 in rows
                if name.casefold() == candidate or iso3.casefold() == candidate]
-    return matches[0] if len(matches) == 1 else None
+    if len(matches) == 1:
+        return matches[0]
+    # Let the WPP country reference resolve harmless presentation differences
+    # (for example ``Vietnam`` vs ``Viet Nam``) rather than growing a list of
+    # one-off spelling aliases. A match must remain unique to be accepted.
+    def reference_key(value: str) -> str:
+        decomposed = unicodedata.normalize("NFKD", value.casefold())
+        return "".join(character for character in decomposed
+                       if character.isalnum() and not unicodedata.combining(character))
+
+    candidate_key = reference_key(candidate)
+    normalized_matches = [name for name, _iso3 in rows if reference_key(name) == candidate_key]
+    return normalized_matches[0] if len(normalized_matches) == 1 else None
 
 
 def list_country_names() -> list[str]:
     """List canonical country names for user-interface selectors."""
-    return [row["Country"] for row in run_query(
+    return [row["Country"] for row in run_wpp_query(
         '''SELECT DISTINCT Country FROM medium_variant
            WHERE "ISO3 Alpha-code" IS NOT NULL
              AND length(trim("ISO3 Alpha-code")) = 3
@@ -1170,7 +1233,7 @@ def get_population_forecast(
     if len(country_iso3) != 3 or not country_iso3.isalpha():
         raise ValueError("country_iso3 must be a three-letter ISO country code, such as JPN.")
     report_activity(f"[UN query] table={table_name} ISO3={country_iso3} years={years}")
-    return run_query(sql, (country_iso3, *years))
+    return run_wpp_query(sql, (country_iso3, *years))
 
 
 @tool
@@ -1187,7 +1250,7 @@ def get_list_of_countries() -> list[dict]:
         ORDER BY Country, ISO3
     """
     report_activity("[UN query] listing country and ISO3 reference data")
-    return run_query(sql)
+    return run_wpp_query(sql)
 
 
 tools = [get_population_forecast, get_list_of_countries]

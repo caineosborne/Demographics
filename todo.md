@@ -5,3 +5,5 @@
 3. Done — report source status in the database and on graphs.
 
 4. rebuild everything using FastAPI and jina to display - rather than gradio
+
+5 - how do we deal with reports that have multiple countries -      

@@ -17,6 +17,8 @@ DATABASE_DIR = PROJECT_ROOT / "databases"
 DATABASE_FILENAME = "WPP2024_GEN_F01_DEMOGRAPHIC_INDICATORS_COMPACT.sqlite"
 DEFAULT_DB_PATH = DATABASE_DIR / DATABASE_FILENAME
 BACKUP_DIR = DATABASE_DIR / "backups"
+WPP_ARCHIVE_PATH = PROJECT_ROOT / "Data_Files" / "WPP2024_GEN_F01_DEMOGRAPHIC_INDICATORS_COMPACT.sqlite"
+DEFAULT_WPP_SERVING_PATH = DATABASE_DIR / "wpp_serving.sqlite"
 
 
 def configured_database_path() -> Path:
@@ -30,3 +32,15 @@ def configured_database_path() -> Path:
         return Path(configured).expanduser().resolve()
     return DEFAULT_DB_PATH
 
+
+def configured_wpp_database_path() -> Path:
+    """Return the generated, read-only WPP serving database.
+
+    The optional override permits deployments to mount the serving data
+    independently from the writable research database.  It deliberately has
+    no fallback to ``Data_Files``: that directory is the offline archive.
+    """
+    configured = os.environ.get("DEMOGRAPHICS_WPP_DB_PATH")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return DEFAULT_WPP_SERVING_PATH

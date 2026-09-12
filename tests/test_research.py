@@ -89,7 +89,9 @@ class ResearchTests(unittest.TestCase):
                 self.full_review.return_value = ReviewDecision(decision=verdict, reason='Full page evidence')
                 row = self.run_boss([candidate(f'https://example.test/unclear-{index}')])[0]
                 self.assertEqual(row['status'], expected)
-                self.assertEqual(store.get_candidate(row['id'])['details']['full_text'], self.fetch.return_value)
+                details = store.get_candidate(row['id'])['details']
+                self.assertTrue(details['page_loaded'])
+                self.assertNotIn('full_text', details)
         self.extract.assert_called_once()
         # Automatic discovery extracts and stores; UN comparison is reserved
         # for the manual Analyse webpage flow.
@@ -97,6 +99,15 @@ class ResearchTests(unittest.TestCase):
         provenance = self.extract.call_args.args[2]
         self.assertEqual(provenance['submission_type'], 'automatic')
         self.assertEqual(provenance['search_candidate_id'], row['id'])
+
+    def test_terminal_candidate_keeps_compact_loaded_audit_not_article_content(self):
+        row = self.run_boss([candidate()])[0]
+
+        details = store.get_candidate(row['id'])['details']
+        self.assertEqual(row['status'], 'complete')
+        self.assertTrue(details['page_loaded'])
+        self.assertEqual(details['loaded_url'], 'https://example.test/article')
+        self.assertNotIn('full_text', details)
 
     def test_access_blocks_are_distinguished_from_other_article_errors(self):
         self.fetch.side_effect = tools.PageAccessError('Publisher denied access')

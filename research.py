@@ -50,6 +50,10 @@ national human demographic figures. Use irrelevant when the title or snippet
 already establishes an exclusion. Use unclear only when a plausibly relevant
 national demographic article lacks enough evidence to decide; never use unclear
 merely because downloading the full article might reveal more information.
+Do not accept subgroup counts as national metrics: asylum/visa/refugee
+applications, a demographic group defined by origin, religion, age or cause of
+death, and programme/policy totals are irrelevant unless the title or snippet
+also clearly identifies a separate whole-country demographic total.
 Distinguish publication date from the period measured; historic measurement
 periods may appear in newly published releases. Prefer annual flow statistics;
 quarterly, monthly, and year-to-date flows are useful evidence but cannot be
@@ -163,7 +167,7 @@ def canonical_url(url):
 
 LOW_VALUE_DOMAINS = {
     'facebook.com', 'web.archive.org', 'youtube.com', 'youtu.be', 'wikipedia.org',
-    'worldpopulationclock.net', 'populationpyramid.net',
+    'worldpopulationclock.net', 'populationpyramid.net', 'datareportal.com',
 }
 LOW_VALUE_TERMS = {
     'methodology', 'understanding', 'explainer', 'what is', 'faq', 'frequently asked',

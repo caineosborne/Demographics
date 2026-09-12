@@ -57,7 +57,7 @@ class VisualisationTests(unittest.TestCase):
         return sqlite3.connect(self.db_path)
 
     def test_charts_include_un_history_forecast_and_classified_finding(self):
-        with patch.object(visualisation, 'get_connection', self.connection), patch.object(visualisation, 'initialise_findings_table'):
+        with patch.object(visualisation, 'get_connection', self.connection), patch.object(visualisation, 'get_wpp_connection', self.connection), patch.object(visualisation, 'initialise_findings_table'):
             population, flows, message = visualisation.build_visualisation(
                 'Japan', list(visualisation.METRICS)
             )
@@ -72,7 +72,7 @@ class VisualisationTests(unittest.TestCase):
         self.assertEqual(flows.layout.height, 1250)
 
     def test_tfr_uses_births_per_woman_without_people_scaling(self):
-        with patch.object(visualisation, 'get_connection', self.connection), patch.object(visualisation, 'initialise_findings_table'):
+        with patch.object(visualisation, 'get_connection', self.connection), patch.object(visualisation, 'get_wpp_connection', self.connection), patch.object(visualisation, 'initialise_findings_table'):
             _, flows, _ = visualisation.build_visualisation('Japan', ['total_fertility_rate'])
         historic = next(trace for trace in flows.data if trace.name == 'UN historic')
         stored = next(trace for trace in flows.data if trace.name == f'Stored estimates — {visualisation.SOURCE_CLASS_KEY}')
@@ -86,13 +86,13 @@ class VisualisationTests(unittest.TestCase):
         self.assertEqual(stored.customdata[0][1], 'Secondary — named source')
 
     def test_metrics_can_be_disabled(self):
-        with patch.object(visualisation, 'get_connection', self.connection), patch.object(visualisation, 'initialise_findings_table'):
+        with patch.object(visualisation, 'get_connection', self.connection), patch.object(visualisation, 'get_wpp_connection', self.connection), patch.object(visualisation, 'initialise_findings_table'):
             population, flows, _ = visualisation.build_visualisation('Japan', ['population'])
         self.assertTrue(population.data)
         self.assertFalse(flows.data)
 
     def test_selected_prior_revisions_are_dotted_optional_overlays(self):
-        with patch.object(visualisation, 'get_connection', self.connection), patch.object(visualisation, 'initialise_findings_table'), patch.object(visualisation, 'resolve_country_iso3', return_value='JPN'):
+        with patch.object(visualisation, 'get_connection', self.connection), patch.object(visualisation, 'get_wpp_connection', self.connection), patch.object(visualisation, 'initialise_findings_table'), patch.object(visualisation, 'resolve_country_iso3', return_value='JPN'):
             population, _, message = visualisation.build_visualisation('Japan', ['population'], alternate_revisions=[2022, 2017, 2012])
         traces = {trace.name: trace for trace in population.data}
         self.assertEqual(traces['UN historic'].line.dash, 'solid')
@@ -110,13 +110,13 @@ class VisualisationTests(unittest.TestCase):
         self.assertIn('Enter the country name', message)
 
     def test_blank_country_uses_the_latest_analysis_country(self):
-        with patch.object(visualisation, 'get_connection', self.connection), patch.object(visualisation, 'initialise_findings_table'):
+        with patch.object(visualisation, 'get_connection', self.connection), patch.object(visualisation, 'get_wpp_connection', self.connection), patch.object(visualisation, 'initialise_findings_table'):
             population, _, message = visualisation.build_visualisation_for_latest_analysis('', 'Japan', ['population'])
         self.assertTrue(population.data)
         self.assertIn('10 UN historical years', message)
 
     def test_country_matching_is_case_insensitive_for_un_and_stored_data(self):
-        with patch.object(visualisation, 'get_connection', self.connection), patch.object(visualisation, 'initialise_findings_table'), patch.object(visualisation, 'normalise_country_name', return_value='Japan'):
+        with patch.object(visualisation, 'get_connection', self.connection), patch.object(visualisation, 'get_wpp_connection', self.connection), patch.object(visualisation, 'initialise_findings_table'), patch.object(visualisation, 'normalise_country_name', return_value='Japan'):
             population, _, message = visualisation.build_visualisation('japan', ['population'])
         self.assertIn('for Japan', message)
         self.assertIn('UN historic', {trace.name for trace in population.data})
