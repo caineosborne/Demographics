@@ -67,6 +67,7 @@ def create_job(kind, payload=None, job_id=None):
 def get_job(job_id):
     initialise()
     with tools.get_connection() as conn:
+        conn.row_factory = tools.sqlite3.Row
         row = conn.execute('SELECT * FROM worker_jobs WHERE id = ?', (str(job_id),)).fetchone()
     if not row:
         return None
@@ -95,6 +96,32 @@ def update_job(job_id, *, status=None, result=None, progress=None, error=None, i
     with tools.get_connection() as conn:
         conn.execute(f"UPDATE worker_jobs SET {', '.join(updates)} WHERE id = ?", values)
     return get_job(job_id)
+
+
+def recover_orphaned_worker_jobs():
+    """Make work left by a terminated local process safe to retry.
+
+    The Phase 2 runner is deliberately single-worker.  On startup there can
+    therefore be no live owner for a previously ``running`` local job; retain
+    its audit trail, mark it interrupted, and release its discovery lock.
+    """
+    initialise()
+    timestamp = now()
+    with tools.get_connection() as conn:
+        rows = conn.execute("SELECT id FROM worker_jobs WHERE status = 'running'").fetchall()
+        ids = [row[0] for row in rows]
+        if ids:
+            placeholders = ', '.join('?' for _ in ids)
+            conn.execute(
+                f"UPDATE worker_jobs SET status = 'interrupted', updated_at = ?, "
+                f"error = COALESCE(error, ?) WHERE id IN ({placeholders})",
+                (timestamp, 'Worker process ended before the job completed.', *ids),
+            )
+            conn.execute(f"DELETE FROM worker_locks WHERE job_id IN ({placeholders})", ids)
+        # A lock without a running job is necessarily orphaned as well.
+        conn.execute("DELETE FROM worker_locks WHERE job_id NOT IN "
+                     "(SELECT id FROM worker_jobs WHERE status = 'running')")
+    return len(ids)
 
 
 def acquire_worker_lock(name, job_id):

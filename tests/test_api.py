@@ -10,6 +10,17 @@ from read_services import graph_series
 
 
 class ApiBoundaryTests(unittest.TestCase):
+    def test_local_frontend_is_served_without_an_authentication_flow(self):
+        client = TestClient(create_app())
+
+        page = client.get("/")
+        script = client.get("/assets/app.js")
+
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("Route console", page.text)
+        self.assertNotIn("login", page.text.casefold())
+        self.assertEqual(script.status_code, 200)
+
     def test_health_endpoint_returns_typed_boundary_response(self):
         client = TestClient(create_app(Settings(environment="test")))
 

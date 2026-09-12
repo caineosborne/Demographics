@@ -10,7 +10,7 @@
   - [x] **Step 1.7 — Verify record and metric deletion**
   - [x] **Step 1.5 — Reduce the candidate audit**
   - [x] **Step 1.6 — Prepare the full and filtered WPP databases**
-- [ ] **Phase 2 — Replace the backend behind the retained Gradio client**
+- [ ] **Phase 2 — Establish the backend alongside the retained Gradio client**
   - [x] **Step 2.1 — Establish the FastAPI application boundary**
   - [x] **Step 2.2 — Extract read-only query and graph services**
   - [x] **Step 2.3 — Extract finding administration services**
@@ -19,14 +19,16 @@
   - [x] **Step 2.5a — Audit and complete ISO3-only country identity**
   - [x] **Step 2.6 — Add durable worker commands and job state**
   - [x] **Step 2.7 — Add versioned JSON endpoints and fixtures**
-  - [ ] **Step 2.8 — Route Gradio through services and prove parity**
+  - [x] **Step 2.8 — Build a basic API testing frontend**
 - [ ] **Phase 3 — Build the admin interface and retire Gradio**
   - [ ] **Step 3.1 — Build the admin application shell**
-  - [ ] **Step 3.2 — Rebuild manual webpage analysis**
-  - [ ] **Step 3.3 — Rebuild research and country-hunt controls**
-  - [ ] **Step 3.4 — Rebuild findings and administration**
-  - [ ] **Step 3.5 — Rebuild the graphs and reporting**
-  - [ ] **Step 3.6 — Cut over and retire Gradio**
+  - [ ] **Step 3.2 — Prove service-level parity against Gradio**
+  - [ ] **Step 3.3 — Complete backend durability and frontend contracts**
+  - [ ] **Step 3.4 — Rebuild manual webpage analysis**
+  - [ ] **Step 3.5 — Rebuild research and country-hunt controls**
+  - [ ] **Step 3.6 — Rebuild findings and administration**
+  - [ ] **Step 3.7 — Rebuild the graphs and reporting**
+  - [ ] **Step 3.8 — Cut over and retire Gradio**
 - [ ] **Phase 4 — Add the claims and conflict framework**
   - [ ] **Step 4.1 — Introduce source documents, claims, and observation groups**
   - [ ] **Step 4.2 — Migrate legacy records and extend backend contracts**
@@ -635,7 +637,8 @@ current graphs and selectors, with no Gradio imports in the service code.
 **Implementation note:** `read_services.py` now owns plain-data country,
 finding, WPP graph-series, run-history, and candidate-history reads. The
 versioned API endpoints expose those structures while Gradio remains the
-unchanged renderer; Plotly/Gradio rendering stays in place until Step 2.8.
+unchanged renderer; Plotly/Gradio rendering stays in place until the Phase 3
+replacement UI is ready.
 
 ### Step 2.3 — Extract finding administration services
 
@@ -708,7 +711,8 @@ Legacy finding rows are backfilled on API reads through the existing country
 reference, while historical WPP release imports backfill ISO3 from canonical
 country labels or numeric location codes before building the serving overlay.
 The API audit does not include the retained Gradio adapters; those remain
-label-oriented until Step 2.8. Durable job storage and cross-process worker
+label-oriented through Phase 2. The Phase 3 UI converts its controls to ISO3
+before calling services. Durable job storage and cross-process worker
 coordination remain Step 2.6 work, not an ISO3 identity gap.
 
 ### Step 2.6 — Add durable worker commands and job state
@@ -739,16 +743,24 @@ failed command is safe.
 **Complete when:** a frontend can be developed from fixtures without direct
 database access.
 
-### Step 2.8 — Route Gradio through services and prove parity
+### Step 2.8 — Build a basic API testing frontend
 
-Make Gradio a thin temporary client of the Phase 2 services. Run existing and
-new regression cases through both routes, including manual analysis, automatic
-search, country hunt, editing, deletion, blocking, rerun behaviour, and graph
-values. Convert every Gradio country selection to ISO3 before calling a
-service, retaining the label solely for presentation.
+Build a deliberately small, local-only frontend against the available API. It
+is a testing surface, not the Phase 3 admin application and not a Gradio
+rewrite. It should support country selection, raw findings and graph-series
+inspection, starting and polling manual-analysis jobs, and starting/observing
+research jobs. It may use simple server-rendered HTML and small JavaScript
+modules; avoid styling, comprehensive administration, duplicated chart logic,
+or a separate frontend framework.
 
-**Complete when:** FastAPI and the retained Gradio client produce the same
-current outcomes, making the browser-client replacement in Phase 3 low risk.
+Keep Gradio unchanged as the operational reference while this surface proves
+that the API is usable from a browser.
+
+**Complete when:** a developer can exercise the principal read and job
+contracts through a browser without direct database access. The local testing
+surface also includes an open route console so every versioned API route can be
+called without introducing a user-admin or authentication workflow at this
+stage.
 
 ## Phase 3 — Build the admin interface and retire Gradio
 
@@ -759,29 +771,68 @@ current outcomes, making the browser-client replacement in Phase 3 low risk.
   poll jobs, and draw Plotly charts; no separate frontend framework is needed.
 - Establish navigation for Overview, Analyse webpage, Research, Country coverage, Findings, Conflicts, Submissions, Exports, and Settings.
 - Add clear loading, running, completed, empty, and failed states.
+- Build one small browser API client for authentication, typed JSON requests,
+  error display, and durable-job polling; do not reuse Gradio callbacks.
+- Populate country controls from API country choices, storing ISO3 values in
+  browser state and using labels only for display.
 
 **Complete when:** the application shell runs locally and can use either the live API or fixtures.
 
-### Step 3.2 — Rebuild manual webpage analysis
+### Step 3.2 — Prove service-level parity against Gradio
 
-- Accept and validate a URL.
+Use the retained Gradio workflow as UAT/reference behavior. Run regression
+cases through the extracted services and API for manual analysis, automatic
+search, country hunts, edits, deletion, blocking, rerun behaviour, and graph
+values. Do not make Gradio a permanent HTTP client; use narrowly scoped,
+disposable adapters only where a treatment test requires one.
+
+**Complete when:** the new UI and API preserve the current business outcomes,
+with Gradio retained only as a fallback/reference until cutover.
+
+### Step 3.3 — Complete backend durability and frontend contracts
+
+- Maintain durable manual and discovery jobs, progress, attempts, recovery,
+  locking, and safe retry behavior; a startup timeout must never permit
+  overlapping discovery work.
+- Finalize typed, versioned public responses, structured run/candidate detail,
+  correct missing-resource errors, and redaction of raw storage/internal audit
+  fields from browser list responses.
+- Add server-side ISO3 country-gap preview and bounded batch selection. Keep
+  labels as display data and show scope-mismatch exclusions explicitly.
+- Expand fixtures and integration tests for jobs, progress, candidate detail,
+  mutations, validation failures, retries, and recovery without live-provider
+  or local-credential dependencies.
+
+**Complete when:** the Phase 3 UI can rely solely on stable, durable API
+contracts and fixtures.
+
+### Step 3.4 — Rebuild manual webpage analysis
+
+- Accept and validate a URL. If the current free-form Gradio prompt is kept,
+  extract exactly one HTTP(S) URL deterministically at the browser boundary;
+  do not make the backend infer an unbounded natural-language request.
 - Display fetch and extraction progress.
 - Show structured metrics, source attribution, effective period, comments, and UN comparison.
 - Allow the administrator to approve, edit, reject, rerun, remove, or suppress the source.
 
 **Complete when:** the current Add Webpage workflow is fully available without Gradio.
 
-### Step 3.3 — Rebuild research and country-hunt controls
+### Step 3.5 — Rebuild research and country-hunt controls
 
 - Preserve editable news categories, search depth, search window, candidate limits, and domain limits.
 - Provide direct country search which always bypasses automatic recency/eligibility rules.
 - Show the bulk-country queue, last attempt, last successful finding, next eligible date, and search outcome.
 - Make it clear that scheduled/bulk discovery does not run the LLM comparison agent; it performs only the deterministic UN lookup.
 - Show live job progress by polling durable job state.
+- Rebuild gap preview and bounded country-batch selection from the Step 3.3
+  API; show country labels beside ISO3 and make scope-mismatch exclusions
+  visible in the candidate audit.
+- Provide compact run history plus explicit run and candidate detail views,
+  including progress events, decisions, recovery attempts, and errors.
 
 **Complete when:** the current research controls and the new country scheduling state are operable locally.
 
-### Step 3.4 — Rebuild findings and administration
+### Step 3.6 — Rebuild findings and administration
 
 - Provide country and metric filters.
 - Display the existing findings, source classifications, comparisons, and
@@ -790,11 +841,14 @@ current outcomes, making the browser-client replacement in Phase 3 low risk.
   rerun actions.
 - Provide source-rule management: exact canonical URL blocks, domain blocks, and source classifications/official-publisher overrides.
 - Keep every source-rule change auditable and reversible.
+- Recreate the current database table, country-coverage summary, record
+  picker, editable JSON review, and safe source link presentation from API
+  responses rather than direct SQLite reads.
 
 **Complete when:** every current finding and its administration controls work
 through the new UI without Gradio.
 
-### Step 3.5 — Rebuild the graphs and reporting
+### Step 3.7 — Rebuild the graphs and reporting
 
 Graph markers:
 
@@ -806,15 +860,21 @@ Graph behaviour:
 
 - Reproduce the current graph values, existing source classifications, and
   WPP reference series exactly.
+- Refactor chart construction into a browser-side renderer that consumes the
+  versioned graph-series response. Keep per-view hidden-finding choices as
+  browser state; use stable finding IDs for mutations and reload the series
+  after a durable change.
 - Defer corroboration grouping, preferred claims, and conflict overlays to
   Phase 4.
 
 **Complete when:** the new graphs reproduce current values and provenance
 without relying on Gradio.
 
-### Step 3.6 — Cut over and retire Gradio
+### Step 3.8 — Cut over and retire Gradio
 
-- Run the FastAPI/Jinja admin alongside Gradio during the Phase 3 rebuild.
+- Run the FastAPI/Jinja admin alongside the unchanged Gradio reference during
+  the Phase 3 rebuild; Gradio is a fallback and parity reference, not an API
+  implementation target.
 - Use the Phase 2 fixtures and parity checks to verify each migrated workflow.
 - Make the Jinja admin the default local application only after the full
   current workflow is available.
@@ -824,7 +884,7 @@ without relying on Gradio.
 **Complete when:** the local admin application runs entirely through the
 FastAPI/Jinja interface and Gradio has been retired.
 
-## Phase 3.6 - Simplification
+## Phase 3.8 - Simplification
 
 What can we do to opsimise the code?
 

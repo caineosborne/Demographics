@@ -26,6 +26,33 @@ Start the Phase 2 API locally with:
 uv run uvicorn api:app --reload
 ```
 
+Open <http://127.0.0.1:8000/> for the deliberately small Phase 2.8 API desk.
+It is local-only and has no user-admin or login flow. The page loads countries,
+findings, and graph series; starts and polls analysis/research jobs; and
+includes an open route console for exercising any `/api/v1` route directly.
+
+### Phase 2.8 frontend coverage
+
+The dedicated controls currently connect to:
+
+- `GET /health`
+- `GET /api/v1/countries`
+- `GET /api/v1/findings?iso3=…`
+- `GET /api/v1/graph-series/{iso3}`
+- `GET /api/v1/research/settings`
+- `POST /api/v1/analysis/jobs` and `GET /api/v1/analysis/jobs/{job_id}`
+- `POST /api/v1/research/jobs` and `GET /api/v1/research/jobs/{run_id}`
+
+The Route console can call every other versioned route, including finding
+mutations, blocked-source and source-rule administration, fallback providers,
+worker jobs, country hunts, research history, and stop/save operations.
+
+The full version should wait for Phase 3: authentication and the admin shell,
+dedicated findings and source-management screens, country-gap and bulk-hunt
+controls, detailed progress/candidate views, production chart rendering,
+validation/error states, and the complete Gradio-parity workflows. Gradio is
+still the operational reference during this testing phase.
+
 The initial boundary exposes `GET /health`. Runtime settings can be adjusted
 with `DEMOGRAPHICS_APP_NAME`, `DEMOGRAPHICS_API_VERSION`, and
 `DEMOGRAPHICS_ENVIRONMENT`.
@@ -40,7 +67,12 @@ uv run python worker.py country-search JPN
 uv run python worker.py maintenance
 uv run python worker.py export export.json
 uv run python worker.py run JOB_ID
+uv run python worker.py recover
 ```
+
+`recover` marks work interrupted by a terminated local API/worker process as
+retryable and releases its discovery lock. Retrying the same job ID records a
+new attempt; completed jobs remain idempotent.
 
 The versioned JSON API includes the read, research, analysis, administration,
 and `GET /api/v1/worker/jobs/{job_id}` contracts. Representative frontend

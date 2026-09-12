@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 import read_services
@@ -169,8 +173,28 @@ def create_app(
     """
 
     runtime_settings = settings or get_settings()
-    app = FastAPI(title=runtime_settings.app_name, version=runtime_settings.api_version)
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        """Recover local worker state left by an earlier terminated process."""
+        research_services.research_store.recover_orphaned_worker_jobs()
+        research_services.research_store.recover_orphaned_runs()
+        yield
+
+    app = FastAPI(
+        title=runtime_settings.app_name,
+        version=runtime_settings.api_version,
+        lifespan=lifespan,
+    )
     app.state.settings = runtime_settings
+
+    frontend_dir = Path(__file__).parent / "frontend"
+
+    @app.get("/", include_in_schema=False)
+    def frontend_index():
+        """Serve the small local API testing surface."""
+        return FileResponse(frontend_dir / "index.html")
+
+    app.mount("/assets", StaticFiles(directory=frontend_dir), name="frontend-assets")
 
     @app.get("/health", response_model=HealthResponse, tags=["system"])
     def health(

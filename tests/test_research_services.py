@@ -1,10 +1,26 @@
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import research_services
+import research_store
+import tools
 
 
 class ResearchServiceTests(unittest.TestCase):
+    def test_orphaned_worker_job_is_interrupted_and_its_lock_is_released(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            tools, 'DB_PATH', Path(directory) / 'test.sqlite'
+        ):
+            job = research_store.create_job('news_search', {'settings': {}})
+            research_store.update_job(job['id'], status='running', increment_attempts=True)
+            research_store.acquire_worker_lock('discovery', job['id'])
+
+            self.assertEqual(research_store.recover_orphaned_worker_jobs(), 1)
+            self.assertEqual(research_store.get_job(job['id'])['status'], 'interrupted')
+            research_store.acquire_worker_lock('discovery', 'next-job')
+
     def test_country_hunt_resolves_iso3_and_persists_it_in_settings(self):
         with patch.object(research_services.tools, 'resolve_country_iso3', return_value='JPN'), \
              patch.object(research_services.tools, 'normalise_country_name', return_value='Japan'), \

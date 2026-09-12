@@ -28,7 +28,7 @@ def run_job(job_id: str) -> dict[str, Any]:
     job = research_store.get_job(job_id)
     if not job:
         raise ValueError(f"Unknown worker job: {job_id}.")
-    if job['status'] in {'complete', 'failed', 'interrupted'}:
+    if job['status'] == 'complete':
         return job
     research_store.update_job(job_id, status='running', increment_attempts=True)
     try:
@@ -93,6 +93,7 @@ def _parser() -> argparse.ArgumentParser:
     country.add_argument('country_iso3')
     country.add_argument('--max-results', type=int, default=12)
     sub.add_parser('maintenance')
+    sub.add_parser('recover')
     export = sub.add_parser('export')
     export.add_argument('output', type=Path)
     run = sub.add_parser('run')
@@ -102,6 +103,11 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> None:
     args = _parser().parse_args(argv)
+    if args.command == 'recover':
+        recovered_jobs = research_store.recover_orphaned_worker_jobs()
+        recovered_runs = research_store.recover_orphaned_runs()
+        print(json.dumps({'interrupted_jobs': recovered_jobs, 'interrupted_runs': recovered_runs}))
+        return
     if args.command == 'run':
         job = run_job(args.job_id)
     elif args.command == 'manual-analysis':
@@ -126,6 +132,8 @@ def main(argv=None) -> None:
         job = research_store.create_job('export', {'output': str(args.output)})
         job = run_job(job['id'])
     print(json.dumps(job, indent=2, default=str))
+    if job['status'] in {'failed', 'interrupted'}:
+        raise SystemExit(1)
 
 
 if __name__ == '__main__':

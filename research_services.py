@@ -48,6 +48,7 @@ def start_manual_analysis(url: str, *, country_iso3: str | None = None,
     research_store.create_job('manual_analysis', {
         'url': url, 'country_iso3': job['country_iso3'], 'compare': bool(compare)
     }, job_id=job_id)
+    research_store.update_job(job_id, status='running', increment_attempts=True)
     worker = threading.Thread(target=_run_manual, args=(job_id, url, context, bool(compare)),
                               name=f'manual-analysis-{job_id}', daemon=True)
     worker.start()
@@ -183,6 +184,8 @@ def _start_research(settings: dict[str, Any]) -> dict[str, Any]:
     stop_event = threading.Event()
     lock_id = str(uuid4())
     research_store.acquire_worker_lock('discovery', lock_id)
+    worker_job = research_store.create_job('news_search', {'settings': settings}, job_id=lock_id)
+    research_store.update_job(lock_id, status='running', increment_attempts=True)
 
     def worker() -> None:
         try:
@@ -190,13 +193,19 @@ def _start_research(settings: dict[str, Any]) -> dict[str, Any]:
             first = next(iterator)
             holder['run_id'] = first[0]
             ready.set()
-            for _run_id, _message in iterator:
-                pass
+            for _run_id, message in iterator:
+                research_store.log_event(_run_id, {'event': 'progress', 'message': message})
+                research_store.update_job(lock_id, progress={'run_id': _run_id, 'message': message})
+            completed_run = research_store.get_run(holder['run_id']) or {}
+            job_status = 'interrupted' if completed_run.get('status') == 'interrupted' else 'complete'
+            research_store.update_job(lock_id, status=job_status, result={'run_id': holder['run_id']})
         except StopIteration:
             ready.set()
+            research_store.update_job(lock_id, status='complete', result={})
         except Exception as exc:
             holder['error'] = str(exc)
             ready.set()
+            research_store.update_job(lock_id, status='failed', error=str(exc))
         finally:
             research_store.release_worker_lock('discovery', lock_id)
             run_id = holder.get('run_id')
@@ -207,17 +216,18 @@ def _start_research(settings: dict[str, Any]) -> dict[str, Any]:
     thread = threading.Thread(target=worker, name='demographics-research-api', daemon=True)
     thread.start()
     if not ready.wait(timeout=10):
-        research_store.release_worker_lock('discovery', lock_id)
-        raise RuntimeError('Research job did not start within ten seconds.')
+        # The thread may be about to acquire its run ID.  Releasing the lock
+        # here would allow a second discovery run to overlap it.
+        stop_event.set()
+        raise RuntimeError(f'Research job {worker_job["id"]} did not start within ten seconds.')
     if holder.get('error'):
-        research_store.release_worker_lock('discovery', lock_id)
         raise ValueError(holder['error'])
     run_id = holder.get('run_id')
     if not run_id:
         raise RuntimeError('Research job did not return a run identifier.')
     with _research_lock:
         _research_workers[run_id] = (thread, stop_event)
-    return {'run_id': run_id, 'status': 'running'}
+    return {'run_id': run_id, 'job_id': worker_job['id'], 'status': 'running'}
 
 
 def _run_manual(job_id: str, url: str, context: dict[str, str] | None, compare: bool) -> None:

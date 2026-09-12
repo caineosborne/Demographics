@@ -43,6 +43,9 @@ class ResearchTests(unittest.TestCase):
         self.skills = ResearchSkills(
             self.summary_review, self.fetch, self.extract, self.compare, self.full_review,
         )
+        # Tests must not let a developer's Tavily credential turn an access
+        # failure into a live recovery-search request.
+        self.skills.find_alternative_sources = MagicMock(return_value=[])
 
     def tearDown(self):
         self.db_patch.stop()
