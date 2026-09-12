@@ -570,14 +570,6 @@ def research_agent(state: State):
             "result": result,
             "storage": {"status": "excluded_subnational", "reason": reason},
         }
-    if provenance.get("submission_type") == "automatic" and not result.official_source and not result.quoted_source:
-        reason = 'Secondary source does not name an official statistical source for the reported figures.'
-        report_activity(f"[Research agent] excluded unattributed secondary source: {result.url}")
-        return {
-            "messages": new_messages,
-            "result": result,
-            "storage": {"status": "excluded_unattributed_source", "reason": reason},
-        }
     # Keep the findings database focused on figures that can actually be
     # reviewed against the UN series. A value explicitly marked ineligible
     # (for example, an unclear or partial migration period) remains visible in

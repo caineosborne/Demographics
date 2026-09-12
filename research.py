@@ -439,6 +439,9 @@ class ResearchSkills:
     review_summaries: object = review_summaries
     fetch_article: object = lambda url: tools.get_page_text.invoke({'url': url})
     extract_useful_info: object = extract_useful_info
+    # Kept as an injectable legacy field so callers constructed against the
+    # earlier skills contract continue to work. Automatic discovery must not
+    # call it: UN comparison is a manual Analyse webpage action only.
     compare: object = compare_finding
     review_full_article: object = review_link
     extract_tavily_articles: object = tavily_extract_articles
@@ -506,6 +509,12 @@ class BossAgent:
                     except ValueError:
                         pass
                 blocked = {row[0] for row in conn.execute('SELECT canonical_url FROM blocked_sources')}
+            historical_candidates = {}
+            for prior_candidate_id, prior_url in store.list_historical_candidate_urls(run_id):
+                try:
+                    historical_candidates.setdefault(canonical_url(prior_url), prior_candidate_id)
+                except ValueError:
+                    pass
             seen = {}
             domains_seen = {}
             processed = 0
@@ -522,19 +531,32 @@ class BossAgent:
                         record_outcome('excluded_blocked_source')
                         yield run_id, f'BLOCKED — {candidate.get("title") or url}'
                         continue
-                    if url in seen or url in known:
+                    source_rule = tools.source_rule_for_url(url)
+                    if source_rule and source_rule['action'] == 'exclude':
+                        reason = source_rule.get('note') or 'Excluded by configured source rule.'
+                        store.update_candidate(
+                            candidate_id, status='excluded_source_rule', canonical_url=url,
+                            full_reason=reason,
+                        )
+                        record_outcome('excluded_source_rule')
+                        yield run_id, f'EXCLUDED BY SOURCE RULE — {candidate.get("title") or url}'
+                        continue
+                    if url in seen or url in historical_candidates or url in known:
                         duplicate_candidate_id = seen.get(url)
                         finding_id = known.get(url)
+                        prior_candidate_id = historical_candidates.get(url)
                         matches = []
                         if duplicate_candidate_id:
                             matches.append(f'candidate #{duplicate_candidate_id} in this run')
+                        if prior_candidate_id:
+                            matches.append(f'candidate #{prior_candidate_id} in an earlier run')
                         if finding_id:
                             matches.append(f'database finding #{finding_id}')
                         duplicate_of = ' and '.join(matches)
                         store.update_candidate(
                             candidate_id,
                             status='duplicate',
-                            duplicate_candidate_id=duplicate_candidate_id,
+                            duplicate_candidate_id=duplicate_candidate_id or prior_candidate_id,
                             finding_id=finding_id,
                             duplicate_of=duplicate_of,
                             canonical_url=url,
@@ -719,6 +741,7 @@ class BossAgent:
                         model_page = compact_article_text(page)
                         store.update_candidate(
                             candidate_id, status='reviewing_full_text', full_text=page,
+                            loaded_url=retrieval_url,
                             fetch_seconds=fetch_seconds, model_text_characters=len(model_page),
                             original_text_characters=len(page),
                             content_transport=content_transport,
@@ -743,6 +766,7 @@ class BossAgent:
                         state = self.skills.extract_useful_info(analysis_candidate, model_page, {
                             'submission_type': 'automatic', 'discovery_source': candidate['source'],
                             'search_run_id': run_id, 'search_candidate_id': candidate_id,
+                            'published_date': candidate.get('published_date'),
                         })
                         check_stopped()
                         storage = state.get('storage') or {}
@@ -767,15 +791,25 @@ class BossAgent:
                             record_outcome('excluded_subnational')
                             yield run_id, f'Excluded subnational/unmatched geography: {retrieval_url}'
                             continue
-                        if storage.get('status') == 'excluded_unattributed_source':
+                        if storage.get('status') == 'excluded_source_rule':
                             store.update_candidate(
-                                candidate_id, status='excluded_unattributed_source', storage=storage,
+                                candidate_id, status='excluded_source_rule', storage=storage,
                                 extraction=state['result'].model_dump(mode='json'),
                                 extraction_seconds=round(perf_counter() - started, 2),
-                                full_reason=storage.get('reason') or 'Secondary source lacks an official attribution.',
+                                full_reason=storage.get('reason') or 'Excluded by configured source rule.',
                             )
-                            record_outcome('excluded_unattributed_source')
-                            yield run_id, f'Excluded unattributed secondary source: {retrieval_url}'
+                            record_outcome('excluded_source_rule')
+                            yield run_id, f'EXCLUDED BY SOURCE RULE — {retrieval_url}'
+                            continue
+                        if storage.get('status') == 'excluded_fallback_not_needed':
+                            store.update_candidate(
+                                candidate_id, status='excluded_fallback_not_needed', storage=storage,
+                                extraction=state['result'].model_dump(mode='json'),
+                                extraction_seconds=round(perf_counter() - started, 2),
+                                full_reason=storage.get('reason') or 'Fallback provider was not needed for this country.',
+                            )
+                            record_outcome('excluded_fallback_not_needed')
+                            yield run_id, f'Excluded fallback provider result — {retrieval_url}'
                             continue
                         if storage.get('status') in {'excluded_duplicate_url', 'excluded_duplicate_report'}:
                             duplicate_kind = (
@@ -798,43 +832,11 @@ class BossAgent:
                             yield run_id, f'DUPLICATE — {retrieval_url} — matches {duplicate_of} ({duplicate_kind})'
                             continue
                         store.update_candidate(
-                            candidate_id, status='comparing', finding_id=finding_id,
-                            extraction=state['result'].model_dump(mode='json'), storage=storage,
-                            extraction_seconds=round(perf_counter() - started, 2),
-                        )
-                        yield run_id, f'Comparison agent: {retrieval_url}'
-                        started = perf_counter()
-                        comparison = self.skills.compare(state)
-                        check_stopped()
-                        comparison_result = comparison['comparison']
-                        outlier_fields = [
-                            field for field in ('population', 'births', 'deaths', 'natural_change', 'net_migration', 'total_fertility_rate')
-                            if getattr(comparison_result, field).outlier_excluded
-                        ]
-                        if outlier_fields and all(
-                            getattr(comparison_result, field).reported is None
-                            for field in ('population', 'births', 'deaths', 'natural_change', 'net_migration', 'total_fertility_rate')
-                        ):
-                            if finding_id:
-                                tools.delete_webpage_finding(int(finding_id))
-                            reason = '; '.join(
-                                getattr(comparison_result, field).outlier_reason or field for field in outlier_fields
-                            )
-                            store.update_candidate(
-                                candidate_id, status='excluded_outlier',
-                                comparison=comparison_result.model_dump(mode='json'),
-                                un_data=comparison.get('un_data'),
-                                comparison_seconds=round(perf_counter() - started, 2),
-                                full_reason=reason,
-                            )
-                            record_outcome('excluded_outlier')
-                            yield run_id, f'Excluded after comparison — all metrics exceeded 50% threshold: {retrieval_url}'
-                            continue
-                        store.update_candidate(
                             candidate_id, status='complete',
-                            comparison=comparison_result.model_dump(mode='json'),
-                            un_data=comparison.get('un_data'),
-                            comparison_seconds=round(perf_counter() - started, 2),
+                            finding_id=finding_id,
+                            extraction=state['result'].model_dump(mode='json'), storage=storage,
+                            source_classification=storage.get('source_classification'),
+                            extraction_seconds=round(perf_counter() - started, 2),
                         )
                         record_outcome('complete')
                     except ResearchStopRequested:

@@ -81,15 +81,19 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual([len(call.args[0]) for call in self.summary_review.call_args_list], [20, 1])
 
     def test_unclear_summary_fetches_and_full_review_gates_extraction(self):
-        for verdict, expected in [('irrelevant', 'irrelevant_full_text'), ('unclear', 'needs_review'), ('relevant', 'complete')]:
+        for index, (verdict, expected) in enumerate([
+            ('irrelevant', 'irrelevant_full_text'), ('unclear', 'needs_review'), ('relevant', 'complete')
+        ]):
             with self.subTest(verdict=verdict):
                 self.summary_decision = ReviewDecision(decision='unclear', reason='No figures in snippet')
                 self.full_review.return_value = ReviewDecision(decision=verdict, reason='Full page evidence')
-                row = self.run_boss([candidate()])[0]
+                row = self.run_boss([candidate(f'https://example.test/unclear-{index}')])[0]
                 self.assertEqual(row['status'], expected)
                 self.assertEqual(store.get_candidate(row['id'])['details']['full_text'], self.fetch.return_value)
         self.extract.assert_called_once()
-        self.compare.assert_called_once()
+        # Automatic discovery extracts and stores; UN comparison is reserved
+        # for the manual Analyse webpage flow.
+        self.compare.assert_not_called()
         provenance = self.extract.call_args.args[2]
         self.assertEqual(provenance['submission_type'], 'automatic')
         self.assertEqual(provenance['search_candidate_id'], row['id'])
@@ -114,6 +118,35 @@ class ResearchTests(unittest.TestCase):
         self.assertIn('Duplicate of candidate', rows[0]['full_reason'])
         self.fetch.assert_called_once()
         self.assertEqual(rows[0]['source'], 'reddit')
+
+    def test_historical_loaded_page_is_duplicate_before_review(self):
+        prior_run = store.start_run(self.settings)
+        prior_id = store.add_candidate(prior_run, candidate())
+        store.update_candidate(
+            prior_id, status='irrelevant_full_text', full_text='Previously loaded page',
+            loaded_url='https://example.test/article', summary_reason='Previously reviewed as not relevant',
+        )
+        store.finish_run(prior_run, 'completed')
+
+        rows = self.run_boss([candidate()])
+
+        self.assertEqual(rows[0]['status'], 'duplicate')
+        self.assertEqual(rows[0]['duplicate_of'], f'candidate #{prior_id} in an earlier run')
+        self.assertIn('normalizes to https://example.test/article', rows[0]['full_reason'])
+        self.summary_review.assert_not_called()
+        self.fetch.assert_not_called()
+        self.compare.assert_not_called()
+
+    def test_historical_unloaded_candidate_is_retried(self):
+        prior_run = store.start_run(self.settings)
+        prior_id = store.add_candidate(prior_run, candidate())
+        store.update_candidate(prior_id, status='irrelevant_summary', summary_reason='No page was loaded')
+        store.finish_run(prior_run, 'completed')
+
+        rows = self.run_boss([candidate()])
+
+        self.assertEqual(rows[0]['status'], 'complete')
+        self.fetch.assert_called_once()
 
     def test_canonical_url_unifies_http_and_www_variants(self):
         self.assertEqual(
@@ -188,7 +221,7 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual([r['status'] for r in rows], ['complete', 'relevant_access_blocked'])
         self.assertEqual(store.list_runs()[0]['status'], 'completed_with_errors')
         self.assertIn('Reddit blocked', store.list_runs()[0]['events_json'])
-        self.compare.assert_called_once()
+        self.compare.assert_not_called()
 
     def test_access_failure_uses_an_accessible_alternative_source(self):
         alternative = 'https://official.example.test/release'
@@ -215,6 +248,14 @@ class ResearchTests(unittest.TestCase):
         self.fetch.assert_not_called()
         self.summary_review.assert_not_called()
         self.assertEqual(tools.list_webpage_findings()[0]['Submission type'], 'manual')
+
+    def test_excluded_source_rule_stops_before_summary_or_fetch(self):
+        tools.add_source_rule('domain', 'example.test', 'exclude', note='Publisher is out of scope')
+        row = self.run_boss([candidate()])[0]
+        self.assertEqual(row['status'], 'excluded_source_rule')
+        self.assertEqual(row['full_reason'], 'Publisher is out of scope')
+        self.summary_review.assert_not_called()
+        self.fetch.assert_not_called()
 
     def test_duplicate_report_found_during_extraction_is_shown_as_duplicate(self):
         state = self.extract.return_value
@@ -407,7 +448,9 @@ class ResearchTests(unittest.TestCase):
         record = next(r for r in tools.list_webpage_findings() if r['ID'] == saved['id'])
         self.assertEqual(record['Discovery source'], 'reddit')
         self.assertEqual(record['Search candidate ID'], 9)
-        self.assertEqual(tools.get_webpage_finding(saved['id']), finding)
+        self.assertEqual(tools.get_webpage_finding(saved['id']), {
+            **finding, 'source_classification': 'secondary_unattributed',
+        })
 
     def test_tavily_settings_reach_provider(self):
         response = MagicMock()

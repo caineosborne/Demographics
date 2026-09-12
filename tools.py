@@ -5,7 +5,7 @@ import sqlite3
 import time
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from functools import lru_cache
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -279,20 +279,68 @@ def initialise_findings_table() -> None:
             "discovery_source": "TEXT",
             "search_run_id": "TEXT",
             "search_candidate_id": "INTEGER",
-            "source_classification": "TEXT NOT NULL DEFAULT 'secondary_unattributed'",
+            "source_classification": "TEXT NOT NULL DEFAULT 'legacy_unreviewed'",
         }.items():
             if name not in columns:
                 conn.execute(f"ALTER TABLE webpage_findings ADD COLUMN {name} {definition}")
-        # The label is presentation/audit metadata derived from existing fields,
-        # so older records receive the same treatment as new ones.
         conn.execute("""
-            UPDATE webpage_findings
-            SET source_classification = CASE
-                WHEN official_source THEN 'official_publisher'
-                WHEN quoted_source IS NOT NULL AND trim(quoted_source) <> '' THEN 'secondary_attributed'
-                ELSE 'secondary_unattributed'
-            END
+            CREATE TABLE IF NOT EXISTS source_rules (
+                id INTEGER PRIMARY KEY,
+                match_type TEXT NOT NULL CHECK(match_type IN ('canonical_url', 'domain')),
+                match_value TEXT NOT NULL,
+                action TEXT NOT NULL CHECK(action IN ('classify', 'exclude')),
+                classification TEXT CHECK(classification IN (
+                    'official_publisher', 'secondary_attributed',
+                    'secondary_unattributed', 'legacy_unreviewed'
+                )),
+                enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+                note TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                CHECK((action = 'classify' AND classification IS NOT NULL) OR
+                      (action = 'exclude' AND classification IS NULL))
+            )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS fallback_providers (
+                domain TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+                max_age_days INTEGER NOT NULL DEFAULT 90 CHECK(max_age_days >= 0),
+                only_when_country_blank_days INTEGER NOT NULL DEFAULT 90
+                    CHECK(only_when_country_blank_days >= 0),
+                note TEXT
+            )
+        """)
+        # These are deliberately seeds, rather than a migration which replaces
+        # rows: an administrator's changes must survive future application
+        # starts and deployments.
+        conn.executemany(
+            """INSERT OR IGNORE INTO fallback_providers
+               (domain, enabled, max_age_days, only_when_country_blank_days, note)
+               VALUES (?, 1, 90, 90, ?)""",
+            [
+                ('statista.com', 'Allowed only to fill a recent country-data gap; preserve attribution caveats.'),
+                ('ourworldindata.org', 'Allowed only to fill a recent country-data gap; linked WPP series is not independent corroboration.'),
+            ],
+        )
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_source_rules_match
+            ON source_rules(match_type, match_value)
+        """)
+        # This migration deliberately runs once.  Existing findings are
+        # evidence collected before source ranking was introduced; do not infer
+        # a new priority from incomplete historical extraction fields.
+        conn.execute("""CREATE TABLE IF NOT EXISTS findings_schema_migrations
+                        (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)""")
+        migrated = conn.execute(
+            "SELECT 1 FROM findings_schema_migrations WHERE name = 'source_classification_v1'"
+        ).fetchone()
+        if not migrated:
+            conn.execute("UPDATE webpage_findings SET source_classification = 'legacy_unreviewed'")
+            conn.execute(
+                "INSERT INTO findings_schema_migrations(name, applied_at) VALUES (?, ?)",
+                ('source_classification_v1', datetime.now(timezone.utc).isoformat()),
+            )
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_webpage_findings_report
             ON webpage_findings (effective_date, population_value)
@@ -496,13 +544,156 @@ def _purge_legacy_partial_period_metrics(conn: sqlite3.Connection) -> None:
             conn.execute("DELETE FROM webpage_findings WHERE id = ?", (finding_id,))
 
 
+SOURCE_CLASSES = {
+    'official_publisher', 'secondary_attributed', 'secondary_unattributed',
+    'legacy_unreviewed',
+}
+
+
+def source_rule_for_url(url: str) -> dict[str, Any] | None:
+    """Resolve enabled exact-URL rules before enabled domain rules."""
+    canonical_url = canonicalise_source_url(url)
+    domain = urlsplit(canonical_url).hostname or ''
+    with get_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT * FROM source_rules WHERE enabled = 1 AND match_type = 'canonical_url'
+               AND match_value = ?""", (canonical_url,),
+        ).fetchone()
+        if row is None:
+            row = conn.execute(
+                """SELECT * FROM source_rules WHERE enabled = 1 AND match_type = 'domain'
+                   AND match_value = ?""", (domain,),
+            ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def add_source_rule(match_type: str, match_value: str, action: str,
+                    classification: str | None = None, enabled: bool = True,
+                    note: str | None = None) -> int:
+    """Add or replace a local source rule without editing application code."""
+    if match_type not in {'canonical_url', 'domain'} or action not in {'classify', 'exclude'}:
+        raise ValueError('Invalid source rule match type or action.')
+    if match_type == 'canonical_url':
+        match_value = canonicalise_source_url(match_value)
+    else:
+        match_value = str(match_value).strip().lower().removeprefix('www.')
+        if not match_value or '/' in match_value:
+            raise ValueError('A domain rule must contain a normalized hostname only.')
+    if action == 'classify' and classification not in SOURCE_CLASSES - {'legacy_unreviewed'}:
+        raise ValueError('A classify rule needs a current source classification.')
+    if action == 'exclude':
+        classification = None
+    initialise_findings_table()
+    timestamp = datetime.now(timezone.utc).isoformat()
+    with get_connection() as conn:
+        conn.execute("""INSERT INTO source_rules
+            (match_type, match_value, action, classification, enabled, note, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(match_type, match_value) DO UPDATE SET action = excluded.action,
+              classification = excluded.classification, enabled = excluded.enabled,
+              note = excluded.note, updated_at = excluded.updated_at""",
+            (match_type, match_value, action, classification, int(enabled), note, timestamp, timestamp))
+        return conn.execute("SELECT id FROM source_rules WHERE match_type = ? AND match_value = ?",
+                            (match_type, match_value)).fetchone()[0]
+
+
 def source_classification(finding: dict[str, Any]) -> str:
-    """Return a display/audit label without changing the extraction contract."""
+    """Classify a new finding, respecting configurable source rules."""
+    rule = source_rule_for_url(finding['url'])
+    if rule and rule['action'] == 'classify':
+        return rule['classification']
+    # A persisted/manual classification remains useful when no configured rule
+    # applies, but a reviewer rule is always the higher-priority instruction.
+    explicit = finding.get('source_classification')
+    if explicit in SOURCE_CLASSES:
+        return explicit
     if finding.get("official_source"):
         return "official_publisher"
     if str(finding.get("quoted_source") or "").strip():
         return "secondary_attributed"
     return "secondary_unattributed"
+
+
+def fallback_provider_for_url(url: str) -> dict[str, Any] | None:
+    """Return the enabled configured fallback provider matching an article URL."""
+    hostname = (urlsplit(canonicalise_source_url(url)).hostname or '').casefold()
+    with get_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute('SELECT * FROM fallback_providers WHERE enabled = 1').fetchall()
+    for row in rows:
+        provider = dict(row)
+        domain = str(provider['domain']).casefold().removeprefix('www.')
+        if hostname == domain or hostname.endswith('.' + domain):
+            return provider
+    return None
+
+
+def _parse_publication_date(value: Any) -> datetime | None:
+    """Parse the provider publication date without guessing an absent date."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).strip().replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _has_recent_article_datapoint(conn: sqlite3.Connection, country: str, days: int) -> bool:
+    """Whether a country has an article finding acquired in the supplied window.
+
+    WPP is queried from its own reference tables, not stored as a webpage
+    finding.  The explicit submission-type guard also keeps any future
+    imported WPP baseline rows out of this test.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    rows = conn.execute(
+        """SELECT finding_json FROM webpage_findings
+           WHERE extracted_at >= ?
+             AND COALESCE(submission_type, '') != 'wpp_baseline'""",
+        (cutoff,),
+    ).fetchall()
+    for (payload,) in rows:
+        try:
+            prior = json.loads(payload)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if prior.get('geography') != country:
+            continue
+        if any(isinstance(metric, dict) and metric.get('value') is not None
+               for metric in (prior.get('statistics') or {}).values()):
+            return True
+    return False
+
+
+def _fallback_exclusion(finding: dict[str, Any], provenance: dict[str, Any], conn: sqlite3.Connection) -> dict[str, str] | None:
+    """Return an auditable fallback rejection for automatic configured providers."""
+    if provenance.get('submission_type') != 'automatic':
+        return None
+    provider = fallback_provider_for_url(finding['url'])
+    if provider is None:
+        return None
+    published = _parse_publication_date(provenance.get('published_date'))
+    if published is None:
+        return {
+            'reason': f"Fallback provider {provider['domain']} requires a parseable publication date.",
+        }
+    age = datetime.now(timezone.utc) - published
+    if age > timedelta(days=int(provider['max_age_days'])):
+        return {
+            'reason': (f"Fallback provider {provider['domain']} article is older than "
+                       f"{provider['max_age_days']} days."),
+        }
+    country = finding.get('geography') or ''
+    if _has_recent_article_datapoint(conn, country, int(provider['only_when_country_blank_days'])):
+        return {
+            'reason': (f"{country} already has an article-derived datapoint acquired in the preceding "
+                       f"{provider['only_when_country_blank_days']} days."),
+        }
+    return None
 
 
 def store_webpage_finding(finding: dict[str, Any], provenance: dict | None = None) -> dict[str, str | int]:
@@ -519,8 +710,19 @@ def store_webpage_finding(finding: dict[str, Any], provenance: dict | None = Non
 
     with get_connection() as conn:
         canonical_url = canonicalise_source_url(source_url)
+        rule = source_rule_for_url(source_url)
+        if rule and rule['action'] == 'exclude':
+            return {"status": "excluded_source_rule", "canonical_url": canonical_url,
+                    "reason": rule.get('note') or 'Excluded by configured source rule.'}
         if conn.execute("SELECT 1 FROM blocked_sources WHERE canonical_url = ?", (canonical_url,)).fetchone():
             return {"status": "excluded_blocked_source", "canonical_url": canonical_url}
+        fallback_exclusion = _fallback_exclusion(finding, provenance, conn)
+        if fallback_exclusion:
+            return {
+                'status': 'excluded_fallback_not_needed',
+                'canonical_url': canonical_url,
+                **fallback_exclusion,
+            }
         duplicate_url = conn.execute(
             "SELECT id FROM webpage_findings WHERE canonical_url = ?", (canonical_url,)
         ).fetchone()
@@ -540,6 +742,8 @@ def store_webpage_finding(finding: dict[str, Any], provenance: dict | None = Non
                     "existing_id": duplicate_report[0],
                 }
 
+        classification = source_classification(finding)
+        finding = {**finding, 'source_classification': classification}
         cursor = conn.execute(
             """INSERT INTO webpage_findings (
                    source_url, canonical_url, effective_date, population_value, official_source,
@@ -561,10 +765,11 @@ def store_webpage_finding(finding: dict[str, Any], provenance: dict | None = Non
                 provenance.get("discovery_source", "manual"),
                 provenance.get("search_run_id"),
                 provenance.get("search_candidate_id"),
-                source_classification(finding),
+                classification,
             ),
         )
-        return {"status": "stored", "id": cursor.lastrowid}
+        return {"status": "stored", "id": cursor.lastrowid,
+                "source_classification": classification}
 
 
 def list_webpage_findings() -> list[dict[str, Any]]:
@@ -729,8 +934,23 @@ def delete_finding_metric(finding_id: int, metric: str) -> None:
         raise ValueError(f"Finding #{finding_id} has no {metric} datapoint.")
     statistics = dict(statistics)
     statistics.pop(key, None)
+    if not any(isinstance(value, dict) and value.get("value") is not None
+               for value in statistics.values()):
+        raise ValueError(
+            f"Finding #{finding_id} has no other datapoints. Delete the full record instead."
+        )
     finding['statistics'] = statistics
     update_webpage_finding(finding_id, json.dumps(finding, ensure_ascii=False))
+    initialise_findings_table()
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT canonical_url, source_url FROM webpage_findings WHERE id = ?", (finding_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"No stored finding exists with ID {finding_id}.")
+        _record_finding_action(
+            conn, finding_id, row[0] or canonicalise_source_url(row[1]), "metric_removed", metric
+        )
 
 
 def normalise_stored_finding_geographies() -> int:

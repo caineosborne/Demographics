@@ -185,6 +185,7 @@ def _database_display_rows(findings):
                 "official_publisher": "Official publisher",
                 "secondary_attributed": "Secondary · official source named",
                 "secondary_unattributed": "Secondary · source not named",
+                "legacy_unreviewed": "Legacy · unreviewed",
             }.get(finding.get("Source classification"), "Unknown"),
             "Added by": added_by,
         })
@@ -286,6 +287,28 @@ def save_database_record(finding_id: str | None, finding_json: str, revision: in
     except ValueError as exc:
         return load_database_table(), load_database_country_summary(), revision, f"Could not save: {exc}", gr.skip()
     return load_database_table(), load_database_country_summary(), revision + 1, "Record saved.", gr.skip()
+
+
+def remove_database_metric(finding_id: int, metric: str, revision: int):
+    """Delete one selected metric and reload the editor from durable storage."""
+    if finding_id in (None, ""):
+        return (load_database_table(), load_database_country_summary(), revision,
+                gr.skip(), gr.skip(), "Select a record first.", gr.skip())
+    if not metric:
+        return (load_database_table(), load_database_country_summary(), revision,
+                gr.skip(), gr.skip(), "Select a metric to delete.", gr.skip())
+    try:
+        delete_finding_metric(int(finding_id), metric)
+        loaded_id, finding_json, _loaded_status, source_link = load_database_record(int(finding_id))
+    except (TypeError, ValueError) as exc:
+        return (load_database_table(), load_database_country_summary(), revision,
+                gr.skip(), gr.skip(), f"Could not delete datapoint: {exc}", gr.skip())
+    return (
+        load_database_table(), load_database_country_summary(), revision + 1,
+        loaded_id, finding_json,
+        f"Deleted {metric.replace('_', ' ')} from finding #{int(finding_id)}. Other metrics and the source URL were retained.",
+        source_link,
+    )
 
 
 def remove_database_record(finding_id: int, revision: int):
@@ -533,6 +556,12 @@ if __name__ == "__main__":
                     hide_article = gr.Button("Hide for selected graphs (this view)")
                     delete_everywhere = gr.Button("Delete everywhere")
                     delete_and_block_everywhere = gr.Button("Delete and block source", variant="stop")
+                with gr.Row():
+                    metric_to_delete = gr.Dropdown(
+                        label="Delete one stored metric", choices=GRAPH_CHOICES,
+                        info="This removes only the selected datapoint and redraws the charts.", scale=2,
+                    )
+                    delete_metric_everywhere = gr.Button("Delete selected metric")
                 article_link = gr.HTML(value="Select an article to open its source.")
                 draw_button.click(
                     refresh_simple_visualisation,
@@ -543,6 +572,7 @@ if __name__ == "__main__":
                 hide_article.click(hide_article_from_graphs, inputs=[visual_country, latest_analysis_country, selected_metrics, article_picker, graph_targets, visual_hidden], outputs=[population_chart, flows_chart, visual_hidden, chart_status, article_link])
                 delete_everywhere.click(delete_article_everywhere_simple, inputs=[visual_country, latest_analysis_country, selected_metrics, article_picker, visual_hidden], outputs=[population_chart, flows_chart, article_picker, visual_hidden, chart_status, article_link])
                 delete_and_block_everywhere.click(delete_and_block_article_everywhere_simple, inputs=[visual_country, latest_analysis_country, selected_metrics, article_picker, visual_hidden], outputs=[population_chart, flows_chart, article_picker, visual_hidden, chart_status, article_link])
+                delete_metric_everywhere.click(delete_metric_from_database, inputs=[visual_country, latest_analysis_country, selected_metrics, article_picker, metric_to_delete, visual_hidden], outputs=[population_chart, flows_chart, article_picker, visual_hidden, chart_status, article_link])
 
             with gr.Tab("Database") as database_tab:
                 gr.Markdown("### Stored findings\nNewest first. Select any row to inspect or edit the complete record below.")
@@ -581,6 +611,8 @@ if __name__ == "__main__":
                     )
                 with gr.Row(elem_classes="record-actions"):
                     save_record = gr.Button("Save changes", variant="primary")
+                    metric_to_delete_record = gr.Dropdown(label="Metric", choices=GRAPH_CHOICES, scale=2)
+                    delete_metric_record = gr.Button("Delete selected metric")
                     delete_record = gr.Button("Delete selected record")
                     delete_and_block_record = gr.Button("Delete and block source", variant="stop")
                 database_status = gr.Markdown()
@@ -596,6 +628,7 @@ if __name__ == "__main__":
                 database_table.select(load_database_table_row, outputs=[selected_record_id, record_json, database_status, record_link, record_picker])
                 record_picker.change(load_database_record, inputs=record_picker, outputs=[selected_record_id, record_json, database_status, record_link])
                 save_record.click(save_database_record, inputs=[selected_record_id, record_json, database_revision], outputs=[database_table, database_summary, database_revision, database_status, record_link])
+                delete_metric_record.click(remove_database_metric, inputs=[selected_record_id, metric_to_delete_record, database_revision], outputs=[database_table, database_summary, database_revision, selected_record_id, record_json, database_status, record_link])
                 delete_record.click(remove_database_record, inputs=[selected_record_id, database_revision], outputs=[database_table, database_summary, database_revision, selected_record_id, record_json, database_status, record_link])
                 delete_and_block_record.click(remove_database_record_and_block, inputs=[selected_record_id, database_revision], outputs=[database_table, database_summary, database_revision, selected_record_id, record_json, database_status, record_link])
                 unblock_source.click(unblock_selected_source, inputs=blocked_source_picker, outputs=[blocked_source_picker, blocked_source_status])

@@ -5,12 +5,11 @@
 - [ ] **Phase 1 — Stabilize and improve the current research pipeline**
   - [x] **Step 1.1 — Preserve and inventory the current database**
   - [x] **Step 1.2 — Fix canonical duplicates and deletion behaviour**
-  - [ ] **Step 1.3 — Include and rank every source type**
-  - [ ] **Step 1.4 — Add fallback providers and manual-only comparison**
+  - [x] **Step 1.3 — Include and rank every source type**
+  - [x] **Step 1.4 — Add fallback providers and manual-only comparison**
+  - [x] **Step 1.7 — Verify record and metric deletion**
   - [ ] **Step 1.5 — Reduce the candidate audit**
   - [ ] **Step 1.6 — Prepare the full and filtered WPP databases**
-  - [ ] **Step 1.7 — Verify record and metric deletion**
-  - [ ] **Step 1.7 - ensure that the delete datapoint/dete record is working**
 - [ ] **Phase 2 — Build the local FastAPI application layer**
   - [ ] **Step 2.1 — Build the new data model and separate workflows from Gradio**
   - [ ] **Step 2.2 — Add FastAPI endpoints and Jinja page shells**
@@ -184,6 +183,9 @@ canonical URL is a duplicate.
 - At discovery time, check the canonical URL before summary review, fetching,
   model extraction, or Tavily extraction. A duplicate remains visible in the
   candidate audit with the existing finding ID and a `duplicate` status.
+- For automatic discovery, also treat a URL whose page content was successfully
+  loaded in an earlier run as a duplicate. A URL that was only discovered,
+  summary-reviewed, or failed to load remains eligible for a later retry.
 - At manual submission time, show the existing record and do not re-run it
   unless the administrator first chooses the explicit rerun path below.
 
@@ -223,9 +225,11 @@ effective-date plus population duplicate rule remains unchanged.
 
 #### Source classes and priority
 
-Every extracted finding with a valid country, period, and metric is stored. A
-source class is a display and future conflict-resolution priority; it is never
-an automatic acceptance gate.
+Every extracted finding with a valid country, period, and metric that passes
+the unchanged Phase 1.2 duplicate safeguards is stored. A source class is a
+display and future conflict-resolution priority; it is never an automatic
+acceptance gate. In particular, an unnamed secondary source is not rejected
+merely because it is unnamed.
 
 | Rank | Stored class | How it is assigned in Phase 1 | Current graph marker |
 |---:|---|---|---|
@@ -240,9 +244,36 @@ visible in the graph and database. The existing fields (`official_source`,
 `quoted_source`, and `quoted_source_url`) remain useful evidence even when they
 are blank.
 
-Phase 1 does not automatically choose a winner when rank-1 and rank-3 sources
-report different values. It displays them as separate current findings. Phase 2
-introduces observation groups, conflicts, and a preferred claim.
+Phase 1 does not automatically choose a winner when separately stored rank-1
+and rank-3 sources report different values. It displays those separate current
+findings. The existing Phase 1.2 date-plus-population safeguard is unchanged;
+Phase 2 introduces observation groups, conflicts, and corroborating sources.
+
+#### Search, database, and graph output
+
+This step deliberately updates both automatic-research output and the current
+graphs; it is not just a database classification change.
+
+- When extraction finishes, determine the source class before storage and add
+  it to the candidate audit record. The search-results table must show a
+  `Source class` column for stored results (and the reason when a configured
+  exclusion rule applied), so a reviewer can see what will be plotted without
+  opening JSON.
+- Show the same class in the stored-findings database table and in the record
+  detail/JSON. Preserve the original publisher, quoted source, and quoted
+  source URL in the detail view.
+- Use `source_classification` directly in the chart query rather than
+  re-deriving the class independently from `official_source` and
+  `quoted_source`.
+- Render markers consistently: filled teal diamond for
+  `official_publisher`; amber `circle-open` for `secondary_attributed`; grey
+  `x` for `secondary_unattributed`; neutral-grey star for
+  `legacy_unreviewed`.
+- Remove the current red “latest stored estimate” star overlay. A star is
+  reserved for legacy evidence under this rule; “latest” can remain a hover or
+  detail label instead.
+- Keep conflict halos and a preferred claim out of this step: those require
+  the Phase 2 claim model.
 
 #### Configurable source rules
 
@@ -273,8 +304,11 @@ in `source_rules`, not in `blocked_sources`.
 #### Legacy migration
 
 - Preserve all legacy `finding_json`, URLs, dates, and values unchanged.
-- Set their displayed `source_classification` to `legacy_unreviewed`; retain
-  historical source fields rather than trying to infer a new class.
+- In a one-time migration, set findings that existed before Step 1.3 to
+  `legacy_unreviewed`; retain historical source fields rather than trying to
+  infer a new class. Do not overwrite those values on every database
+  initialization. Findings created after the migration receive their class from
+  the current source rules/extraction.
 - Render them as neutral stars until a later manual reclassification.
 - Do not re-fetch legacy sources as part of this migration.
 
@@ -286,8 +320,16 @@ in `source_rules`, not in `blocked_sources`.
 - An excluded rule stops processing before fetch.
 - Legacy records remain present and render as stars.
 - Marker selection matches the four classes above.
+- Search candidate output exposes the class assigned to every stored result.
+- The newest stored finding is not given a star merely because it is newest.
 
 **Complete when:** the current Gradio tool stores every valid source, source priority is visible, and source rules can be changed without editing Python code.
+
+**Completed 2026-09-12:** findings are classified once at storage as official,
+attributed secondary, unattributed secondary, or legacy-unreviewed. Configurable
+URL/domain rules can classify or exclude a source before automatic retrieval;
+unattributed secondary findings are retained. Candidate and database tables
+show the class, and charts use the stored classification for their markers.
 
 ### Step 1.4 — Add fallback providers and manual-only comparison
 
@@ -313,16 +355,17 @@ Create a `fallback_providers` SQLite table:
 | `domain` | Primary key, initially `statista.com` and `ourworldindata.org` |
 | `enabled` | Allows a provider to be paused without code changes |
 | `max_age_days` | `90` |
-| `only_when_country_empty` | `true` |
+| `only_when_country_blank_days` | `90` |
 | `note` | Why the provider is allowed and any attribution caveat |
 
-For every country-hunt candidate, evaluate the rule at the point the candidate
-is stored:
+For every **automatic-discovery candidate**—daily news search, direct country
+hunt, or bulk country hunt—evaluate the rule at the point the candidate is
+stored:
 
 1. Is the candidate from an enabled fallback-provider domain?
 2. If not, use normal source processing.
-3. If yes, does the country currently have zero stored article-derived
-   datapoints? WPP baseline rows do not count.
+3. If yes, has the country had **no stored article-derived datapoint in the
+   preceding 90 days**? WPP baseline rows do not count.
 4. Is the page publication date no more than 90 days old? A missing or
    unparseable publication date fails this fallback rule.
 5. If both conditions pass, store it with the normal source classification and
@@ -332,6 +375,12 @@ is stored:
 This is intentionally order-dependent within a run: if an earlier candidate
 creates the first datapoint for a country, a later Statista/OWID candidate is
 not stored. That is an accepted simplicity trade-off.
+
+Fallback providers are **not** added as targeted searches, include-domains, or
+separate provider calls. They are considered only when Statista or OWID appears
+naturally in the ordinary news or country-hunt results. In other words, daily
+news search may retain a suitable Statista/OWID result that it independently
+found; the system never performs an “OWID hunt.”
 
 Fallback providers are not official merely because they are configured. For
 example, Statista can be a named-secondary circle when it names IMF; it remains
@@ -343,12 +392,32 @@ same WPP series is a linked source, not independent corroboration.
 - A manual URL calls the comparison agent; an automatic URL does not.
 - Automatic extraction is stored even when an old comparison would have marked
   it as an outlier.
-- A recent Statista/OWID candidate is stored when the country is empty.
-- The same candidate is excluded when that country already has a datapoint.
+- A recent Statista/OWID candidate discovered through either normal news search
+  or a country hunt is stored when the country has no datapoint acquired in the
+  preceding 90 days.
+- The same candidate is excluded when that country already has a datapoint
+  acquired in the preceding 90 days.
 - A fallback candidate older than 90 days, or without a date, is excluded.
 - Disabling a configured provider takes effect without a code change.
 
-**Complete when:** country hunts can populate an empty country with a recent Statista/OWID result, automatic jobs never call the comparison agent, and manual URL analysis still does.
+**Complete when:** normal automatic discovery can fill a country that has had
+no datapoint in the preceding 90 days with a recent Statista/OWID result,
+without ever targeting those providers; automatic jobs never call the
+comparison agent, and manual URL analysis still does.
+
+**Completed 2026-09-12:** automatic discovery stores extraction results without
+calling the UN comparison agent or applying an outlier-deletion branch. The
+durable `fallback_providers` table seeds Statista and OWID with the configured
+90-day limits; enabled-provider, publication-date, and country-gap checks run
+at finding storage and record `excluded_fallback_not_needed` in the audit.
+
+### Post-1.4 implementation order
+
+The checklist order is intentional: after Step 1.4, complete **Step 1.7**
+(record and metric deletion) before either database-maintenance activity. Steps
+1.5 and 1.6 form the final database-maintenance set for Phase 1 and follow
+Step 1.7. Their existing numbers are retained so earlier decisions and notes
+continue to point to the same work.
 
 ### Step 1.5 — Reduce the candidate audit
 
@@ -401,9 +470,16 @@ verified backup exists.
   the same saved state after each action.
 - Add regression tests for metric deletion, record deletion, suppression,
   unblock, and later rerun.
+- Ensure user can edit search terms (ie official country is Russia Federation -  how do we sdarch for Russia pulation)
 
 **Complete when:** per-metric deletion and full-record deletion are both safe,
 visible immediately in the graphs, and preserve the intended URL eligibility.
+
+**Completed 2026-09-12:** individual metric deletion is available from the
+database and visualisation controls, reloads the stored JSON after saving, and
+records a `metric_removed` action. Deleting the final remaining metric is
+rejected so the administrator must explicitly delete the full record. Full
+deletion, suppress/unblock, and rerun eligibility have regression coverage.
 
 ### Phase 1 SQLite database shape after completion
 
@@ -415,7 +491,7 @@ and fields; it does not yet introduce Postgres or the Phase 2 claim tables.
 | `webpage_findings` | Existing finding storage plus `canonical_url`, source-class values including `legacy_unreviewed`, and an optional matching source-rule ID. `source_url` remains the original visible link. |
 | `blocked_sources` | Existing exact canonical-URL suppression list, extended with an optional reason/note and audit metadata if needed. |
 | `source_rules` | New configurable domain/exact-URL classification or exclusion rules. |
-| `fallback_providers` | New configured domains, enabled flag, max age, and “only when country empty” rule. |
+| `fallback_providers` | New configured domains, enabled flag, max age, and “only when the country has no datapoint acquired in the previous 90 days” rule. |
 | `finding_actions` | New compact log of remove, suppress, unblock, and metric-delete actions. |
 | `search_candidates` | Existing rows, but large webpage/provider content removed from `details_json` after processing. |
 | `search_runs` / `research_settings` | Existing job and search controls, with links to source/fallback configuration where needed. |

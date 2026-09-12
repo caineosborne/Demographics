@@ -5,7 +5,10 @@ from unittest.mock import MagicMock, patch
 
 # Tests use fake model results and must not load local credentials or tracing.
 with patch('dotenv.load_dotenv'), patch.dict(os.environ, {'OPENROUTER_API_KEY': 'test-key'}):
-    from main import delete_article_everywhere_simple, load_database_table_row, run_pipeline
+    from main import (
+        delete_article_everywhere_simple, delete_metric_from_database,
+        load_database_table_row, remove_database_metric, run_pipeline,
+    )
     from tools import PageAccessError
 
 
@@ -24,6 +27,26 @@ class PipelineTests(unittest.TestCase):
             result = load_database_table_row(event)
         load.assert_called_once_with(7)
         self.assertEqual(result[0], '7')
+
+    def test_database_metric_delete_reloads_the_saved_record(self):
+        with patch('main.delete_finding_metric') as delete, \
+             patch('main.load_database_record', return_value=('7', '{"statistics": {}}', 'loaded', 'link')), \
+             patch('main.load_database_table', return_value='table'), \
+             patch('main.load_database_country_summary', return_value='summary'):
+            result = remove_database_metric('7', 'births', 3)
+        delete.assert_called_once_with(7, 'births')
+        self.assertEqual(result, (
+            'table', 'summary', 4, '7', '{"statistics": {}}',
+            'Deleted births from finding #7. Other metrics and the source URL were retained.', 'link',
+        ))
+
+    def test_visual_metric_delete_redraws_from_durable_storage(self):
+        with patch('main.delete_finding_metric') as delete, \
+             patch('main.build_visualisation_for_latest_analysis', return_value=('population', 'flows', 'status')):
+            result = delete_metric_from_database('Japan', None, ['population', 'births'], '7', 'births', {})
+        delete.assert_called_once_with(7, 'births')
+        self.assertEqual(result[0:2], ('population', 'flows'))
+        self.assertIn('other metrics were retained', result[-1])
 
     def test_status_stream_and_original_outputs(self):
         research = MagicMock()

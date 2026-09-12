@@ -125,8 +125,37 @@ def list_candidates(run_id=None):
     return [{**{key: value for key, value in dict(row).items() if key != 'details_json'}, **{key: value for key, value in json.loads(row['details_json']).items()
                            if key in {'title', 'snippet', 'summary_decision', 'summary_reason', 'full_decision',
                                       'full_reason', 'error', 'finding_id', 'duplicate_candidate_id',
-                                      'duplicate_of', 'duplicate_kind', 'canonical_url'}}}
+                                      'duplicate_of', 'duplicate_kind', 'canonical_url', 'source_classification'}}}
             for row in rows]
+
+
+def list_historical_candidate_urls(exclude_run_id):
+    """Return URLs whose content was successfully loaded in an earlier run.
+
+    Discovery alone, a summary-only decision, or an access failure must not
+    suppress a future retry.  ``loaded_url`` is the page actually retrieved;
+    it differs from the original candidate when alternative-source recovery
+    succeeded.
+    """
+    initialise()
+    with tools.get_connection() as conn:
+        rows = conn.execute(
+            'SELECT id, url, details_json FROM search_candidates '
+            'WHERE run_id != ? AND details_json LIKE ? ORDER BY id ASC',
+            (exclude_run_id, '%"full_text"%'),
+        ).fetchall()
+    loaded = []
+    for candidate_id, candidate_url, details_json in rows:
+        try:
+            details = json.loads(details_json)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if 'full_text' not in details:
+            continue
+        loaded_url = details.get('loaded_url') or details.get('replacement_url') or candidate_url
+        if loaded_url:
+            loaded.append((candidate_id, loaded_url))
+    return loaded
 
 
 def get_candidate(candidate_id):

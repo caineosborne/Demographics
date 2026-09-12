@@ -278,6 +278,7 @@ def candidate_table(run_id):
             'Duplicate of': duplicate_of,
             'Title': row.get('title') or '',
             'Source': row.get('source') or '',
+            'Source class': row.get('source_classification') or '',
             'Category': row.get('category') or '',
             'URL': row.get('url') or '',
             'Explanation': explanation,
@@ -504,7 +505,8 @@ def build_search_tabs():
     search_topic_value = settings_search_topic(settings)
     with gr.Tab('Automatic research'):
         gr.Markdown('Runs continue in the background if this page is refreshed or closed. Edit or add categories below. Settings are saved with each run. '
-                    'Relevant and unclear summaries advance to full article review; only confirmed relevant articles enter extraction and UN comparison.')
+                    'Relevant and unclear summaries advance to full article review; only confirmed relevant articles enter extraction. '
+                    'UN comparison remains available only in the manual Analyse webpage flow.')
         categories = gr.Dataframe(headers=HEADERS, value=settings_rows(settings), type='array',
                                   datatype=['bool', 'str', 'str', 'number', 'str', 'str', 'str'],
                                   column_count=(len(HEADERS), 'fixed'), row_count=(3, 'dynamic'),
@@ -595,7 +597,7 @@ def build_search_tabs():
         run_monitor.tick(poll_run, inputs=run_id, outputs=[log, results, run_id, run_summary], show_progress='hidden')
     with gr.Tab('Search results') as history_tab:
         gr.Markdown('Inspect accepted, rejected, unclear, duplicate and failed results. The detailed record contains '
-                    'the original provider response, full article text when fetched, review reasons, extracted facts and UN comparison.')
+                    'the original provider response, full article text when fetched, review reasons, extracted facts, and fallback decisions.')
         refresh = gr.Button('Refresh search history')
         runs_table = gr.Dataframe(
             label='Runs (latest 100)', interactive=False, wrap=False, max_height=220,

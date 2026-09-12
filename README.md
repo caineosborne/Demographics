@@ -37,6 +37,10 @@ The pre-migration inventory is recorded at
 findings, 528 candidates, 51,712,000 bytes, and SHA-256
 `d2d9064656cdb1c19b8c755ecec79964b4885e6aeb7c04af9e547b73c07d19e6`.
 
+See [METHODOLOGY_BUSINESS_RULES.md](METHODOLOGY_BUSINESS_RULES.md) for the
+manual-versus-bulk research rules, URL identity rules, duplicate handling,
+suppression, unblocking, and rerun behavior.
+
 ## Automatic research
 
 Open **Automatic research**, edit the category table, then click **Search and

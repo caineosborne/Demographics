@@ -23,7 +23,8 @@ class VisualisationTests(unittest.TestCase):
             conn.execute('''CREATE TABLE webpage_findings (
                 id INTEGER PRIMARY KEY, source_url TEXT, effective_date TEXT,
                 population_value REAL, official_source INTEGER, quoted_source TEXT,
-                quoted_source_url TEXT, extracted_at TEXT, finding_json TEXT)''')
+                quoted_source_url TEXT, extracted_at TEXT, finding_json TEXT,
+                source_classification TEXT)''')
             finding = {
                 'geography': 'Japan', 'source': 'Reuters', 'url': 'https://example.test/article',
                 'quoted_source': 'Japan Statistics Bureau',
@@ -34,9 +35,9 @@ class VisualisationTests(unittest.TestCase):
                     'total_fertility_rate': {'value': 1.2},
                 },
             }
-            conn.execute('INSERT INTO webpage_findings VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            conn.execute('INSERT INTO webpage_findings VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                          (1, finding['url'], '2026-06-30', 102000, 0, finding['quoted_source'], None,
-                          '2026-09-10T00:00:00+00:00', json.dumps(finding)))
+                          '2026-09-10T00:00:00+00:00', json.dumps(finding), 'secondary_attributed'))
             conn.execute('''CREATE TABLE wpp_release_history (
                 revision INTEGER, Country TEXT, "ISO3 Alpha-code" TEXT, Year INTEGER,
                 "Population 1 Jul" REAL, "Total Births" REAL, "Total Deaths" REAL,
@@ -55,7 +56,7 @@ class VisualisationTests(unittest.TestCase):
     def connection(self):
         return sqlite3.connect(self.db_path)
 
-    def test_charts_include_un_history_forecast_and_current_finding(self):
+    def test_charts_include_un_history_forecast_and_classified_finding(self):
         with patch.object(visualisation, 'get_connection', self.connection), patch.object(visualisation, 'initialise_findings_table'):
             population, flows, message = visualisation.build_visualisation(
                 'Japan', list(visualisation.METRICS)
@@ -63,10 +64,10 @@ class VisualisationTests(unittest.TestCase):
         self.assertIn('10 UN historical years, 10 UN forecast years, and 1 webpage finding', message)
         self.assertEqual({trace.name for trace in population.data}, {
             'UN historic', 'UN forecast',
-            'Stored estimates (◆ official · ● secondary)', 'Current stored estimate',
+            f'Stored estimates — {visualisation.SOURCE_CLASS_KEY}',
         })
         self.assertEqual({trace.name for trace in flows.data}, {
-            'UN historic', 'UN forecast', 'Stored estimates (◆ official · ● secondary)', 'Current stored estimate',
+            'UN historic', 'UN forecast', f'Stored estimates — {visualisation.SOURCE_CLASS_KEY}',
         })
         self.assertEqual(flows.layout.height, 1250)
 
@@ -74,13 +75,15 @@ class VisualisationTests(unittest.TestCase):
         with patch.object(visualisation, 'get_connection', self.connection), patch.object(visualisation, 'initialise_findings_table'):
             _, flows, _ = visualisation.build_visualisation('Japan', ['total_fertility_rate'])
         historic = next(trace for trace in flows.data if trace.name == 'UN historic')
-        stored = next(trace for trace in flows.data if trace.name == 'Stored estimates (◆ official · ● secondary)')
+        stored = next(trace for trace in flows.data if trace.name == f'Stored estimates — {visualisation.SOURCE_CLASS_KEY}')
         self.assertEqual(historic.y[0], 1.5)
         self.assertEqual(stored.y[0], 1.2)
         self.assertEqual(flows.layout.yaxis.title.text, 'Live births per woman')
         self.assertIn('y:,.2f', historic.hovertemplate)
         self.assertIn('y:,.2f', stored.hovertemplate)
         self.assertIn('Source status', stored.hovertemplate)
+        self.assertEqual(stored.marker.symbol[0], 'circle-open')
+        self.assertEqual(stored.customdata[0][1], 'Secondary — named source')
 
     def test_metrics_can_be_disabled(self):
         with patch.object(visualisation, 'get_connection', self.connection), patch.object(visualisation, 'initialise_findings_table'):
@@ -117,7 +120,7 @@ class VisualisationTests(unittest.TestCase):
             population, _, message = visualisation.build_visualisation('japan', ['population'])
         self.assertIn('for Japan', message)
         self.assertIn('UN historic', {trace.name for trace in population.data})
-        self.assertIn('Current stored estimate', {trace.name for trace in population.data})
+        self.assertIn(f'Stored estimates — {visualisation.SOURCE_CLASS_KEY}', {trace.name for trace in population.data})
 
     def test_population_millions_are_scaled_and_changes_are_not_plotted_as_totals(self):
         millions = {'title': 'Population reaches 342 million', 'summary': 'The population was 342.28 million.',

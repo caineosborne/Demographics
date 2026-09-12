@@ -133,19 +133,14 @@ def _stored_findings(country: str) -> list[dict]:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT id, source_url, effective_date, extracted_at, finding_json, "
-            "official_source, quoted_source FROM webpage_findings"
+            "source_classification FROM webpage_findings"
         ).fetchall()
     findings = []
     for row in rows:
         finding = json.loads(row["finding_json"])
         finding_country = normalise_country_name(finding.get("geography") or "")
         if finding_country == country:
-            source_type = (
-                "Official publisher" if row["official_source"]
-                else "Secondary, official source named" if str(row["quoted_source"] or "").strip()
-                else "Secondary, source not named"
-            )
-            findings.append({**dict(row), "source_type": source_type, "finding": finding})
+            findings.append({**dict(row), "source_type": row["source_classification"], "finding": finding})
     return findings
 
 
@@ -159,7 +154,8 @@ def finding_choices(country: str, metrics: list[str], hidden: list[int] | None =
         if not any(_metric_value(item["finding"], metric) is not None for metric in metrics):
             continue
         finding = item["finding"]
-        label = f'#{item["id"]} · {item["source_type"]} · {item["effective_date"] or "No date"} · {finding.get("title") or finding.get("source") or "Article"}'
+        source_label = SOURCE_CLASS_DISPLAY.get(item["source_type"], "Secondary — unnamed source")
+        label = f'#{item["id"]} · {source_label} · {item["effective_date"] or "No date"} · {finding.get("title") or finding.get("source") or "Article"}'
         choices.append((label[:180], str(item["id"])))
     return choices
 
@@ -237,6 +233,26 @@ def _add_un_trace(
 
 VINTAGE_COLORS = {2022: "#6f4e9b", 2017: "#3a8d7d", 2012: "#8b6f47"}
 
+SOURCE_CLASS_DISPLAY = {
+    "official_publisher": "Official publisher",
+    "secondary_attributed": "Secondary — named source",
+    "secondary_unattributed": "Secondary — unnamed source",
+    "legacy_unreviewed": "Legacy — unreviewed",
+}
+SOURCE_CLASS_SYMBOL = {
+    "official_publisher": "diamond",
+    "secondary_attributed": "circle-open",
+    "secondary_unattributed": "x",
+    "legacy_unreviewed": "star",
+}
+SOURCE_CLASS_COLOR = {
+    "official_publisher": "#167d73",
+    "secondary_attributed": "#b7791f",
+    "secondary_unattributed": "#6b7280",
+    "legacy_unreviewed": "#9ca3af",
+}
+SOURCE_CLASS_KEY = "◆ Official · ○ Named secondary · × Unnamed secondary · ★ Legacy"
+
 
 def _add_release_trace(figure: go.Figure, rows: list[dict], metric: str, revision: int, row: int, showlegend: bool) -> None:
     """Overlay a prior UN release, intentionally subordinate to WPP 2024."""
@@ -262,12 +278,9 @@ def _add_stored_traces(
         return
 
     values.sort(key=lambda item: (item[0], item[2]))
-    latest_id = max(values, key=lambda item: next(
-        finding["extracted_at"] for finding in findings if finding["id"] == item[2]
-    ))[2]
     customdata = [[
         item[3].get("source") or "Unknown source",
-        item[4],
+        SOURCE_CLASS_DISPLAY.get(item[4], "Secondary — unnamed source"),
         item[3].get("quoted_source") or "Not quoted",
         item[3].get("url") or "",
         _metric_period(item[3], metric),
@@ -277,16 +290,16 @@ def _add_stored_traces(
     ] for item in values]
     figure.add_trace(go.Scatter(
         x=[item[0] for item in values], y=[item[1] for item in values],
-        mode="markers", name="Stored estimates (◆ official · ● secondary)", legendgroup="stored",
+        mode="markers", name=f"Stored estimates — {SOURCE_CLASS_KEY}", legendgroup="stored",
         showlegend=showlegend,
         marker={
             "size": 9,
             "symbol": [
-                "diamond" if item[4] == "Official publisher" else "circle" if "official source named" in item[4] else "x"
+                SOURCE_CLASS_SYMBOL.get(item[4], "x")
                 for item in values
             ],
             "color": [
-                "#167d73" if item[4] == "Official publisher" else "#b7791f" if "official source named" in item[4] else "#6b7280"
+                SOURCE_CLASS_COLOR.get(item[4], "#6b7280")
                 for item in values
             ],
         },
@@ -297,16 +310,6 @@ def _add_stored_traces(
                        "Quoted: %{customdata[2]}<br>Comparison: %{customdata[6]}<br>"
                        "%{customdata[3]}<extra>Stored estimate</extra>"),
     ), row=row, col=1)
-    latest = [item for item in values if item[2] == latest_id]
-    if latest:
-        figure.add_trace(go.Scatter(
-            x=[item[0] for item in latest], y=[item[1] for item in latest],
-            mode="markers", name="Current stored estimate", legendgroup="current",
-            showlegend=showlegend, marker={"size": 13, "symbol": "star", "color": "#d1495b"}, customdata=[customdata[values.index(latest[0])]],
-            hovertemplate=(f"Current {label.lower()}<br>%{{x}}: %{{y:{value_format}}}<br>"
-                           "Article: %{customdata[7]} (finding #%{customdata[5]})<br>"
-                           "Source: %{customdata[0]}<br>Source status: %{customdata[1]}<extra>Current stored estimate</extra>"),
-        ), row=row, col=1)
 
 
 def _make_figure(title: str, metrics: list[str], historic: list[dict], forecast: list[dict], release_rows: dict[int, list[dict]], findings: list[dict], hidden_by_metric: dict[str, set[int]] | None = None) -> go.Figure:
