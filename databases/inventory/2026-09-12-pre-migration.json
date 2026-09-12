@@ -1,0 +1,24 @@
+{
+  "inventory_schema_version": 1,
+  "inventory_type": "pre_migration",
+  "generated_at": "2026-09-12T04:30:37.756188+00:00",
+  "database": "WPP2024_GEN_F01_DEMOGRAPHIC_INDICATORS_COMPACT.sqlite",
+  "database_size_bytes": 51712000,
+  "sha256": "d2d9064656cdb1c19b8c755ecec79964b4885e6aeb7c04af9e547b73c07d19e6",
+  "sqlite_quick_check": "ok",
+  "table_counts": {
+    "blocked_sources": 0,
+    "estimates": 21983,
+    "medium_variant": 22874,
+    "research_settings": 1,
+    "search_candidates": 528,
+    "search_runs": 38,
+    "webpage_findings": 100,
+    "wpp_release_history": 36150
+  },
+  "accepted_finding_count": 100,
+  "candidate_count": 528,
+  "rollback_backup": "databases/backups/WPP2024_GEN_F01_DEMOGRAPHIC_INDICATORS_COMPACT.20260912T043037Z.sqlite",
+  "rollback_backup_sha256": "d2d9064656cdb1c19b8c755ecec79964b4885e6aeb7c04af9e547b73c07d19e6",
+  "rollback_backup_read_only": true
+}

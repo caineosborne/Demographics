@@ -18,6 +18,25 @@ shows the current fetch method while the analysis runs.
 
 Run the regression checks with `uv run python -m unittest discover -s tests`.
 
+## Database storage and Phase 1.1 rollback
+
+The runtime SQLite database is stored under `databases/`. `Data_Files/` is an
+offline source/archive location and is excluded from the production path. The
+runtime path can be overridden explicitly with `DEMOGRAPHICS_DB_PATH`; there
+is no fallback to `Data_Files`.
+
+Before changing any table or record, create a dated read-only backup and
+inventory with:
+
+```sh
+.venv/bin/python database_maintenance.py
+```
+
+The pre-migration inventory is recorded at
+`databases/inventory/2026-09-12-pre-migration.json`. It records 100 accepted
+findings, 528 candidates, 51,712,000 bytes, and SHA-256
+`d2d9064656cdb1c19b8c755ecec79964b4885e6aeb7c04af9e547b73c07d19e6`.
+
 ## Automatic research
 
 Open **Automatic research**, edit the category table, then click **Search and

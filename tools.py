@@ -1,6 +1,5 @@
 """Tools for querying the UN World Population Prospects database."""
 
-from pathlib import Path
 from io import BytesIO
 import sqlite3
 import time
@@ -17,12 +16,10 @@ from langchain_core.tools import tool
 from langgraph.config import get_stream_writer
 from pypdf import PdfReader
 
+from database_config import configured_database_path
 
-DB_PATH = (
-    Path(__file__).resolve().parent
-    / "Data_Files"
-    / "WPP2024_GEN_F01_DEMOGRAPHIC_INDICATORS_COMPACT.sqlite"
-)
+
+DB_PATH = configured_database_path()
 
 
 def initialise_wpp_vintages_table() -> None:

@@ -8,8 +8,10 @@ with official archive files (or their direct download URLs), for example:
       --revision 2017 --source /path/to/WPP2017_DB1_Medium.xlsx \
       --revision 2012 --source /path/to/WPP2012_DB1_Medium.xlsx
 
-`--source` also accepts an https URL.  Raw source copies are retained under
-Data_Files/UN_archives so the graph database is reproducible.
+`--source` also accepts an https URL. Raw source copies are retained under
+``Data_Files/UN_archives`` as offline source material. The mutable SQLite
+database is written under ``databases``; the legacy data folder is never used
+as a runtime database location.
 """
 
 from __future__ import annotations
@@ -25,7 +27,8 @@ import pandas as pd
 import requests
 
 ROOT = Path(__file__).resolve().parent
-DB_PATH = ROOT / "WPP2024_GEN_F01_DEMOGRAPHIC_INDICATORS_COMPACT.sqlite"
+PROJECT_ROOT = ROOT.parent
+DB_PATH = PROJECT_ROOT / "databases" / "WPP2024_GEN_F01_DEMOGRAPHIC_INDICATORS_COMPACT.sqlite"
 ARCHIVE_DIR = ROOT / "UN_archives"
 
 FIELDS = {

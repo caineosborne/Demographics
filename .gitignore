@@ -9,8 +9,16 @@ wheels/
 # Virtual environments
 .venv
 
+# Offline source data; keep only the importer code tracked.
 Data_Files/*
 !Data_Files/import_wpp_vintages.py
 
-.env
+# Runtime database artifacts; keep only documentation and the committed
+# pre-migration inventory visible to Git.
+databases/*
+!databases/README.md
+!databases/inventory/
+databases/inventory/*
+!databases/inventory/2026-09-12-pre-migration.json
 
+.env
