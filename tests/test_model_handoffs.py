@@ -9,6 +9,39 @@ with patch('dotenv.load_dotenv'), patch.dict(os.environ, {'OPENROUTER_API_KEY': 
 
 
 class ModelHandoffTests(unittest.TestCase):
+    def test_manual_duplicate_url_skips_retrieval_and_extraction(self):
+        existing = {
+            'id': 17,
+            'source_url': 'https://example.test/article',
+            'canonical_url': 'https://example.test/article',
+            'finding': {
+                'url': 'https://example.test/article',
+                'title': 'Stored article',
+                'source': 'Example publisher',
+                'site_seen': 'example.test',
+                'geography': 'Japan',
+                'statistics': {},
+            },
+        }
+        with (
+            patch.object(agents.tools, 'blocked_source_urls', return_value=set()),
+            patch.object(agents.tools, 'find_webpage_finding_by_url', return_value=existing),
+            patch.object(agents, 'web_llm') as web,
+            patch.object(agents, 'research_llm') as extraction,
+        ):
+            result = agents.research_agent({
+                'messages': [HumanMessage(content='Please analyze https://example.test/article')],
+            })
+            comparison = agents.compare_to_un({
+                'result': result['result'],
+                'storage': result['storage'],
+            })
+        self.assertEqual(result['storage']['status'], 'excluded_duplicate_url')
+        self.assertEqual(result['storage']['existing_id'], 17)
+        self.assertEqual(comparison['un_data'], [])
+        web.invoke.assert_not_called()
+        extraction.invoke.assert_not_called()
+
     def test_research_handoff_ends_with_user_and_preserves_page(self):
         page_tool = MagicMock()
         page_tool.name = 'get_page_text'

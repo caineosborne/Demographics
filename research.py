@@ -13,7 +13,7 @@ from time import perf_counter
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Literal
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 from bs4 import BeautifulSoup
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -157,15 +157,8 @@ def compact_article_text(text: str, limit: int = MODEL_ARTICLE_LIMIT) -> str:
 
 
 def canonical_url(url):
-    parts = urlsplit(url.strip())
-    if parts.scheme not in {'http', 'https'} or not parts.hostname or parts.username or parts.password:
-        raise ValueError('Expected an HTTP(S) article URL without credentials.')
-    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
-             if not k.lower().startswith('utm_') and k.lower() not in {'fbclid', 'gclid'}]
-    hostname = parts.hostname.lower().removeprefix('www.')
-    # HTTP and HTTPS versions of a publisher's page are the same candidate for
-    # discovery purposes. The original URL is still retained for fetching.
-    return urlunsplit(('https', hostname, parts.path.rstrip('/') or '/', urlencode(query), ''))
+    """Backward-compatible alias for the shared storage canonicalizer."""
+    return tools.canonicalise_source_url(url)
 
 
 LOW_VALUE_DOMAINS = {
@@ -505,9 +498,11 @@ class BossAgent:
             tools.initialise_findings_table()
             with tools.get_connection() as conn:
                 known = {}
-                for finding_id, url in conn.execute('SELECT id, source_url FROM webpage_findings'):
+                for finding_id, stored_canonical_url, source_url in conn.execute(
+                    'SELECT id, canonical_url, source_url FROM webpage_findings'
+                ):
                     try:
-                        known[canonical_url(url)] = finding_id
+                        known[stored_canonical_url or canonical_url(source_url)] = finding_id
                     except ValueError:
                         pass
                 blocked = {row[0] for row in conn.execute('SELECT canonical_url FROM blocked_sources')}
@@ -548,12 +543,15 @@ class BossAgent:
                         record_outcome('duplicate')
                         yield run_id, f'DUPLICATE — {candidate.get("title") or url} — matches {duplicate_of}'
                         continue
+                    # Reserve the URL as soon as it is seen so every later
+                    # variant is excluded before discovery review, fetching,
+                    # extraction, or comparison.
+                    seen[url] = candidate_id
                     if candidate.get('discovery_only'):
                         store.update_candidate(candidate_id, status='discovery_only', full_reason='Reddit discussion without an external article link.')
                         record_outcome('discovery_only')
                         yield run_id, f'Recorded Reddit discussion only: {candidate.get("title") or url}'
                         continue
-                    seen[url] = candidate_id
                     issue = discovery_issue(candidate)
                     if issue:
                         store.update_candidate(candidate_id, status='excluded_discovery', full_reason=issue)

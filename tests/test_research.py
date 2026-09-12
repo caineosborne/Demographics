@@ -117,8 +117,14 @@ class ResearchTests(unittest.TestCase):
 
     def test_canonical_url_unifies_http_and_www_variants(self):
         self.assertEqual(
-            canonical_url('http://www.ons.gov.uk/release/?utm_source=test'),
-            canonical_url('https://ons.gov.uk/release'),
+            canonical_url('http://www.ons.gov.uk/release/?b=2&utm_source=test&a=1#section'),
+            'https://ons.gov.uk/release?a=1&b=2',
+        )
+
+    def test_meaningful_query_parameters_are_not_collapsed(self):
+        self.assertNotEqual(
+            canonical_url('https://example.test/release?edition=mobile'),
+            canonical_url('https://example.test/release?edition=print'),
         )
 
     def test_fetch_uses_original_url_while_deduplication_uses_canonical_url(self):
@@ -203,10 +209,11 @@ class ResearchTests(unittest.TestCase):
 
     def test_existing_finding_is_not_downloaded_or_relabelled(self):
         tools.store_webpage_finding({'url': 'https://example.test/article', 'statistics': {}})
-        row = self.run_boss([candidate()])[0]
+        row = self.run_boss([candidate(url='http://www.example.test/article/?utm_source=search#top')])[0]
         self.assertEqual(row['status'], 'duplicate')
         self.assertEqual(row['duplicate_of'], 'database finding #1')
         self.fetch.assert_not_called()
+        self.summary_review.assert_not_called()
         self.assertEqual(tools.list_webpage_findings()[0]['Submission type'], 'manual')
 
     def test_duplicate_report_found_during_extraction_is_shown_as_duplicate(self):

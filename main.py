@@ -10,7 +10,7 @@ from agents import graph
 from research_ui import build_search_tabs
 from tools import (
     PageAccessError, delete_and_block_webpage_finding, delete_finding_metric, delete_webpage_finding, get_webpage_finding,
-    list_country_names, list_webpage_findings, update_webpage_finding,
+    list_blocked_sources, list_country_names, list_webpage_findings, unblock_source_url, update_webpage_finding,
 )
 from visualisation import (
     build_visualisation_for_latest_analysis, all_finding_choices, finding_choices, finding_link,
@@ -308,6 +308,24 @@ def remove_database_record_and_block(finding_id: int, revision: int):
     return load_database_table(), load_database_country_summary(), revision + 1, "", "", f"Record deleted and source blocked: {canonical_url}", ""
 
 
+def refresh_blocked_sources():
+    choices = [
+        (f"{row['canonical_url']} · blocked {row['blocked_at']}", row['canonical_url'])
+        for row in list_blocked_sources()
+    ]
+    return gr.update(choices=choices, value=choices[0][1] if choices else None)
+
+
+def unblock_selected_source(canonical_url: str | None):
+    if not canonical_url:
+        return refresh_blocked_sources(), "Select a blocked source first."
+    try:
+        unblocked = unblock_source_url(canonical_url)
+    except ValueError as exc:
+        return refresh_blocked_sources(), f"Could not unblock source: {exc}"
+    return refresh_blocked_sources(), f"Source unblocked: {unblocked}"
+
+
 def _visual_target(country, latest):
     return (country or latest or "").strip()
 
@@ -566,7 +584,13 @@ if __name__ == "__main__":
                     delete_record = gr.Button("Delete selected record")
                     delete_and_block_record = gr.Button("Delete and block source", variant="stop")
                 database_status = gr.Markdown()
+                gr.Markdown("### Blocked sources")
+                with gr.Row(elem_classes="record-actions"):
+                    blocked_source_picker = gr.Dropdown(label="Suppressed canonical URL", choices=[], scale=5)
+                    unblock_source = gr.Button("Unblock source")
+                blocked_source_status = gr.Markdown()
                 database_tab.select(refresh_database, inputs=[database_revision, database_country], outputs=[database_table, database_summary, database_revision, record_picker])
+                database_tab.select(refresh_blocked_sources, outputs=blocked_source_picker)
                 refresh_database_button.click(refresh_database, inputs=[database_revision, database_country], outputs=[database_table, database_summary, database_revision, record_picker])
                 database_country.change(refresh_database, inputs=[database_revision, database_country], outputs=[database_table, database_summary, database_revision, record_picker])
                 database_table.select(load_database_table_row, outputs=[selected_record_id, record_json, database_status, record_link, record_picker])
@@ -574,5 +598,6 @@ if __name__ == "__main__":
                 save_record.click(save_database_record, inputs=[selected_record_id, record_json, database_revision], outputs=[database_table, database_summary, database_revision, database_status, record_link])
                 delete_record.click(remove_database_record, inputs=[selected_record_id, database_revision], outputs=[database_table, database_summary, database_revision, selected_record_id, record_json, database_status, record_link])
                 delete_and_block_record.click(remove_database_record_and_block, inputs=[selected_record_id, database_revision], outputs=[database_table, database_summary, database_revision, selected_record_id, record_json, database_status, record_link])
+                unblock_source.click(unblock_selected_source, inputs=blocked_source_picker, outputs=[blocked_source_picker, blocked_source_status])
 
     demo.launch(css=APP_CSS)

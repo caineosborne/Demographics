@@ -236,13 +236,33 @@ def get_connection() -> sqlite3.Connection:
     return sqlite3.connect(DB_PATH)
 
 
+def canonicalise_source_url(url: str) -> str:
+    """Return the shared canonical key used for URL deduplication."""
+    parts = urlsplit(str(url or "").strip())
+    if parts.scheme not in {"http", "https"} or not parts.hostname or parts.username or parts.password:
+        raise ValueError("Expected an HTTP(S) article URL without credentials.")
+    query = sorted(
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if not key.lower().startswith("utm_") and key.lower() not in {"fbclid", "gclid"}
+    )
+    return urlunsplit((
+        "https",
+        parts.hostname.lower().removeprefix("www."),
+        parts.path.rstrip("/") or "/",
+        urlencode(query),
+        "",
+    ))
+
+
 def initialise_findings_table() -> None:
     """Create the durable store for webpage extraction results if needed."""
     with get_connection() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS webpage_findings (
                 id INTEGER PRIMARY KEY,
-                source_url TEXT NOT NULL UNIQUE,
+                source_url TEXT NOT NULL,
+                canonical_url TEXT,
                 effective_date TEXT,
                 population_value REAL,
                 official_source INTEGER NOT NULL,
@@ -254,6 +274,7 @@ def initialise_findings_table() -> None:
         """)
         columns = {row[1] for row in conn.execute("PRAGMA table_info(webpage_findings)")}
         for name, definition in {
+            "canonical_url": "TEXT",
             "submission_type": "TEXT NOT NULL DEFAULT 'legacy_unknown'",
             "discovery_source": "TEXT",
             "search_run_id": "TEXT",
@@ -283,17 +304,101 @@ def initialise_findings_table() -> None:
                 blocked_at TEXT NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS finding_legacy_duplicates (
+                id INTEGER PRIMARY KEY,
+                original_finding_id INTEGER NOT NULL UNIQUE,
+                canonical_url TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                effective_date TEXT,
+                extracted_at TEXT NOT NULL,
+                finding_json TEXT NOT NULL,
+                archived_at TEXT NOT NULL,
+                reason TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS finding_actions (
+                id INTEGER PRIMARY KEY,
+                finding_id INTEGER,
+                canonical_url TEXT NOT NULL,
+                action TEXT NOT NULL,
+                acted_at TEXT NOT NULL,
+                note TEXT
+            )
+        """)
+        _backfill_canonical_urls(conn)
+        _archive_legacy_url_collisions(conn)
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_webpage_findings_canonical_url
+            ON webpage_findings(canonical_url)
+            WHERE canonical_url IS NOT NULL
+        """)
         _purge_legacy_partial_period_metrics(conn)
 
 
-def canonicalise_source_url(url: str) -> str:
-    """Match research deduplication so blocks survive tracking/HTTP variants."""
-    parts = urlsplit(str(url or "").strip())
-    if parts.scheme not in {"http", "https"} or not parts.hostname or parts.username or parts.password:
-        raise ValueError("Expected an HTTP(S) article URL without credentials.")
-    query = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True)
-             if not key.lower().startswith("utm_") and key.lower() not in {"fbclid", "gclid"}]
-    return urlunsplit(("https", parts.hostname.lower().removeprefix("www."), parts.path.rstrip("/") or "/", urlencode(query), ""))
+def _backfill_canonical_urls(conn: sqlite3.Connection) -> None:
+    """Populate canonical keys for legacy findings before enforcing uniqueness."""
+    rows = conn.execute("SELECT id, source_url, canonical_url FROM webpage_findings").fetchall()
+    for finding_id, source_url, current in rows:
+        try:
+            canonical_url = canonicalise_source_url(source_url)
+        except ValueError:
+            # Preserve malformed legacy evidence for manual repair. The partial
+            # unique index below still protects every valid URL.
+            continue
+        if current != canonical_url:
+            conn.execute(
+                "UPDATE webpage_findings SET canonical_url = ? WHERE id = ?",
+                (canonical_url, finding_id),
+            )
+
+
+def _archive_legacy_url_collisions(conn: sqlite3.Connection) -> None:
+    """Keep the newest legacy finding and archive older canonical collisions."""
+    collisions = conn.execute("""
+        SELECT canonical_url
+        FROM webpage_findings
+        WHERE canonical_url IS NOT NULL
+        GROUP BY canonical_url
+        HAVING COUNT(*) > 1
+    """).fetchall()
+    archived_at = datetime.now(timezone.utc).isoformat()
+    for (canonical_url,) in collisions:
+        rows = conn.execute("""
+            SELECT id, source_url, effective_date, extracted_at, finding_json
+            FROM webpage_findings
+            WHERE canonical_url = ?
+            ORDER BY extracted_at DESC, id DESC
+        """, (canonical_url,)).fetchall()
+        for finding_id, source_url, effective_date, extracted_at, finding_json in rows[1:]:
+            conn.execute("""
+                INSERT OR IGNORE INTO finding_legacy_duplicates (
+                    original_finding_id, canonical_url, source_url, effective_date,
+                    extracted_at, finding_json, archived_at, reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                finding_id, canonical_url, source_url, effective_date, extracted_at,
+                finding_json, archived_at, "Older record for the same canonical URL.",
+            ))
+            conn.execute(
+                "DELETE FROM webpage_findings WHERE id = ?", (finding_id,)
+            )
+
+
+def _record_finding_action(
+    conn: sqlite3.Connection,
+    finding_id: int | None,
+    canonical_url: str,
+    action: str,
+    note: str | None = None,
+) -> None:
+    conn.execute(
+        """INSERT INTO finding_actions
+           (finding_id, canonical_url, action, acted_at, note)
+           VALUES (?, ?, ?, ?, ?)""",
+        (finding_id, canonical_url, action, datetime.now(timezone.utc).isoformat(), note),
+    )
 
 
 def blocked_source_urls() -> set[str]:
@@ -303,19 +408,44 @@ def blocked_source_urls() -> set[str]:
         return {row[0] for row in conn.execute("SELECT canonical_url FROM blocked_sources")}
 
 
+def list_blocked_sources() -> list[dict[str, Any]]:
+    """Return suppressed URLs for the small local reviewer control."""
+    initialise_findings_table()
+    with get_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT canonical_url, original_url, blocked_at
+               FROM blocked_sources ORDER BY blocked_at DESC, canonical_url"""
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def delete_and_block_webpage_finding(finding_id: int) -> str:
     """Delete a finding and prevent the same canonical article from returning."""
     initialise_findings_table()
     with get_connection() as conn:
-        row = conn.execute("SELECT source_url FROM webpage_findings WHERE id = ?", (finding_id,)).fetchone()
+        row = conn.execute(
+            "SELECT source_url, canonical_url FROM webpage_findings WHERE id = ?", (finding_id,)
+        ).fetchone()
         if row is None:
             raise ValueError(f"No stored finding exists with ID {finding_id}.")
-        canonical_url = canonicalise_source_url(row[0])
+        canonical_url = row[1] or canonicalise_source_url(row[0])
         conn.execute(
             "INSERT OR REPLACE INTO blocked_sources (canonical_url, original_url, blocked_at) VALUES (?, ?, ?)",
             (canonical_url, row[0], datetime.now(timezone.utc).isoformat()),
         )
         conn.execute("DELETE FROM webpage_findings WHERE id = ?", (finding_id,))
+        _record_finding_action(conn, finding_id, canonical_url, "removed_and_suppressed")
+    return canonical_url
+
+
+def unblock_source_url(url: str) -> str:
+    """Remove a canonical URL from the suppression list and make it eligible."""
+    canonical_url = canonicalise_source_url(url)
+    initialise_findings_table()
+    with get_connection() as conn:
+        conn.execute("DELETE FROM blocked_sources WHERE canonical_url = ?", (canonical_url,))
+        _record_finding_action(conn, None, canonical_url, "unblocked")
     return canonical_url
 
 
@@ -353,12 +483,12 @@ def _purge_legacy_partial_period_metrics(conn: sqlite3.Connection) -> None:
             continue
         if any(isinstance(metric, dict) and metric.get("value") is not None for metric in retained.values()):
             finding["statistics"] = retained
-            source_url, effective_date, population_value, official_source, quoted_source, quoted_source_url, cleaned_payload, classification = _finding_storage_fields(finding)
+            source_url, canonical_url, effective_date, population_value, official_source, quoted_source, quoted_source_url, cleaned_payload, classification = _finding_storage_fields(finding)
             conn.execute(
-                """UPDATE webpage_findings SET effective_date = ?, population_value = ?, official_source = ?,
+                """UPDATE webpage_findings SET source_url = ?, canonical_url = ?, effective_date = ?, population_value = ?, official_source = ?,
                    quoted_source = ?, quoted_source_url = ?, finding_json = ?, source_classification = ? WHERE id = ?""",
-                (effective_date, population_value, official_source, quoted_source, quoted_source_url,
-                 cleaned_payload, classification, finding_id),
+                (source_url, canonical_url, effective_date, population_value, official_source,
+                 quoted_source, quoted_source_url, cleaned_payload, classification, finding_id),
             )
         else:
             # No chartable data remains after removal, so do not keep an empty
@@ -376,11 +506,7 @@ def source_classification(finding: dict[str, Any]) -> str:
 
 
 def store_webpage_finding(finding: dict[str, Any], provenance: dict | None = None) -> dict[str, str | int]:
-    """Store an extracted finding unless it matches an existing source or report.
-
-    A matching report has both the same extracted effective date and population
-    total. If either value is unavailable, only the exact-URL check is used.
-    """
+    """Store an extracted finding unless its canonical URL already exists."""
     provenance = provenance or {"submission_type": "manual", "discovery_source": "manual"}
     initialise_findings_table()
     canonical_country = normalise_country_name(finding.get("geography") or "")
@@ -396,7 +522,7 @@ def store_webpage_finding(finding: dict[str, Any], provenance: dict | None = Non
         if conn.execute("SELECT 1 FROM blocked_sources WHERE canonical_url = ?", (canonical_url,)).fetchone():
             return {"status": "excluded_blocked_source", "canonical_url": canonical_url}
         duplicate_url = conn.execute(
-            "SELECT id FROM webpage_findings WHERE source_url = ?", (source_url,)
+            "SELECT id FROM webpage_findings WHERE canonical_url = ?", (canonical_url,)
         ).fetchone()
         if duplicate_url:
             return {"status": "excluded_duplicate_url", "existing_id": duplicate_url[0]}
@@ -416,13 +542,14 @@ def store_webpage_finding(finding: dict[str, Any], provenance: dict | None = Non
 
         cursor = conn.execute(
             """INSERT INTO webpage_findings (
-                   source_url, effective_date, population_value, official_source,
+                   source_url, canonical_url, effective_date, population_value, official_source,
                    quoted_source, quoted_source_url, extracted_at, finding_json,
                    submission_type, discovery_source, search_run_id, search_candidate_id,
                    source_classification
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 source_url,
+                canonical_url,
                 effective_date,
                 population_value,
                 int(bool(finding.get("official_source"))),
@@ -446,7 +573,7 @@ def list_webpage_findings() -> list[dict[str, Any]]:
     with get_connection() as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute("""
-            SELECT id, source_url, effective_date, population_value,
+            SELECT id, source_url, canonical_url, effective_date, population_value,
                    official_source, quoted_source, quoted_source_url,
                    extracted_at, finding_json, submission_type, discovery_source,
                    search_run_id, search_candidate_id, source_classification
@@ -473,6 +600,7 @@ def list_webpage_findings() -> list[dict[str, Any]]:
             "Quoted source": stored["quoted_source"] or "",
             "Quoted source URL": stored["quoted_source_url"] or "",
             "Webpage URL": stored["source_url"],
+            "Canonical URL": stored["canonical_url"],
             "Extracted at (UTC)": stored["extracted_at"],
             "Extracted JSON": json.dumps(finding, ensure_ascii=False, sort_keys=True),
         })
@@ -491,6 +619,27 @@ def get_webpage_finding(finding_id: int) -> dict[str, Any]:
     return json.loads(row[0])
 
 
+def find_webpage_finding_by_url(url: str) -> dict[str, Any] | None:
+    """Return the active finding for a canonical URL, if one exists."""
+    canonical_url = canonicalise_source_url(url)
+    initialise_findings_table()
+    with get_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT id, source_url, canonical_url, finding_json
+               FROM webpage_findings WHERE canonical_url = ?""",
+            (canonical_url,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "source_url": row["source_url"],
+        "canonical_url": row["canonical_url"],
+        "finding": json.loads(row["finding_json"]),
+    }
+
+
 def _finding_storage_fields(finding: dict[str, Any]) -> tuple:
     if not isinstance(finding, dict) or not finding.get("url"):
         raise ValueError("The finding JSON must be an object with a non-empty url.")
@@ -500,6 +649,7 @@ def _finding_storage_fields(finding: dict[str, Any]) -> tuple:
     population = ((finding.get("statistics") or {}).get("population") or {})
     return (
         finding["url"],
+        canonicalise_source_url(finding["url"]),
         finding.get("effective_date"),
         population.get("value"),
         int(bool(finding.get("official_source"))),
@@ -516,17 +666,17 @@ def update_webpage_finding(finding_id: int, finding_json: str) -> None:
         finding = json.loads(finding_json)
     except json.JSONDecodeError as exc:
         raise ValueError(f"The finding JSON is invalid: {exc.msg}.") from exc
-    source_url, effective_date, population_value, official_source, quoted_source, quoted_source_url, payload, classification = _finding_storage_fields(finding)
+    source_url, canonical_url, effective_date, population_value, official_source, quoted_source, quoted_source_url, payload, classification = _finding_storage_fields(finding)
     initialise_findings_table()
     with get_connection() as conn:
         exists = conn.execute("SELECT 1 FROM webpage_findings WHERE id = ?", (finding_id,)).fetchone()
         if not exists:
             raise ValueError(f"No stored finding exists with ID {finding_id}.")
         duplicate_url = conn.execute(
-            "SELECT id FROM webpage_findings WHERE source_url = ? AND id != ?", (source_url, finding_id)
+            "SELECT id FROM webpage_findings WHERE canonical_url = ? AND id != ?", (canonical_url, finding_id)
         ).fetchone()
         if duplicate_url:
-            raise ValueError(f"This webpage URL is already stored as ID {duplicate_url[0]}.")
+            raise ValueError(f"This canonical webpage URL is already stored as ID {duplicate_url[0]}.")
         if effective_date is not None and population_value is not None:
             duplicate_report = conn.execute(
                 """SELECT id FROM webpage_findings
@@ -537,11 +687,11 @@ def update_webpage_finding(finding_id: int, finding_json: str) -> None:
                 raise ValueError(f"This effective date and population already exist in ID {duplicate_report[0]}.")
         conn.execute(
             """UPDATE webpage_findings SET
-                   source_url = ?, effective_date = ?, population_value = ?,
+                   source_url = ?, canonical_url = ?, effective_date = ?, population_value = ?,
                    official_source = ?, quoted_source = ?, quoted_source_url = ?,
                    finding_json = ?, source_classification = ?
                WHERE id = ?""",
-            (source_url, effective_date, population_value, official_source,
+            (source_url, canonical_url, effective_date, population_value, official_source,
              quoted_source, quoted_source_url, payload, classification, finding_id),
         )
 
@@ -550,9 +700,14 @@ def delete_webpage_finding(finding_id: int) -> None:
     """Delete one explicitly selected stored finding."""
     initialise_findings_table()
     with get_connection() as conn:
-        cursor = conn.execute("DELETE FROM webpage_findings WHERE id = ?", (finding_id,))
-        if cursor.rowcount != 1:
+        row = conn.execute(
+            "SELECT source_url, canonical_url FROM webpage_findings WHERE id = ?", (finding_id,)
+        ).fetchone()
+        if row is None:
             raise ValueError(f"No stored finding exists with ID {finding_id}.")
+        canonical_url = row[1] or canonicalise_source_url(row[0])
+        conn.execute("DELETE FROM webpage_findings WHERE id = ?", (finding_id,))
+        _record_finding_action(conn, finding_id, canonical_url, "removed_allow_rerun")
 
 
 def delete_finding_metric(finding_id: int, metric: str) -> None:

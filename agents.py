@@ -11,6 +11,7 @@ import os
 import re
 from datetime import date
 from typing import Annotated, Optional, TypedDict
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
@@ -20,6 +21,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, field_validator
 
+import tools
 from tools import (
     SQL_TOOLS, WEB_TOOLS, get_population_forecast, normalise_country_name,
     resolve_country_iso3, report_activity, store_webpage_finding,
@@ -62,6 +64,35 @@ def _llm_timeout_seconds() -> int:
         return max(10, int(os.getenv('LLM_TIMEOUT_SECONDS', '120')))
     except ValueError:
         return 120
+
+
+URL_IN_MESSAGE = re.compile(r"https?://[^\s<>\"']+")
+
+
+def _requested_article_url(state: dict) -> str | None:
+    """Find an explicitly supplied URL without asking a model to find it."""
+    if state.get("article_url"):
+        return str(state["article_url"])
+    for message in state.get("messages") or []:
+        content = message.get("content") if isinstance(message, dict) else getattr(message, "content", "")
+        match = URL_IN_MESSAGE.search(str(content or ""))
+        if match:
+            return match.group(0).rstrip(".,;:!?)]}>")
+    return None
+
+
+def _stored_result(existing: dict, source_url: str) -> "RelevantResult":
+    """Make an existing finding displayable without re-fetching or re-extracting."""
+    finding = dict(existing["finding"] or {})
+    finding.update({
+        "title": finding.get("title") or f"Existing finding #{existing['id']}",
+        "url": source_url,
+        "source": finding.get("source") or "Stored finding",
+        "site_seen": finding.get("site_seen") or urlsplit(source_url).netloc,
+        "geography": finding.get("geography") or "",
+        "statistics": finding.get("statistics") or {},
+    })
+    return RelevantResult.model_validate(finding)
 
 
 class Statistic(BaseModel):
@@ -400,6 +431,46 @@ def apply_outlier_filter(comparison: ComparisonResult) -> tuple[ComparisonResult
 
 
 def research_agent(state: State):
+    provenance = state.get("provenance") or {}
+    requested_url = _requested_article_url(state)
+    if requested_url:
+        try:
+            canonical_requested_url = tools.canonicalise_source_url(requested_url)
+        except ValueError:
+            canonical_requested_url = None
+        if canonical_requested_url:
+            if canonical_requested_url in tools.blocked_source_urls():
+                report_activity(f"[Research agent] source is blocked: {canonical_requested_url}")
+                blocked = {
+                    "id": 0,
+                    "finding": {
+                        "url": requested_url,
+                        "statistics": {},
+                    },
+                }
+                return {
+                    "messages": [],
+                    "result": _stored_result(blocked, requested_url),
+                    "storage": {
+                        "status": "excluded_blocked_source",
+                        "canonical_url": canonical_requested_url,
+                    },
+                }
+            if not provenance.get("allow_rerun"):
+                existing = tools.find_webpage_finding_by_url(requested_url)
+                if existing:
+                    report_activity(
+                        f"[Research agent] duplicate URL excluded before retrieval: {canonical_requested_url}"
+                    )
+                    return {
+                        "messages": [],
+                        "result": _stored_result(existing, existing["source_url"]),
+                        "storage": {
+                            "status": "excluded_duplicate_url",
+                            "existing_id": existing["id"],
+                            "canonical_url": canonical_requested_url,
+                        },
+                    }
     conversation = [SystemMessage(content=temporal_context() + """
         Retrieve and analyze the user's supplied URL using only the web tools.
         Use get_pdf_text for a URL that points to a PDF; get_page_text can also
@@ -491,7 +562,6 @@ def research_agent(state: State):
     annualize_flow_statistics(result)
     mark_partial_periods(result)
     finding = result.model_dump(mode="json")
-    provenance = state.get("provenance") or {}
     if provenance.get("submission_type") == "automatic" and not resolve_country_iso3(result.geography):
         reason = f"No unique UN ISO3 match for geography '{result.geography}'."
         report_activity(f"[Research agent] excluded subnational/unmatched geography: {reason}")
@@ -534,6 +604,23 @@ def research_agent(state: State):
 
 
 def compare_to_un(state: State):
+    if (state.get("storage") or {}).get("status") in {
+        "excluded_duplicate_url", "excluded_blocked_source",
+    }:
+        return {
+            "messages": [],
+            "comparison": ComparisonResult(
+                population=MetricComparison(),
+                births=MetricComparison(),
+                deaths=MetricComparison(),
+                natural_change=MetricComparison(),
+                net_migration=MetricComparison(),
+                total_fertility_rate=MetricComparison(),
+                overall_assessment="No comparison performed because the URL was excluded before processing.",
+                notes="An existing or suppressed URL must be explicitly made eligible before rerunning it.",
+            ),
+            "un_data": [],
+        }
     research_json = state["result"].model_dump_json()
     country_iso3 = resolve_country_iso3(state["result"].geography)
     effective_date = state["result"].effective_date

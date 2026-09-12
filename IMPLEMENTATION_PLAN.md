@@ -4,11 +4,12 @@
 
 - [ ] **Phase 1 — Stabilize and improve the current research pipeline**
   - [x] **Step 1.1 — Preserve and inventory the current database**
-  - [ ] **Step 1.2 — Fix canonical duplicates and deletion behaviour**
+  - [x] **Step 1.2 — Fix canonical duplicates and deletion behaviour**
   - [ ] **Step 1.3 — Include and rank every source type**
   - [ ] **Step 1.4 — Add fallback providers and manual-only comparison**
   - [ ] **Step 1.5 — Reduce the candidate audit**
   - [ ] **Step 1.6 — Prepare the full and filtered WPP databases**
+  - [ ] **Step 1.7 — Verify record and metric deletion**
   - [ ] **Step 1.7 - ensure that the delete datapoint/dete record is working**
 - [ ] **Phase 2 — Build the local FastAPI application layer**
   - [ ] **Step 2.1 — Build the new data model and separate workflows from Gradio**
@@ -113,6 +114,20 @@ Historic WPP release overlays retain the same chart metrics plus revision and ca
 
 ## Phase 1 — Stabilize and improve the current research pipeline
 
+### Phase 1 boundary
+
+Phase 1 changes and tests the existing Python/Gradio application. It does **not**
+introduce FastAPI, Postgres, a new frontend, or the full source/claim/conflict
+model. The objective is to make the research rules correct and observable in the
+current tool first; Phase 2 then ports those proven rules into the new
+application architecture.
+
+Phase 1 does not change the existing effective-date plus population duplicate
+safeguard, and does not group different webpages that report the same statistic
+into a single graph observation. It adds canonical-URL handling alongside that
+existing safeguard. Retaining different URLs as corroborating sources, and
+source-to-source conflict grouping, are deliberate Phase 2 work.
+
 ### Step 1.1 — Preserve and inventory the current database
 
 - Create a dated, read-only backup of the current SQLite file before changing any table or record.
@@ -130,66 +145,242 @@ only for offline source material and is not a production database location.
 
 ### Step 1.2 — Fix canonical duplicates and deletion behaviour
 
-- Normalize HTTP/HTTPS, `www`, trailing slashes, fragments, and known tracking parameters.
-- Store a canonical URL alongside the original URL and enforce canonical URL uniqueness for stored findings.
-- Continue to record duplicate discoveries in the research audit, but do not fetch or extract them again.
-- Keep the two explicit actions:
-  - **Remove and allow rerun:** delete the accepted finding while leaving its canonical URL eligible for a future search.
-  - **Remove and suppress:** delete the accepted finding and add its canonical URL to the block list.
-- Allow an administrator to remove a URL from the block list later.
+#### Required URL canonicalisation
 
-**Complete when:** the current Gradio tool prevents URL variants from creating duplicate findings, while preserving its existing workflows and data display.
+Use one shared `canonicalise_source_url()` function for manual analysis, news
+search, country hunts, storage, deletion, blocking, and tests. Given a valid
+HTTP(S) URL it must:
+
+1. Reject URLs with credentials, a missing host, or a non-HTTP(S) scheme.
+2. Lowercase the host and remove a leading `www.`.
+3. Normalize the scheme to `https`.
+4. Remove the fragment (`#...`).
+5. Remove a trailing slash except at the root path.
+6. Remove known tracking parameters: `utm_*`, `fbclid`, and `gclid`.
+7. Preserve meaningful query parameters, but sort retained query pairs so
+   parameter ordering cannot create a second finding.
+
+Do not follow redirects or try to infer that two different publisher URLs have
+the same article in Phase 1. That is deliberately out of scope; only the same
+canonical URL is a duplicate.
+
+#### Required storage and lookup behaviour
+
+- Add `canonical_url TEXT` to `webpage_findings` and backfill it for every
+  stored record using the shared function.
+- Before creating the unique index, generate a collision report. For a legacy
+  collision, retain the newest extracted record as the active finding and move
+  older rows into a small legacy-duplicate archive table; do not silently
+  discard them. The dated full-database backup remains the recovery source.
+- Add `UNIQUE(canonical_url)` after collisions have been handled.
+- Keep the original, user-visible URL in `source_url`; it is evidence, while
+  `canonical_url` is only the deduplication key.
+- Retain the current “same effective date + same population” duplicate rule
+  unchanged. The canonical URL check is an earlier, simpler duplicate gate;
+  this existing value/date safeguard remains the later storage-time check.
+  Do not try to attach a second URL as corroborating evidence in the current
+  SQLite finding model. Phase 2 replaces this safeguard with claims grouped
+  under a shared observation.
+- At discovery time, check the canonical URL before summary review, fetching,
+  model extraction, or Tavily extraction. A duplicate remains visible in the
+  candidate audit with the existing finding ID and a `duplicate` status.
+- At manual submission time, show the existing record and do not re-run it
+  unless the administrator first chooses the explicit rerun path below.
+
+#### Required deletion behaviour
+
+| Admin action | Stored finding | Canonical URL next time | Block list |
+|---|---|---|---|
+| Remove and allow rerun | Delete the active finding | Eligible for future discovery/manual analysis | Unchanged/absent |
+| Remove and suppress source | Delete the active finding | Rejected before fetch | Insert canonical URL |
+| Unblock source | No finding is recreated | Eligible again | Remove canonical URL |
+
+Create a compact `finding_actions` audit table with the finding ID, canonical
+URL, action, timestamp, and optional note. A normal removal therefore permits a
+future re-run without pretending the original review never occurred.
+
+#### Required tests
+
+- URL variants with `www`, `http`, tracking parameters, fragments, trailing
+  slashes, and query-pair ordering resolve to one canonical URL.
+- Meaningful query parameters remain distinct.
+- A duplicate is skipped before retrieval and model work.
+- “Remove and allow rerun” allows a later run; “remove and suppress” does not;
+  unblocking restores eligibility.
+- The existing same-date plus same-population behavior remains unchanged for
+  different source URLs.
+
+**Complete when:** the current Gradio tool prevents URL variants from creating duplicate findings while preserving the existing date/population safeguard.
+
+**Completed 2026-09-12:** canonical URL keys are stored and uniquely indexed;
+the live migration archived one older canonical collision while retaining the
+newer active record. Duplicate candidates are excluded before review, fetch,
+extraction, or comparison. Normal removal permits rerun, suppression blocks a
+canonical URL, and unblocking restores eligibility. The existing
+effective-date plus population duplicate rule remains unchanged.
 
 ### Step 1.3 — Include and rank every source type
 
-- Remove the automatic `excluded_unattributed_source` outcome from the current research pipeline.
-- Store unattributed secondary sources as low-priority findings rather than discarding them.
-- Retain the three source classes: official publisher, named secondary, and unnamed secondary.
-- Use source class to control marker shape and the default preferred value if sources disagree; it is not an acceptance gate.
-- Draw unnamed secondary sources as crosses in the current graph, including when no formal source is named.
-- Continue to store the extracted source-related fields even when they are empty.
-- Preserve all existing findings exactly as they are; do not re-fetch or discard them.
-- Mark existing records as `legacy_unreviewed` where the old data cannot support a reliable source class.
-- Draw legacy records as neutral standard stars, rather than implying that they are official, named secondary, or unnamed secondary.
-- Allow later manual classification, editing, or replacement of an individual legacy record.
+#### Source classes and priority
 
-The initial priority order is official publisher, then named secondary, then unnamed secondary. A legacy record has no automatic priority until reviewed.
+Every extracted finding with a valid country, period, and metric is stored. A
+source class is a display and future conflict-resolution priority; it is never
+an automatic acceptance gate.
 
-Legacy findings will be brought into the richer source/claim model only when the FastAPI application is built. Until then, they remain visible in the current tool as neutral historic datapoints.
+| Rank | Stored class | How it is assigned in Phase 1 | Current graph marker |
+|---:|---|---|---|
+| 1 | `official_publisher` | A matching explicit source rule, or a direct publisher verified by the extraction | Diamond |
+| 2 | `secondary_attributed` | Non-official publisher with a named/cited underlying source | Outlined circle |
+| 3 | `secondary_unattributed` | No direct official publisher or usable named underlying source | Cross |
+| — | `legacy_unreviewed` | A finding that existed before this migration | Neutral star |
 
-**Complete when:** the current Gradio tool stores all three source types and existing charts retain historic points without making unsupported claims about source quality.
+Remove the `excluded_unattributed_source` storage outcome and corresponding
+automatic-research branch. Unattributed sources are stored at rank 3 and are
+visible in the graph and database. The existing fields (`official_source`,
+`quoted_source`, and `quoted_source_url`) remain useful evidence even when they
+are blank.
+
+Phase 1 does not automatically choose a winner when rank-1 and rank-3 sources
+report different values. It displays them as separate current findings. Phase 2
+introduces observation groups, conflicts, and a preferred claim.
+
+#### Configurable source rules
+
+Create a `source_rules` SQLite table, initially managed directly in the
+database or a small local configuration command; Phase 3 provides the admin
+screen.
+
+| Field | Purpose |
+|---|---|
+| `id` | Stable rule ID |
+| `match_type` | `canonical_url` or `domain` |
+| `match_value` | The canonical URL or normalized domain to match |
+| `action` | `classify` or `exclude` |
+| `classification` | The source class for a `classify` rule; null for `exclude` |
+| `enabled` | Allows a rule to be disabled without deleting its history |
+| `note` | Reason and evidence for the rule |
+| `created_at`, `updated_at` | Audit timestamps |
+
+Rule resolution order is: exact canonical-URL rule, then domain rule, then
+extraction-derived classification. A rule can mark a verified statistical
+office as official or explicitly exclude a domain/URL. `.gov` is only a signal;
+it never makes a source official without a rule or supporting extraction.
+
+The existing `blocked_sources` table remains the fast exact-URL suppression
+list created by “Remove and suppress source.” A broad publisher decision belongs
+in `source_rules`, not in `blocked_sources`.
+
+#### Legacy migration
+
+- Preserve all legacy `finding_json`, URLs, dates, and values unchanged.
+- Set their displayed `source_classification` to `legacy_unreviewed`; retain
+  historical source fields rather than trying to infer a new class.
+- Render them as neutral stars until a later manual reclassification.
+- Do not re-fetch legacy sources as part of this migration.
+
+#### Required tests
+
+- A result without `quoted_source` is stored as `secondary_unattributed`, not
+  excluded.
+- Exact URL and domain rules override model/extraction classification.
+- An excluded rule stops processing before fetch.
+- Legacy records remain present and render as stars.
+- Marker selection matches the four classes above.
+
+**Complete when:** the current Gradio tool stores every valid source, source priority is visible, and source rules can be changed without editing Python code.
 
 ### Step 1.4 — Add fallback providers and manual-only comparison
 
-- Make the LLM comparison agent an explicit manual-analysis feature only.
-- Manual URLs entered by an administrator, including an approved public submission, run the full current comparison flow.
-- Automatic news, country, and bulk scans extract and store eligible datapoints but do not run the comparison agent and are never excluded as outliers by it.
-- The existing WPP series remains visible as the graph reference line; a bulk source need not have a per-article comparison record to be plotted.
-- Add a configured fallback-provider list, initially including Statista and Our World in Data.
-- During a country hunt, allow a configured fallback provider only if that country currently has no stored article-derived datapoint and the page was published in the previous three months.
-- If the country already has a datapoint, do not use fallback providers through the country-hunt route.
-- Classify fallback results by the same three source classes; they do not receive special official status.
-- Store the fallback-provider list and source-rules in SQLite initially so the behaviour is testable before the frontend is replaced. Phase 3 adds the administration screen for editing them.
+#### Manual-only comparison policy
 
-**Complete when:** country hunts can populate an empty country with a recent Statista/OWID result, automatic jobs no longer use the comparison agent, and manual URL analysis still does.
+- The existing full LLM comparison agent remains on the manual **Analyse
+  webpage** path only. It runs after the administrator submits a URL and can
+  show the narrative UN comparison and existing outlier explanation.
+- Automatic news search, direct country hunt, and bulk country hunt perform
+  relevance review and metric extraction, but do not call the comparison agent.
+- Remove the automatic `excluded_outlier` branch. An automatically discovered
+  point is stored if its extraction is valid, even when it would have differed
+  substantially from WPP.
+- WPP remains a reference line in charts. It is not necessary to run a
+  per-article comparison in order to plot an automatic finding.
+
+#### Fallback-provider policy
+
+Create a `fallback_providers` SQLite table:
+
+| Field | Initial value / purpose |
+|---|---|
+| `domain` | Primary key, initially `statista.com` and `ourworldindata.org` |
+| `enabled` | Allows a provider to be paused without code changes |
+| `max_age_days` | `90` |
+| `only_when_country_empty` | `true` |
+| `note` | Why the provider is allowed and any attribution caveat |
+
+For every country-hunt candidate, evaluate the rule at the point the candidate
+is stored:
+
+1. Is the candidate from an enabled fallback-provider domain?
+2. If not, use normal source processing.
+3. If yes, does the country currently have zero stored article-derived
+   datapoints? WPP baseline rows do not count.
+4. Is the page publication date no more than 90 days old? A missing or
+   unparseable publication date fails this fallback rule.
+5. If both conditions pass, store it with the normal source classification and
+   marker. If either fails, mark it `excluded_fallback_not_needed` in the audit
+   and do not add a finding.
+
+This is intentionally order-dependent within a run: if an earlier candidate
+creates the first datapoint for a country, a later Statista/OWID candidate is
+not stored. That is an accepted simplicity trade-off.
+
+Fallback providers are not official merely because they are configured. For
+example, Statista can be a named-secondary circle when it names IMF; it remains
+an unnamed-secondary cross if it does not. OWID material that reproduces the
+same WPP series is a linked source, not independent corroboration.
+
+#### Required tests
+
+- A manual URL calls the comparison agent; an automatic URL does not.
+- Automatic extraction is stored even when an old comparison would have marked
+  it as an outlier.
+- A recent Statista/OWID candidate is stored when the country is empty.
+- The same candidate is excluded when that country already has a datapoint.
+- A fallback candidate older than 90 days, or without a date, is excluded.
+- Disabling a configured provider takes effect without a code change.
+
+**Complete when:** country hunts can populate an empty country with a recent Statista/OWID result, automatic jobs never call the comparison agent, and manual URL analysis still does.
 
 ### Step 1.5 — Reduce the candidate audit
 
-Retain compact operational and decision data:
+Keep in `search_candidates.details_json` only:
 
-- Run and candidate IDs, original/canonical URL, title/snippet, provider/category, timestamps, status/reasons, source relationships, duplicate relationship, concise errors, and usage measurements.
+- title, snippet, publication date, provider, category, original/canonical URL;
+- processing status, source class, decision reasons, duplicate/finding IDs, and
+  concise errors;
+- structured extraction/storage result and measured provider/model timings.
 
-Remove large candidate detail after processing:
+Remove when a candidate finishes, fails, or is deferred:
 
-- Full webpage text, raw provider payloads, embedded/binary material, and repeated alternative-page contents.
+- `full_text`;
+- raw provider payloads;
+- alternative-page content and large retrieval attempt payloads;
+- embedded/binary/image data.
 
-Keep accepted structured extraction with the stored finding. This is a storage change only; it must not remove any accepted datapoint or change current search decisions.
+The accepted finding continues to keep the structured extracted metrics and its
+original article URL. The audit records *why* a candidate was accepted,
+rejected, duplicate, deferred, or blocked, not a copy of the article.
 
-**Complete when:** the current audit remains useful for outcomes and debugging without accumulating full article text.
+Run a one-time sanitisation over existing candidate JSON, record the number of
+bytes removed, then run SQLite `VACUUM` on the working database after the
+verified backup exists.
+
+**Complete when:** the current audit remains useful for outcomes and debugging without accumulating full article text, and no accepted finding or source URL has been removed.
 
 ### Step 1.6 — Prepare the full and filtered WPP databases
 
 - Retain the complete WPP database offline as the authoritative source archive.
+- Keep the current working database under `databases/` and retain only offline
+  source material under `Data_Files/`.
 - Create a repeatable build command that generates a small `wpp_serving.sqlite` from that archive.
 - Keep `estimates` and `medium_variant` as separate tables inside the same serving file rather than separate SQLite files.
 - Convert years and measures to appropriate numeric types during generation.
@@ -199,10 +390,40 @@ Keep accepted structured extraction with the stored finding. This is a storage c
 
 **Complete when:** the filtered database can be rebuilt from scratch and passes comparison tests against the full archive, without changing the running Gradio application.
 
+### Step 1.7 — Verify record and metric deletion
 
-### Step 1.7 - ensure that the delete datapoint/dete record is working
+- Verify that an administrator can delete one metric, such as births, from an
+  accepted record while preserving its other extracted metrics and source URL.
+- Verify that deleting the full record removes all its points from every graph.
+- Verify that “remove and suppress source” prevents a later automatic or manual
+  re-add, while “remove and allow rerun” does not.
+- Confirm the editable finding JSON, database table, and graph all refresh from
+  the same saved state after each action.
+- Add regression tests for metric deletion, record deletion, suppression,
+  unblock, and later rerun.
 
-Ensure that the user can delet a specific datapoint (births etc) from the recod, alongisde the full record. 
+**Complete when:** per-metric deletion and full-record deletion are both safe,
+visible immediately in the graphs, and preserve the intended URL eligibility.
+
+### Phase 1 SQLite database shape after completion
+
+Phase 1 keeps the existing SQLite application database. It adds small tables
+and fields; it does not yet introduce Postgres or the Phase 2 claim tables.
+
+| Table | Phase 1 state |
+|---|---|
+| `webpage_findings` | Existing finding storage plus `canonical_url`, source-class values including `legacy_unreviewed`, and an optional matching source-rule ID. `source_url` remains the original visible link. |
+| `blocked_sources` | Existing exact canonical-URL suppression list, extended with an optional reason/note and audit metadata if needed. |
+| `source_rules` | New configurable domain/exact-URL classification or exclusion rules. |
+| `fallback_providers` | New configured domains, enabled flag, max age, and “only when country empty” rule. |
+| `finding_actions` | New compact log of remove, suppress, unblock, and metric-delete actions. |
+| `search_candidates` | Existing rows, but large webpage/provider content removed from `details_json` after processing. |
+| `search_runs` / `research_settings` | Existing job and search controls, with links to source/fallback configuration where needed. |
+| WPP SQLite files | Full offline archive plus a generated read-only serving copy; neither stores article findings. |
+
+The proposed Phase 2 tables (`source_documents`, `metric_claims`, and
+`observation_groups`) are intentionally not added in Phase 1. This keeps the
+current Gradio data model stable while its logic is being corrected and tested.
 
 ## Phase 2 — Build the local FastAPI application layer
 
@@ -215,6 +436,14 @@ Replace the current assumption that one webpage finding is one graph point with 
 - **Source document:** the article or webpage, identified by a unique canonical URL.
 - **Metric claim:** one source's reported country, metric, period, value, unit, and definition.
 - **Observation group:** claims which refer to the same country, metric, period, unit, and definition.
+
+At the Phase 2 cutover, retire the Phase 1 effective-date plus population
+exclusion for new writes. Canonical URL uniqueness remains the only rule that
+rejects a source document outright. A different canonical URL instead creates a
+source document and one or more claims, which are then associated with an
+observation group. Do not manufacture missing legacy corroborating sources:
+only migrate the documents that were retained in Phase 1, and allow later
+searches or manual submissions to add further evidence.
 
 Same statistic from a different source:
 

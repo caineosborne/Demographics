@@ -40,6 +40,43 @@ class FindingStorageTests(unittest.TestCase):
         tools.store_webpage_finding(self.finding)
         self.assertEqual(tools.store_webpage_finding(self.finding)["status"], "excluded_duplicate_url")
 
+    def test_canonical_url_variants_are_excluded(self):
+        tools.store_webpage_finding({
+            **self.finding,
+            "url": "http://www.example.test/report/?utm_source=search&b=2&a=1#figures",
+        })
+        duplicate = {**self.finding, "url": "https://example.test/report?a=1&b=2"}
+        self.assertEqual(tools.store_webpage_finding(duplicate)["status"], "excluded_duplicate_url")
+
+    def test_meaningful_query_parameters_remain_distinct(self):
+        base = {**self.finding, "effective_date": None, "statistics": {"population": {"value": None}}}
+        self.assertEqual(tools.store_webpage_finding(base)["status"], "stored")
+        self.assertEqual(
+            tools.store_webpage_finding({**base, "url": "https://example.test/report?edition=mobile"})["status"],
+            "stored",
+        )
+
+    def test_legacy_canonical_collision_archives_older_record(self):
+        with tools.get_connection() as conn:
+            conn.execute("""CREATE TABLE webpage_findings (
+                id INTEGER PRIMARY KEY, source_url TEXT NOT NULL UNIQUE,
+                effective_date TEXT, population_value REAL, official_source INTEGER NOT NULL,
+                quoted_source TEXT, quoted_source_url TEXT, extracted_at TEXT NOT NULL,
+                finding_json TEXT NOT NULL
+            )""")
+            conn.executemany(
+                "INSERT INTO webpage_findings VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (1, "http://www.example.test/report/?utm_source=x", None, None, 0, None, None, "2026-01-01T00:00:00+00:00", json.dumps({"url": "http://www.example.test/report/?utm_source=x"})),
+                    (2, "https://example.test/report", None, None, 0, None, None, "2026-02-01T00:00:00+00:00", json.dumps({"url": "https://example.test/report"})),
+                ],
+            )
+        tools.initialise_findings_table()
+        with tools.get_connection() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM webpage_findings").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM finding_legacy_duplicates").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT id FROM webpage_findings").fetchone()[0], 2)
+
     def test_same_effective_date_and_population_is_excluded(self):
         tools.store_webpage_finding(self.finding)
         duplicate = {**self.finding, "url": "https://mirror.test/report"}
@@ -82,6 +119,22 @@ class FindingStorageTests(unittest.TestCase):
             tools.store_webpage_finding({**self.finding, "url": "https://example.test/report"})["status"],
             "excluded_blocked_source",
         )
+
+    def test_remove_and_allow_rerun_leaves_url_eligible(self):
+        stored = tools.store_webpage_finding(self.finding)
+        tools.delete_webpage_finding(stored["id"])
+        self.assertEqual(tools.store_webpage_finding(self.finding)["status"], "stored")
+        action = tools.run_query(
+            "SELECT action FROM finding_actions WHERE finding_id = ? ORDER BY id DESC LIMIT 1",
+            (stored["id"],),
+        )
+        self.assertEqual(action[0]["action"], "removed_allow_rerun")
+
+    def test_unblocking_restores_url_eligibility(self):
+        stored = tools.store_webpage_finding(self.finding)
+        canonical = tools.delete_and_block_webpage_finding(stored["id"])
+        tools.unblock_source_url(canonical)
+        self.assertEqual(tools.store_webpage_finding(self.finding)["status"], "stored")
 
     def test_can_delete_one_metric_without_deleting_other_metrics(self):
         finding = {**self.finding, "statistics": {
