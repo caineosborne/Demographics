@@ -2,7 +2,7 @@
 
 ## Executive checklist
 
-- [ ] **Phase 1 — Stabilize and improve the current research pipeline**
+- [x] **Phase 1 — Stabilize and improve the current research pipeline**
   - [x] **Step 1.1 — Preserve and inventory the current database**
   - [x] **Step 1.2 — Fix canonical duplicates and deletion behaviour**
   - [x] **Step 1.3 — Include and rank every source type**
@@ -10,7 +10,7 @@
   - [x] **Step 1.7 — Verify record and metric deletion**
   - [x] **Step 1.5 — Reduce the candidate audit**
   - [x] **Step 1.6 — Prepare the full and filtered WPP databases**
-- [ ] **Phase 2 — Establish the backend alongside the retained Gradio client**
+- [x] **Phase 2 — Establish the backend alongside the retained Gradio client**
   - [x] **Step 2.1 — Establish the FastAPI application boundary**
   - [x] **Step 2.2 — Extract read-only query and graph services**
   - [x] **Step 2.3 — Extract finding administration services**
@@ -24,11 +24,13 @@
   - [ ] **Step 3.1 — Build the admin application shell**
   - [ ] **Step 3.2 — Prove service-level parity against Gradio**
   - [ ] **Step 3.3 — Complete backend durability and frontend contracts**
-  - [ ] **Step 3.4 — Rebuild manual webpage analysis**
-  - [ ] **Step 3.5 — Rebuild research and country-hunt controls**
-  - [ ] **Step 3.6 — Rebuild findings and administration**
-  - [ ] **Step 3.7 — Rebuild the graphs and reporting**
-  - [ ] **Step 3.8 — Cut over and retire Gradio**
+  - [ ] **Step 3.4 — Tighten extraction scope and validation**
+  - [ ] **Step 3.5 — Rebuild manual webpage analysis**
+  - [ ] **Step 3.6 — Rebuild research and country-hunt controls**
+  - [ ] **Step 3.7 — Rebuild findings and administration**
+  - [ ] **Step 3.8 — Rebuild the graphs and reporting**
+  - [ ] **Step 3.9 — Cut over and retire Gradio**
+  - [ ] **Step 3.10 — Simplify the post-Gradio codebase**
 - [ ] **Phase 4 — Add the claims and conflict framework**
   - [ ] **Step 4.1 — Introduce source documents, claims, and observation groups**
   - [ ] **Step 4.2 — Migrate legacy records and extend backend contracts**
@@ -622,6 +624,11 @@ response serialization; it contains no research business logic.
 **Complete when:** the API starts locally, its health endpoint is tested, and
 the existing Gradio application remains unchanged.
 
+**Completed 2026-09-12:** `api.py` provides the FastAPI application factory,
+runtime settings, injectable authentication hook, lifespan wiring, static test
+frontend, and tested health endpoint. The original Gradio entry point remains
+available during the Phase 3 transition.
+
 ### Step 2.2 — Extract read-only query and graph services
 
 Move country lookup, WPP queries, stored-finding reads, and graph-data assembly
@@ -634,7 +641,7 @@ but country-specific requests use ISO3.
 **Complete when:** service and endpoint tests return the same values as the
 current graphs and selectors, with no Gradio imports in the service code.
 
-**Implementation note:** `read_services.py` now owns plain-data country,
+**Completed 2026-09-12:** `read_services.py` now owns plain-data country,
 finding, WPP graph-series, run-history, and candidate-history reads. The
 versioned API endpoints expose those structures while Gradio remains the
 unchanged renderer; Plotly/Gradio rendering stays in place until the Phase 3
@@ -652,6 +659,11 @@ country-scoped administration operations.
 **Complete when:** every existing administration action has service and API
 coverage and preserves the current behaviour.
 
+**Completed 2026-09-12:** finding reads and edits, metric and record deletion,
+source suppression and unblocking, recheck/action history, source rules, and
+fallback-provider settings are exposed through framework-independent services
+and versioned administration routes while retaining the Phase 1 SQLite rules.
+
 ### Step 2.4 — Extract manual webpage analysis
 
 Move the manual URL analysis workflow, fetching progress, extraction, optional
@@ -663,6 +675,11 @@ country-specific LLM prompt/context.
 
 **Complete when:** a representative manual URL can be analysed through Python
 and FastAPI with the same stored result as the current Gradio flow.
+
+**Completed 2026-09-12:** manual analysis is available as an asynchronous API
+job with durable status/progress, optional ISO3 context, structured extraction,
+manual-only WPP comparison, storage outcome, and compact JSON result polling.
+The Phase 3 frontend will make the approval/storage semantics explicit.
 
 ### Step 2.5 — Extract research and country-hunt services
 
@@ -676,6 +693,12 @@ resolve its geography to the same ISO3 before it can continue.
 
 **Complete when:** research and country-hunt regression cases run through the
 service layer with unchanged outcomes.
+
+**Completed 2026-09-12:** automatic discovery, direct country hunts, bulk ISO3
+hunts, settings, progress, stop handling, candidate history, duplicate/source
+rules, fallback eligibility, and alternative-source recovery run through the
+shared research services. Automatic and bulk discovery do not invoke the LLM
+comparison step.
 
 ### Step 2.5a — Audit and complete ISO3-only country identity
 
@@ -729,6 +752,13 @@ coordination remain Step 2.6 work, not an ISO3 identity gap.
 **Complete when:** stopping the API does not corrupt job state and rerunning a
 failed command is safe.
 
+**Completed 2026-09-12 for the Phase 2 boundary:** durable job records,
+attempts, progress, discovery locking, interruption recovery, safe retry, and
+CLI commands exist for manual analysis, news search, country search,
+maintenance, recovery, and the provisional export path. Cross-process owner
+leases, status-preserving stop semantics, and removal of the provisional export
+behavior are explicitly carried into Phase 3 Step 3.3 before production use.
+
 ### Step 2.7 — Add versioned JSON endpoints and fixtures
 
 - Use typed, versioned response models for every extracted service.
@@ -742,6 +772,13 @@ failed command is safe.
 
 **Complete when:** a frontend can be developed from fixtures without direct
 database access.
+
+**Completed 2026-09-12 for frontend development:** the versioned read,
+administration, analysis, research, country-hunt, settings, and worker routes
+are exposed with representative fixtures and validation/route tests. The full
+suite passes 143 tests. Final explicit response models, consistent missing-item
+responses, redaction review, and HTTP-to-temporary-database integration tests
+are recorded as Phase 3 Step 3.3 contract hardening.
 
 ### Step 2.8 — Build a basic API testing frontend
 
@@ -762,7 +799,47 @@ surface also includes an open route console so every versioned API route can be
 called without introducing a user-admin or authentication workflow at this
 stage.
 
+**Completed 2026-09-12:** the local API desk loads countries, findings, graph
+series, and saved settings; starts and polls manual-analysis and research jobs;
+and provides an open route console for the remaining versioned endpoints. It is
+intentionally a test surface rather than the Phase 3 admin interface.
+
 ## Phase 3 — Build the admin interface and retire Gradio
+
+### Phase 3 decisions required
+
+Resolve and record these decisions at the indicated step; do not let the
+frontend accidentally decide them through implementation details.
+
+1. **Worker ownership — required before Step 3.3:** choose the stale-worker
+   detection mechanism used before recovering jobs or releasing locks.
+   Recommended: persisted owner IDs with renewable leases/heartbeats and a
+   conservative expiry period.
+2. **Placeholder export — required before Step 3.3 completes:** either disable
+   the current placeholder command until Phase 7 or specify a real, typed
+   internal export contract. Recommended: disable it so run history cannot be
+   mistaken for exported findings.
+3. **Extraction acceptance policy — required before Step 3.4:** decide whether
+   projections and subset statistics need a separate stored claim type or are
+   summary-only in the current finding model. Recommended for Phase 3: keep
+   them in the summary/audit but do not populate observed demographic metrics;
+   revisit typed projection claims in Phase 4.
+4. **Manual approval semantics — required before Step 3.5:** decide whether
+   analysis continues to save immediately, with rejection implemented as a
+   subsequent deletion, or whether analysis produces a durable draft that is
+   stored only after explicit approval. Recommended: use a durable draft and
+   explicit approval so `approve` and `reject` describe the real behavior.
+5. **LangGraph boundary — required before Step 3.5:** decide whether the
+   supported FastAPI manual-analysis pipeline should execute LangGraph or use
+   ordinary service functions. The current FastAPI path calls the extraction
+   and comparison functions directly; only Gradio executes the compiled graph.
+   Recommended: keep the direct service pipeline unless LangGraph will provide
+   a concrete required capability such as branching, resumable checkpoints, or
+   human-in-the-loop continuation. Reassess dependency removal in Step 3.10.
+6. **Gradio retirement gate — required before Step 3.9:** agree the parity/UAT,
+   rollback, and data-integrity checks that permit the old entry point to be
+   switched off. After the gate passes, Gradio is removed rather than retained
+   as a second supported application.
 
 ### Step 3.1 — Build the admin application shell
 
@@ -791,22 +868,93 @@ with Gradio retained only as a fallback/reference until cutover.
 
 ### Step 3.3 — Complete backend durability and frontend contracts
 
+**Decisions required:** Phase 3 decisions 1 and 2 must be recorded before this
+step is considered complete.
+
 - Maintain durable manual and discovery jobs, progress, attempts, recovery,
   locking, and safe retry behavior; a startup timeout must never permit
   overlapping discovery work.
+- Give every active worker an explicit owner and renewable lease/heartbeat.
+  Recover a `running` job and release its discovery lock only after that owner
+  is demonstrably stale; starting or reloading FastAPI must not interrupt a
+  valid CLI worker or another application process using the same database.
+- Make stop operations idempotent and status-preserving. Stopping an active
+  run may move it to `stopping`/`interrupted`; stopping a completed, failed, or
+  already interrupted run must report its existing terminal status rather than
+  claiming that it was newly interrupted.
 - Finalize typed, versioned public responses, structured run/candidate detail,
   correct missing-resource errors, and redaction of raw storage/internal audit
   fields from browser list responses.
+- Replace remaining arbitrary `dict` response bodies with explicit response
+  models, including administration, analysis, research, settings, run-detail,
+  candidate-detail, and country-hunt routes. Return consistent `404` responses
+  for missing findings, jobs, runs, candidates, providers, and rules.
 - Add server-side ISO3 country-gap preview and bounded batch selection. Keep
   labels as display data and show scope-mismatch exclusions explicitly.
 - Expand fixtures and integration tests for jobs, progress, candidate detail,
   mutations, validation failures, retries, and recovery without live-provider
-  or local-credential dependencies.
+  or local-credential dependencies. These tests must exercise the complete
+  HTTP -> service -> temporary database path rather than only mocking the
+  service called by each route.
+- Remove or clearly disable the Phase 2 placeholder export command, which must
+  not label research-run history as findings. Keep the validated public-release
+  exporter as Phase 7 work unless an earlier internal export contract is
+  deliberately specified and tested.
 
 **Complete when:** the Phase 3 UI can rely solely on stable, durable API
 contracts and fixtures.
 
-### Step 3.4 — Rebuild manual webpage analysis
+### Step 3.4 — Tighten extraction scope and validation
+
+**Decision required:** Phase 3 decision 3 fixes what the current finding model
+may store before prompt, schema, and validation changes are implemented.
+
+Treat extraction quality as an ongoing evaluated contract, not a one-off prompt
+edit. Tighten the extraction prompt and add deterministic post-extraction guards
+so unsupported values cannot be stored merely because the model placed a number
+in a metric field.
+
+- Store only observed national demographic measurements in the current finding
+  model. Do not populate a metric from a forecast, projection, scenario,
+  conditional estimate, or statement about a future year. Such figures may be
+  retained in the prose summary with an explicit `projection` label, but they
+  are not current observed findings. For example, a conditional forecast that
+  Germany's population could shrink must not create an observed population
+  datapoint.
+- A population value must describe the total national resident population.
+  Reject subsets and administrative categories, including people with a
+  migration background, refugees, asylum seekers, visa holders, foreign-born
+  residents, age groups, religious groups, and residents from a named origin.
+  For example, a count of people with a migration background is not Germany's
+  total national population.
+- Reject currency amounts, budgets, costs, spending, percentages, percentage
+  changes, and differences from the demographic metric value fields. For
+  example, 24.8 billion euros of migration-related spending and its 3.2 billion
+  euro decline must create no population or migration-count datapoint.
+- Require each non-null metric to carry a short evidence excerpt, metric type,
+  unit, observation/projection status, national-scope status, and measured
+  period. Validate the numeric value against that evidence before storage.
+- Add deterministic unit and context checks after model extraction: currency
+  markers invalidate demographic counts; percent/rate language cannot populate
+  absolute counts; future/scenario language invalidates observed metrics; and
+  subset language invalidates total-population metrics. Ambiguous cases become
+  `needs_review` rather than being stored automatically.
+- Maintain a version set of positive and negative extraction examples and run
+  it whenever the prompt, model, schema, or post-processing changes. Include the
+  three Germany examples above as permanent negative regression cases, together
+  with valid national population, births, deaths, fertility, natural-change,
+  and net-migration examples.
+- Record extraction-rule and prompt versions with each run/candidate so later
+  prompt changes can be evaluated against earlier outcomes.
+
+**Complete when:** the negative regression set cannot populate demographic
+metrics, valid national observations still extract correctly, and ambiguous
+claims are reviewable without being silently stored.
+
+### Step 3.5 — Rebuild manual webpage analysis
+
+**Decisions required:** Phase 3 decisions 4 and 5 determine the workflow state
+model and orchestration boundary before this screen is implemented.
 
 - Accept and validate a URL. If the current free-form Gradio prompt is kept,
   extract exactly one HTTP(S) URL deterministically at the browser boundary;
@@ -817,7 +965,7 @@ contracts and fixtures.
 
 **Complete when:** the current Add Webpage workflow is fully available without Gradio.
 
-### Step 3.5 — Rebuild research and country-hunt controls
+### Step 3.6 — Rebuild research and country-hunt controls
 
 - Preserve editable news categories, search depth, search window, candidate limits, and domain limits.
 - Provide direct country search which always bypasses automatic recency/eligibility rules.
@@ -832,7 +980,7 @@ contracts and fixtures.
 
 **Complete when:** the current research controls and the new country scheduling state are operable locally.
 
-### Step 3.6 — Rebuild findings and administration
+### Step 3.7 — Rebuild findings and administration
 
 - Provide country and metric filters.
 - Display the existing findings, source classifications, comparisons, and
@@ -848,7 +996,7 @@ contracts and fixtures.
 **Complete when:** every current finding and its administration controls work
 through the new UI without Gradio.
 
-### Step 3.7 — Rebuild the graphs and reporting
+### Step 3.8 — Rebuild the graphs and reporting
 
 Graph markers:
 
@@ -870,25 +1018,61 @@ Graph behaviour:
 **Complete when:** the new graphs reproduce current values and provenance
 without relying on Gradio.
 
-### Step 3.8 — Cut over and retire Gradio
+### Step 3.9 — Cut over and retire Gradio
 
-- Run the FastAPI/Jinja admin alongside the unchanged Gradio reference during
-  the Phase 3 rebuild; Gradio is a fallback and parity reference, not an API
-  implementation target.
+**Decision required:** Phase 3 decision 6 defines the cutover gate. Do not
+remove the fallback until it passes, and do not retain Gradio after it passes.
+
+- Keep Gradio available only as a temporary fallback and parity reference while
+  Phase 3 is under construction; it is not an API implementation target and
+  must not be used for concurrent discovery work alongside the new application.
 - Use the Phase 2 fixtures and parity checks to verify each migrated workflow.
 - Make the Jinja admin the default local application only after the full
   current workflow is available.
-- Remove Gradio dependencies, entry points, and UI-specific adapters after a
-  rollback-capable cutover check.
+- After a rollback-capable cutover check, stop the Gradio entry point and remove
+  its dependencies, callbacks, process-local worker state, and UI-specific
+  adapters. From that point onward, all operational workflows use the FastAPI
+  services, durable workers, and Jinja/browser interface.
 
 **Complete when:** the local admin application runs entirely through the
-FastAPI/Jinja interface and Gradio has been retired.
+FastAPI/Jinja interface, the old `main.py` Gradio entry point no longer runs,
+and Gradio has been removed from the supported runtime.
 
-## Phase 3.8 - Simplification
+### Step 3.10 — Simplify the post-Gradio codebase
 
-What can we do to opsimise the code?
+**Decision checkpoint:** confirm the Step 3.5 LangGraph decision against the
+implemented workflow and remove the dependency if no supported path uses it.
 
-Do we still need the agentic framework
+- Remove duplicated Gradio-era adapters and orchestration paths after parity is
+  proven and the rollback window has closed.
+- Review whether LangGraph still provides useful state/checkpoint behavior for
+  the remaining manual-analysis workflow. If the durable service pipeline is
+  clearer without it, replace the small fixed graph with ordinary service
+  functions while preserving the evaluated extraction and comparison behavior.
+- Replace the manual-analysis model tool loop with deterministic URL parsing and
+  retrieval: select PDF/HTML handling in code, try Requests first, and use
+  Playwright only when the direct request cannot provide usable content. The
+  model receives the retrieved bounded text; it does not decide how to fetch it.
+- Remove the unused model-bound SQL tools. Keep ISO3/year selection and WPP
+  queries deterministic, and use the comparison model only to interpret the
+  already retrieved research and WPP values.
+- Rename `BossAgent` to a non-agentic name such as `DiscoveryCoordinator` or
+  `ResearchPipeline`, unless it has acquired genuine dynamic planning behavior.
+  Preserve its explicit budgets, stop checks, provider routing, fallback order,
+  and audit trail as ordinary application control flow.
+- Restrict model responsibilities to the tasks that benefit from semantic
+  judgment: summary relevance, full-text relevance, structured evidence
+  extraction, and comparison explanation. URL parsing, fetching, provider
+  fallback, duplicate detection, country resolution, SQL selection, validation,
+  storage, retries, limits, and job transitions remain deterministic code.
+- Consolidate country-hunt settings, prompts, job status definitions, and
+  response serialization so there is one implementation of each rule.
+- Run the full regression and extraction-evaluation suites after simplification.
+
+**Complete when:** the supported application has one frontend path, one durable
+job path, one implementation of each business rule, no unused Gradio/LangGraph/
+SQL-tool bindings, and no model-controlled loop where deterministic application
+control flow is sufficient.
 
 
 ## Phase 4 — Add the claims and conflict framework
