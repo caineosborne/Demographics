@@ -18,6 +18,34 @@ shows the current fetch method while the analysis runs.
 
 Run the regression checks with `uv run python -m unittest discover -s tests`.
 
+## FastAPI boundary
+
+Start the Phase 2 API locally with:
+
+```sh
+uv run uvicorn api:app --reload
+```
+
+The initial boundary exposes `GET /health`. Runtime settings can be adjusted
+with `DEMOGRAPHICS_APP_NAME`, `DEMOGRAPHICS_API_VERSION`, and
+`DEMOGRAPHICS_ENVIRONMENT`.
+
+Durable worker commands create job state in the writable application database
+before processing. Run them directly or hand an existing job ID to a worker:
+
+```sh
+uv run python worker.py manual-analysis https://example.test/release --country-iso3 JPN
+uv run python worker.py news-search settings.json
+uv run python worker.py country-search JPN
+uv run python worker.py maintenance
+uv run python worker.py export export.json
+uv run python worker.py run JOB_ID
+```
+
+The versioned JSON API includes the read, research, analysis, administration,
+and `GET /api/v1/worker/jobs/{job_id}` contracts. Representative frontend
+fixtures are under `fixtures/api/`; country-specific routes require ISO3.
+
 ## Database storage and Phase 1.1 rollback
 
 The writable research SQLite database is stored under `databases/`; WPP

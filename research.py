@@ -36,6 +36,10 @@ class SearchCategory(BaseModel):
     include_domains: list[str] = Field(default_factory=list, max_length=300)
     exclude_domains: list[str] = Field(default_factory=list, max_length=150)
     enabled: bool = True
+    # Optional machine identity for country-scoped API hunts. The human label
+    # remains in ``name``/``query`` for provider readability, but ISO3 is the
+    # durable country key.
+    country_iso3: str | None = None
 
 
 CRITERIA = '''Find factual national demographic statistics: population, births,
@@ -432,8 +436,12 @@ def review_summaries(candidates: list[tuple[int, dict]], criteria: str) -> list[
 
 def extract_useful_info(candidate, page_text, provenance):
     from agents import research_agent
-    return research_agent({'messages': [HumanMessage(content='Extract demographic facts from ' + candidate['url'])],
-                           'page_text': page_text, 'article_url': candidate['url'], 'provenance': provenance})
+    state = {'messages': [HumanMessage(content='Extract demographic facts from ' + candidate['url'])],
+             'page_text': page_text, 'article_url': candidate['url'], 'provenance': provenance}
+    if provenance.get('country_iso3'):
+        state['country_context_iso3'] = provenance['country_iso3']
+        state['country_context_label'] = tools.normalise_country_name(provenance['country_iso3']) or ''
+    return research_agent(state)
 
 
 def compare_finding(state):
@@ -496,6 +504,9 @@ class BossAgent:
                     rows = self.providers[provider](arguments)
                     check_stopped()
                     for row in rows:
+                        scoped_iso3 = getattr(arguments, 'country_iso3', None)
+                        if scoped_iso3:
+                            row = {**row, 'country_iso3': str(scoped_iso3).upper()}
                         candidate_id = store.add_candidate(run_id, row)
                         candidates.append((candidate_id, row))
                     store.log_event(run_id, {'provider': provider, 'category': category, 'count': len(rows),
@@ -835,6 +846,7 @@ class BossAgent:
                             'submission_type': 'automatic', 'discovery_source': candidate['source'],
                             'search_run_id': run_id, 'search_candidate_id': candidate_id,
                             'published_date': analysis_candidate.get('published_date'),
+                            'country_iso3': candidate.get('country_iso3'),
                         })
                         check_stopped()
                         storage = state.get('storage') or {}
@@ -849,15 +861,15 @@ class BossAgent:
                             record_outcome('excluded_no_data')
                             yield run_id, f'Excluded after extraction — no demographic data points: {retrieval_url}'
                             continue
-                        if storage.get('status') == 'excluded_subnational':
+                        if storage.get('status') in {'excluded_subnational', 'excluded_country_mismatch'}:
                             store.update_candidate(
-                                candidate_id, status='excluded_subnational', storage=storage,
+                                candidate_id, status=storage.get('status'), storage=storage,
                                 extraction=state['result'].model_dump(mode='json'),
                                 extraction_seconds=round(perf_counter() - started, 2),
                                 full_reason=storage.get('reason') or 'Geography is not a unique UN country.',
                             )
-                            record_outcome('excluded_subnational')
-                            yield run_id, f'Excluded subnational/unmatched geography: {retrieval_url}'
+                            record_outcome(storage.get('status'))
+                            yield run_id, f'Excluded country geography: {retrieval_url}'
                             continue
                         if storage.get('status') == 'excluded_source_rule':
                             store.update_candidate(

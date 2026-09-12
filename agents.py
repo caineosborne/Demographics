@@ -132,7 +132,8 @@ class RelevantResult(BaseModel):
     url: str
     source: str
     site_seen: str
-    geography: str
+    geography: Optional[str] = None
+    geography_iso3: Optional[str] = None
     effective_date: Optional[str] = None
     official_source: bool = False
     quoted_source: Optional[str] = None
@@ -198,6 +199,8 @@ class State(TypedDict):
     page_text: str
     article_url: str
     provenance: dict
+    country_context_iso3: str
+    country_context_label: str
 
 
 llm = ChatOpenAI(
@@ -523,7 +526,14 @@ def research_agent(state: State):
                             "canonical_url": canonical_requested_url,
                         },
                     }
-    conversation = [SystemMessage(content=temporal_context() + """
+    country_context = ''
+    if state.get('country_context_iso3') and state.get('country_context_label'):
+        country_context = (
+            f"\nRequested country context (identity is ISO3): {state['country_context_iso3']} "
+            f"({state['country_context_label']}). Use this only as context; the article's "
+            "extracted geography must still be validated independently.\n"
+        )
+    conversation = [SystemMessage(content=temporal_context() + country_context + """
         Retrieve and analyze the user's supplied URL using only the web tools.
         Use get_pdf_text for a URL that points to a PDF; get_page_text can also
         detect a PDF response automatically. Do not use outside web sources.
@@ -564,6 +574,13 @@ def research_agent(state: State):
         SystemMessage(content=temporal_context() + """
         Return a RelevantResult with a concise 2–4 sentence summary and only
         facts supported by the retrieved page. Use null for missing values.
+        Allocate geography_iso3 as the three-letter ISO 3166-1 alpha-3 code
+        for the country that owns the extracted national statistic. This is
+        the authoritative country identity for the result; geography is only
+        the human-readable WPP label. Do not invent an ISO3 code for a city,
+        state, territory, region, or ambiguous geography. If no single
+        country owns the statistic, set both geography and geography_iso3 to
+        null/empty and leave country-specific statistics unfilled.
         Set geography to the country described by the extracted demographic
         figures. If an article discusses a city, state, or local policy but
         reports national figures, use the country (for example, Japan), not
@@ -620,13 +637,39 @@ def research_agent(state: State):
     # Persist the URL actually fetched, rather than a URL inferred by the model.
     if fetched_urls:
         result.url = fetched_urls[-1]
-    canonical_country = normalise_country_name(result.geography)
+    # The model must provide the code, but resolve it against the local WPP
+    # reference before allowing it into comparison or storage. This also
+    # turns the model's display label into the canonical WPP label.
+    # Keep the boundary defensive when a caller supplies a test/dummy model
+    # response: geography fields are model data, not trusted strings.
+    model_iso3_value = result.geography_iso3
+    model_geography_value = result.geography
+    model_iso3 = (model_iso3_value.strip().upper()
+                  if isinstance(model_iso3_value, str) else '')
+    model_geography = model_geography_value if isinstance(model_geography_value, str) else ''
+    canonical_country = normalise_country_name(model_iso3 or model_geography)
+    resolved_iso3 = resolve_country_iso3(model_iso3 or model_geography)
+    result.geography_iso3 = resolved_iso3.upper() if resolved_iso3 else None
+    if resolved_iso3:
+        canonical_country = normalise_country_name(result.geography_iso3) or canonical_country
     if canonical_country:
         result.geography = canonical_country
+    expected_iso3 = str((provenance or {}).get('country_iso3') or '').strip().upper()
+    if expected_iso3 and result.geography_iso3 != expected_iso3:
+        reason = (
+            f"Extracted geography ISO3 {result.geography_iso3 or 'none'} does not match "
+            f"the requested country ISO3 {expected_iso3}."
+        )
+        report_activity(f"[Research agent] excluded country-hunt geography mismatch: {reason}")
+        return {
+            "messages": new_messages,
+            "result": result,
+            "storage": {"status": "excluded_country_mismatch", "reason": reason},
+        }
     annualize_flow_statistics(result)
     mark_partial_periods(result)
     finding = result.model_dump(mode="json")
-    if provenance.get("submission_type") == "automatic" and not resolve_country_iso3(result.geography):
+    if provenance.get("submission_type") == "automatic" and (not model_iso3 or not result.geography_iso3):
         reason = f"No unique UN ISO3 match for geography '{result.geography}'."
         report_activity(f"[Research agent] excluded subnational/unmatched geography: {reason}")
         return {
@@ -672,7 +715,13 @@ def compare_to_un(state: State):
             "un_data": [],
         }
     research_json = state["result"].model_dump_json()
-    country_iso3 = resolve_country_iso3(state["result"].geography)
+    # Extraction has already validated the model-assigned ISO3. Keep the
+    # comparison path code-based; the WPP label is display metadata only.
+    geography_iso3 = state["result"].geography_iso3
+    geography = state["result"].geography
+    country_iso3 = geography_iso3.strip().upper() if isinstance(geography_iso3, str) else ''
+    if not country_iso3:
+        country_iso3 = resolve_country_iso3(geography)
     effective_date = state["result"].effective_date
     effective_day = _effective_day(effective_date)
     reported_year = effective_day.year if effective_day else None

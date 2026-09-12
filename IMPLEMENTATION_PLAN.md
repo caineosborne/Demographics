@@ -11,13 +11,14 @@
   - [x] **Step 1.5 — Reduce the candidate audit**
   - [x] **Step 1.6 — Prepare the full and filtered WPP databases**
 - [ ] **Phase 2 — Replace the backend behind the retained Gradio client**
-  - [ ] **Step 2.1 — Establish the FastAPI application boundary**
-  - [ ] **Step 2.2 — Extract read-only query and graph services**
-  - [ ] **Step 2.3 — Extract finding administration services**
-  - [ ] **Step 2.4 — Extract manual webpage analysis**
-  - [ ] **Step 2.5 — Extract research and country-hunt services**
-  - [ ] **Step 2.6 — Add durable worker commands and job state**
-  - [ ] **Step 2.7 — Add versioned JSON endpoints and fixtures**
+  - [x] **Step 2.1 — Establish the FastAPI application boundary**
+  - [x] **Step 2.2 — Extract read-only query and graph services**
+  - [x] **Step 2.3 — Extract finding administration services**
+  - [x] **Step 2.4 — Extract manual webpage analysis**
+  - [x] **Step 2.5 — Extract research and country-hunt services**
+  - [x] **Step 2.5a — Audit and complete ISO3-only country identity**
+  - [x] **Step 2.6 — Add durable worker commands and job state**
+  - [x] **Step 2.7 — Add versioned JSON endpoints and fixtures**
   - [ ] **Step 2.8 — Route Gradio through services and prove parity**
 - [ ] **Phase 3 — Build the admin interface and retire Gradio**
   - [ ] **Step 3.1 — Build the admin application shell**
@@ -593,6 +594,22 @@ current finding model and business rules stable while replacing its backend.
 
 ## Phase 2 — Replace the backend behind the retained Gradio client
 
+### Phase 2 country-identity rule
+
+From Step 2.2 onward, ISO3 is the sole country identifier used by service
+calls, database lookups, job state, API paths and query parameters, graph
+series, and finding/research records. A country name is display text or
+untrusted input only: resolve it at the boundary to one canonical ISO3 code
+before it enters a workflow. Services may carry the canonical WPP label beside
+the ISO3 code for prompts and display, but must not use that label as an
+identity or query key.
+
+Every LLM call that concerns a country must receive the resolved ISO3 code and
+canonical WPP label in its structured context. If an LLM returns a geography,
+the service must resolve that text to exactly one ISO3 code before comparison,
+storage, or any downstream call; ambiguous, subnational, and unresolvable
+geographies are not allowed onto a country-specific path.
+
 ### Step 2.1 — Establish the FastAPI application boundary
 
 Add the FastAPI application, configuration, health check, dependency wiring,
@@ -606,18 +623,28 @@ the existing Gradio application remains unchanged.
 ### Step 2.2 — Extract read-only query and graph services
 
 Move country lookup, WPP queries, stored-finding reads, and graph-data assembly
-into framework-independent Python services. Add read-only endpoints for country
-choices, findings, graph series, run history, and candidate history.
+into framework-independent Python services. Resolve any supplied country name
+to ISO3 at the service boundary, then use ISO3 for every WPP, finding, and graph
+lookup. Add read-only endpoints for country choices, findings, graph series,
+run history, and candidate history; country choices may include display labels,
+but country-specific requests use ISO3.
 
 **Complete when:** service and endpoint tests return the same values as the
 current graphs and selectors, with no Gradio imports in the service code.
+
+**Implementation note:** `read_services.py` now owns plain-data country,
+finding, WPP graph-series, run-history, and candidate-history reads. The
+versioned API endpoints expose those structures while Gradio remains the
+unchanged renderer; Plotly/Gradio rendering stays in place until Step 2.8.
 
 ### Step 2.3 — Extract finding administration services
 
 Move finding edits, metric deletion, record deletion, source suppression,
 unblock, source rules, provider settings, and existing audit actions behind
 services. Add validated mutation endpoints while retaining the current SQLite
-finding schema and Phase 1 rules.
+finding schema and Phase 1 rules. Resolve and retain ISO3 for every new or
+edited national finding, and use ISO3—not a stored country label—for all
+country-scoped administration operations.
 
 **Complete when:** every existing administration action has service and API
 coverage and preserves the current behaviour.
@@ -626,7 +653,10 @@ coverage and preserves the current behaviour.
 
 Move the manual URL analysis workflow, fetching progress, extraction, optional
 manual-only comparison, and storage decision into a service. Expose it through
-a single asynchronous API operation and a status/result endpoint.
+a single asynchronous API operation and a status/result endpoint. Resolve the
+requested country context and any extracted LLM geography to ISO3 before UN
+comparison or storage; include the ISO3 and canonical WPP label in every
+country-specific LLM prompt/context.
 
 **Complete when:** a representative manual URL can be analysed through Python
 and FastAPI with the same stored result as the current Gradio flow.
@@ -636,10 +666,50 @@ and FastAPI with the same stored result as the current Gradio flow.
 Move news discovery, country hunts, stop handling, bounded processing,
 duplicate checks, domain limits, fallback-provider eligibility, and access
 recovery into services. Preserve the rule that automatic and bulk routes do
-not invoke the comparison agent.
+not invoke the comparison agent. Start country hunts from ISO3, retain ISO3 in
+candidate and run state, and use a canonical WPP label only to construct
+human-readable search text. Any LLM extraction or review in these paths must
+resolve its geography to the same ISO3 before it can continue.
 
 **Complete when:** research and country-hunt regression cases run through the
 service layer with unchanged outcomes.
+
+### Step 2.5a — Audit and complete ISO3-only country identity
+
+Mop up every Phase 2 path before worker and public-API work proceeds. Backfill
+or map legacy finding, candidate, run, and WPP-release-overlay rows to ISO3;
+the historical WPP release build must populate ISO3 even where the source
+release supplies only a country label or numeric location code. Replace all
+remaining name-based country joins, filters, and fallback queries with ISO3
+lookups. Keep names only in explicit input-to-ISO3 mapping, prompt/display
+metadata, and the canonical country-reference table.
+
+Add regression coverage for aliases, legacy stored labels, historic WPP
+releases, manual analysis, and country hunts. The tests must prove that each
+path resolves one ISO3 before a country-specific LLM call, query, comparison,
+or write, and that no country-specific service query depends on a free-form
+country name.
+
+**Complete when:** an implementation audit and regression suite demonstrate
+ISO3-only identity across every extracted Phase 2 service, with no name-based
+country fallback remaining.
+
+**API audit completed:** all country-scoped API inputs now use ISO3: finding
+filters use `?iso3=`, graph routes use `/graph-series/{iso3}`, manual analysis
+accepts `country_iso3`, and direct/bulk country hunts accept only ISO3 lists.
+Canonical WPP labels are returned as display metadata or used to construct
+human-readable hunt queries; they are not used as query keys. Manual and
+country-hunt extraction paths resolve the model geography to ISO3 before
+comparison or storage, and scoped hunts reject a result whose ISO3 does not
+match the requested country. Candidate extraction history now exposes
+`extracted_iso3`, and country-hunt run settings retain `country_iso3`.
+
+Legacy finding rows are backfilled on API reads through the existing country
+reference, while historical WPP release imports backfill ISO3 from canonical
+country labels or numeric location codes before building the serving overlay.
+The API audit does not include the retained Gradio adapters; those remain
+label-oriented until Step 2.8. Durable job storage and cross-process worker
+coordination remain Step 2.6 work, not an ISO3 identity gap.
 
 ### Step 2.6 — Add durable worker commands and job state
 
@@ -649,6 +719,8 @@ service layer with unchanged outcomes.
 - Make jobs idempotent within the current finding model.
 - Add a database lock preventing overlapping discovery runs.
 - Mark interrupted jobs clearly and allow a safe retry.
+- Store country scope and country-specific progress using ISO3; preserve a
+  canonical label only as job-display metadata.
 
 **Complete when:** stopping the API does not corrupt job state and rerunning a
 failed command is safe.
@@ -658,6 +730,9 @@ failed command is safe.
 - Use typed, versioned response models for every extracted service.
 - Include stable IDs and ISO3 codes, with internal audit fields excluded from
   externally consumable response models.
+- Make ISO3 the required country identifier for country-specific endpoints;
+  labels are returned only for display and may be accepted only by an explicit
+  boundary mapping route where needed.
 - Save representative JSON fixtures for the Phase 3 frontend.
 - Add endpoint validation and error tests.
 
@@ -669,7 +744,8 @@ database access.
 Make Gradio a thin temporary client of the Phase 2 services. Run existing and
 new regression cases through both routes, including manual analysis, automatic
 search, country hunt, editing, deletion, blocking, rerun behaviour, and graph
-values.
+values. Convert every Gradio country selection to ISO3 before calling a
+service, retaining the label solely for presentation.
 
 **Complete when:** FastAPI and the retained Gradio client produce the same
 current outcomes, making the browser-client replacement in Phase 3 low risk.
@@ -747,6 +823,13 @@ without relying on Gradio.
 
 **Complete when:** the local admin application runs entirely through the
 FastAPI/Jinja interface and Gradio has been retired.
+
+## Phase 3.6 - Simplification
+
+What can we do to opsimise the code?
+
+Do we still need the agentic framework
+
 
 ## Phase 4 — Add the claims and conflict framework
 

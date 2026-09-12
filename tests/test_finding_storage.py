@@ -179,6 +179,19 @@ class FindingStorageTests(unittest.TestCase):
             stored = tools.store_webpage_finding({**self.finding, "url": "https://example.test/iso", "geography": "JPN"})
         self.assertEqual(tools.get_webpage_finding(stored["id"])["geography"], "Japan")
 
+    def test_model_iso3_is_retained_as_country_identity(self):
+        with patch.object(tools, "resolve_country_iso3", return_value="JPN"), \
+             patch.object(tools, "normalise_country_name", return_value="Japan"):
+            stored = tools.store_webpage_finding({
+                **self.finding,
+                "url": "https://example.test/explicit-iso3",
+                "geography": "Japan",
+                "geography_iso3": "jpn",
+            })
+        finding = tools.get_webpage_finding(stored["id"])
+        self.assertEqual(finding["geography_iso3"], "JPN")
+        self.assertEqual(finding["geography"], "Japan")
+
     def test_unattributed_source_is_stored_at_rank_three(self):
         finding = {**self.finding, "quoted_source": None, "quoted_source_url": None}
         stored = tools.store_webpage_finding(finding)

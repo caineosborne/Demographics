@@ -8,6 +8,7 @@ import re
 import unicodedata
 from datetime import datetime, timezone, timedelta
 from functools import lru_cache
+from contextvars import ContextVar
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -22,6 +23,17 @@ from database_config import configured_database_path, configured_wpp_database_pa
 
 DB_PATH = configured_database_path()
 WPP_DB_PATH = configured_wpp_database_path()
+_COUNTRY_MIGRATION_IN_PROGRESS = False
+_progress_callback: ContextVar[Any] = ContextVar("progress_callback", default=None)
+
+
+def set_progress_callback(callback):
+    """Install a thread-local progress sink for callers such as API jobs."""
+    return _progress_callback.set(callback)
+
+
+def reset_progress_callback(token) -> None:
+    _progress_callback.reset(token)
 
 
 def initialise_wpp_vintages_table() -> None:
@@ -86,6 +98,9 @@ class PageAccessError(RuntimeError):
 def report_activity(message: str) -> None:
     """Write an activity message to the console and active streamed UI run."""
     print(message, flush=True)
+    callback = _progress_callback.get()
+    if callback:
+        callback({"type": "log", "message": message})
     try:
         writer = get_stream_writer()
     except (RuntimeError, KeyError):
@@ -97,6 +112,9 @@ def report_fetch_status(status: str) -> None:
     """Send web-fetch progress to the console and active streamed UI run."""
     message = f"[Web] {status}"
     print(message, flush=True)
+    callback = _progress_callback.get()
+    if callback:
+        callback({"type": "fetch_status", "status": status, "message": message})
     try:
         writer = get_stream_writer()
     except (RuntimeError, KeyError):
@@ -534,6 +552,21 @@ def list_automatic_rechecks() -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def list_finding_actions(finding_id: int | None = None) -> list[dict[str, Any]]:
+    """Return the durable finding administration audit trail."""
+    initialise_findings_table()
+    sql = "SELECT * FROM finding_actions"
+    params: tuple[Any, ...] = ()
+    if finding_id is not None:
+        sql += " WHERE finding_id = ?"
+        params = (int(finding_id),)
+    sql += " ORDER BY acted_at DESC, id DESC"
+    with get_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(sql, params).fetchall()
+    return [dict(row) for row in rows]
+
+
 def consume_automatic_recheck(canonical_url: str, run_id: str, candidate_id: int) -> None:
     """Mark the one historical-load override as used by an automatic candidate."""
     canonical_url = canonicalise_source_url(canonical_url)
@@ -579,6 +612,54 @@ def list_blocked_sources() -> list[dict[str, Any]]:
                FROM blocked_sources ORDER BY blocked_at DESC, canonical_url"""
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def list_source_rules() -> list[dict[str, Any]]:
+    """Return configured source rules for administration clients."""
+    initialise_findings_table()
+    with get_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM source_rules ORDER BY match_type, match_value"
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_fallback_providers() -> list[dict[str, Any]]:
+    """Return configured fallback providers for administration clients."""
+    initialise_findings_table()
+    with get_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM fallback_providers ORDER BY domain"
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def update_fallback_provider(domain: str, *, enabled: bool, max_age_days: int,
+                             only_when_country_blank_days: int,
+                             allow_undated_seed: bool, note: str | None = None) -> None:
+    """Validate and update one configured fallback provider."""
+    normalized = str(domain or '').strip().lower().removeprefix('www.')
+    if not normalized or '/' in normalized:
+        raise ValueError('A fallback provider must contain a normalized hostname only.')
+    if max_age_days < 0 or only_when_country_blank_days < 0:
+        raise ValueError('Provider age limits must be non-negative.')
+    initialise_findings_table()
+    with get_connection() as conn:
+        exists = conn.execute(
+            'SELECT 1 FROM fallback_providers WHERE domain = ?', (normalized,)
+        ).fetchone()
+        if exists is None:
+            raise ValueError(f'No fallback provider is configured for {normalized}.')
+        conn.execute(
+            """UPDATE fallback_providers
+               SET enabled = ?, max_age_days = ?, only_when_country_blank_days = ?,
+                   allow_undated_seed = ?, note = ?
+               WHERE domain = ?""",
+            (int(enabled), max_age_days, only_when_country_blank_days,
+             int(allow_undated_seed), note, normalized),
+        )
 
 
 def delete_and_block_webpage_finding(finding_id: int) -> str:
@@ -761,7 +842,7 @@ def _parse_publication_date(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _has_recent_article_datapoint(conn: sqlite3.Connection, country: str, days: int) -> bool:
+def _has_recent_article_datapoint(conn: sqlite3.Connection, country_iso3: str, days: int) -> bool:
     """Whether a country has an article finding acquired in the supplied window.
 
     WPP is queried from its own reference tables, not stored as a webpage
@@ -780,7 +861,7 @@ def _has_recent_article_datapoint(conn: sqlite3.Connection, country: str, days: 
             prior = json.loads(payload)
         except (TypeError, json.JSONDecodeError):
             continue
-        if prior.get('geography') != country:
+        if prior.get('geography_iso3') != country_iso3:
             continue
         if any(isinstance(metric, dict) and metric.get('value') is not None
                for metric in (prior.get('statistics') or {}).values()):
@@ -795,10 +876,13 @@ def _fallback_exclusion(finding: dict[str, Any], provenance: dict[str, Any], con
     provider = fallback_provider_for_url(finding['url'])
     if provider is None:
         return None
-    country = finding.get('geography') or ''
-    if _has_recent_article_datapoint(conn, country, int(provider['only_when_country_blank_days'])):
+    country_iso3 = finding.get('geography_iso3') or ''
+    country_label = finding.get('geography') or country_iso3
+    if country_iso3 and _has_recent_article_datapoint(
+        conn, country_iso3, int(provider['only_when_country_blank_days'])
+    ):
         return {
-            'reason': (f"{country} already has an article-derived datapoint acquired in the preceding "
+            'reason': (f"{country_label} already has an article-derived datapoint acquired in the preceding "
                        f"{provider['only_when_country_blank_days']} days."),
         }
     published = _parse_publication_date(provenance.get('published_date'))
@@ -832,9 +916,21 @@ def store_webpage_finding(finding: dict[str, Any], provenance: dict | None = Non
     """Store an extracted finding unless its canonical URL already exists."""
     provenance = provenance or {"submission_type": "manual", "discovery_source": "manual"}
     initialise_findings_table()
-    canonical_country = normalise_country_name(finding.get("geography") or "")
+    model_iso3 = str(finding.get("geography_iso3") or "").strip().upper()
+    geography = finding.get("geography") or ""
+    try:
+        resolved_iso3 = resolve_country_iso3(model_iso3 or geography)
+    except sqlite3.OperationalError:
+        # Small isolated storage databases used by legacy callers may not
+        # contain the WPP reference. Preserve their existing label behaviour.
+        resolved_iso3 = None
+    canonical_country = normalise_country_name(model_iso3 or geography)
+    if resolved_iso3:
+        canonical_country = normalise_country_name(resolved_iso3) or canonical_country
     if canonical_country:
         finding = {**finding, "geography": canonical_country}
+    if resolved_iso3:
+        finding = {**finding, "geography_iso3": resolved_iso3.upper()}
     source_url = finding["url"]
     population = (finding.get("statistics") or {}).get("population") or {}
     effective_date = finding.get("effective_date")
@@ -906,6 +1002,7 @@ def store_webpage_finding(finding: dict[str, Any], provenance: dict | None = Non
 
 def list_webpage_findings() -> list[dict[str, Any]]:
     """Return stored findings with the newest numeric ID first for review."""
+    normalise_stored_finding_geographies()
     initialise_findings_table()
     with get_connection() as conn:
         conn.row_factory = sqlite3.Row
@@ -928,6 +1025,7 @@ def list_webpage_findings() -> list[dict[str, Any]]:
             "Search run ID": stored["search_run_id"],
             "Search candidate ID": stored["search_candidate_id"],
             "Country": finding.get("geography") or "",
+            "ISO3": finding.get("geography_iso3") or "",
             "Effective date": stored["effective_date"] or "",
             "Population": stored["population_value"],
             "TFR": ((finding.get("statistics") or {}).get("total_fertility_rate") or {}).get("value"),
@@ -946,6 +1044,7 @@ def list_webpage_findings() -> list[dict[str, Any]]:
 
 def get_webpage_finding(finding_id: int) -> dict[str, Any]:
     """Return one stored finding for the database editor."""
+    normalise_stored_finding_geographies()
     initialise_findings_table()
     with get_connection() as conn:
         row = conn.execute(
@@ -958,6 +1057,7 @@ def get_webpage_finding(finding_id: int) -> dict[str, Any]:
 
 def find_webpage_finding_by_url(url: str) -> dict[str, Any] | None:
     """Return the active finding for a canonical URL, if one exists."""
+    normalise_stored_finding_geographies()
     canonical_url = canonicalise_source_url(url)
     initialise_findings_table()
     with get_connection() as conn:
@@ -980,9 +1080,19 @@ def find_webpage_finding_by_url(url: str) -> dict[str, Any] | None:
 def _finding_storage_fields(finding: dict[str, Any]) -> tuple:
     if not isinstance(finding, dict) or not finding.get("url"):
         raise ValueError("The finding JSON must be an object with a non-empty url.")
-    canonical_country = normalise_country_name(finding.get("geography") or "")
+    model_iso3 = str(finding.get("geography_iso3") or "").strip().upper()
+    geography = finding.get("geography") or ""
+    try:
+        resolved_iso3 = resolve_country_iso3(model_iso3 or geography)
+    except sqlite3.OperationalError:
+        resolved_iso3 = None
+    canonical_country = normalise_country_name(model_iso3 or geography)
+    if resolved_iso3:
+        canonical_country = normalise_country_name(resolved_iso3) or canonical_country
     if canonical_country:
         finding["geography"] = canonical_country
+    if resolved_iso3:
+        finding["geography_iso3"] = resolved_iso3.upper()
     population = ((finding.get("statistics") or {}).get("population") or {})
     return (
         finding["url"],
@@ -1087,21 +1197,39 @@ def delete_finding_metric(finding_id: int, metric: str) -> None:
 
 
 def normalise_stored_finding_geographies() -> int:
-    """Migrate stored country labels from ISO3 codes to canonical names."""
+    """Backfill ISO3 identity and canonical display labels on stored findings."""
+    global _COUNTRY_MIGRATION_IN_PROGRESS
+    if _COUNTRY_MIGRATION_IN_PROGRESS:
+        return 0
+    _COUNTRY_MIGRATION_IN_PROGRESS = True
     initialise_findings_table()
     updates = 0
-    with get_connection() as conn:
-        rows = conn.execute("SELECT id, finding_json FROM webpage_findings").fetchall()
-        for finding_id, payload in rows:
-            finding = json.loads(payload)
-            canonical_country = normalise_country_name(finding.get("geography") or "")
-            if canonical_country and canonical_country != finding.get("geography"):
-                finding["geography"] = canonical_country
-                conn.execute(
-                    "UPDATE webpage_findings SET finding_json = ? WHERE id = ?",
-                    (json.dumps(finding, sort_keys=True), finding_id),
-                )
-                updates += 1
+    try:
+        with get_connection() as conn:
+            rows = conn.execute("SELECT id, finding_json FROM webpage_findings").fetchall()
+            for finding_id, payload in rows:
+                finding = json.loads(payload)
+                source = finding.get("geography_iso3") or finding.get("geography") or ""
+                try:
+                    resolved_iso3 = resolve_country_iso3(source)
+                except sqlite3.OperationalError:
+                    resolved_iso3 = None
+                canonical_country = normalise_country_name(resolved_iso3 or source)
+                changed = False
+                if canonical_country and canonical_country != finding.get("geography"):
+                    finding["geography"] = canonical_country
+                    changed = True
+                if resolved_iso3 and resolved_iso3.upper() != finding.get("geography_iso3"):
+                    finding["geography_iso3"] = resolved_iso3.upper()
+                    changed = True
+                if changed:
+                    conn.execute(
+                        "UPDATE webpage_findings SET finding_json = ? WHERE id = ?",
+                        (json.dumps(finding, sort_keys=True), finding_id),
+                    )
+                    updates += 1
+    finally:
+        _COUNTRY_MIGRATION_IN_PROGRESS = False
     return updates
 
 

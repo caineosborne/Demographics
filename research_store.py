@@ -37,7 +37,81 @@ def initialise():
                 updated_at TEXT NOT NULL, details_json TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_search_candidates_run ON search_candidates(run_id);
+            CREATE TABLE IF NOT EXISTS worker_jobs (
+                id TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}', result_json TEXT,
+                progress_json TEXT NOT NULL DEFAULT '{}', error TEXT,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS worker_locks (
+                name TEXT PRIMARY KEY, job_id TEXT NOT NULL, acquired_at TEXT NOT NULL
+            );
         ''')
+
+
+def create_job(kind, payload=None, job_id=None):
+    initialise()
+    job_id = job_id or str(uuid4())
+    timestamp = now()
+    with tools.get_connection() as conn:
+        conn.execute(
+            '''INSERT INTO worker_jobs
+               (id, kind, status, payload_json, created_at, updated_at)
+               VALUES (?, ?, 'queued', ?, ?, ?)''',
+            (job_id, kind, json.dumps(payload or {}), timestamp, timestamp),
+        )
+    return get_job(job_id)
+
+
+def get_job(job_id):
+    initialise()
+    with tools.get_connection() as conn:
+        row = conn.execute('SELECT * FROM worker_jobs WHERE id = ?', (str(job_id),)).fetchone()
+    if not row:
+        return None
+    result = dict(row)
+    for field in ('payload_json', 'result_json', 'progress_json'):
+        value = result.pop(field)
+        result[field.removesuffix('_json')] = json.loads(value) if value else None
+    return result
+
+
+def update_job(job_id, *, status=None, result=None, progress=None, error=None, increment_attempts=False):
+    initialise()
+    updates = ['updated_at = ?']
+    values = [now()]
+    if status is not None:
+        updates.append('status = ?'); values.append(status)
+    if result is not None:
+        updates.append('result_json = ?'); values.append(json.dumps(result, default=str))
+    if progress is not None:
+        updates.append('progress_json = ?'); values.append(json.dumps(progress, default=str))
+    if error is not None:
+        updates.append('error = ?'); values.append(str(error))
+    if increment_attempts:
+        updates.append('attempts = attempts + 1')
+    values.append(str(job_id))
+    with tools.get_connection() as conn:
+        conn.execute(f"UPDATE worker_jobs SET {', '.join(updates)} WHERE id = ?", values)
+    return get_job(job_id)
+
+
+def acquire_worker_lock(name, job_id):
+    initialise()
+    try:
+        with tools.get_connection() as conn:
+            conn.execute('INSERT INTO worker_locks(name, job_id, acquired_at) VALUES (?, ?, ?)',
+                         (name, str(job_id), now()))
+    except tools.sqlite3.IntegrityError as exc:
+        raise RuntimeError(f'Worker lock is already held: {name}.') from exc
+
+
+def release_worker_lock(name, job_id):
+    initialise()
+    with tools.get_connection() as conn:
+        conn.execute('DELETE FROM worker_locks WHERE name = ? AND job_id = ?',
+                     (name, str(job_id)))
 
 
 def save_settings(settings):
@@ -153,7 +227,12 @@ def list_candidates(run_id=None):
         }
         if isinstance(extraction, dict):
             result['extracted_country'] = extraction.get('geography') or ''
+            result['extracted_iso3'] = extraction.get('geography_iso3') or ''
             result['extracted_summary'] = extraction.get('summary') or ''
+        else:
+            result['extracted_country'] = ''
+            result['extracted_iso3'] = ''
+            result['extracted_summary'] = ''
         displayed.append(result)
     return displayed
 
