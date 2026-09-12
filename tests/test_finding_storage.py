@@ -132,6 +132,7 @@ class FindingStorageTests(unittest.TestCase):
             (stored["id"],),
         )
         self.assertEqual(action[0]["action"], "removed_allow_rerun")
+        self.assertEqual(tools.list_automatic_rechecks()[0]['state'], 'requested')
 
     def test_unblocking_restores_url_eligibility(self):
         stored = tools.store_webpage_finding(self.finding)
@@ -210,6 +211,12 @@ class FindingStorageTests(unittest.TestCase):
         tools.initialise_findings_table()
         record = next(row for row in tools.list_webpage_findings() if row['ID'] == stored['id'])
         self.assertEqual(record['Source classification'], 'secondary_attributed')
+
+    def test_new_source_rule_does_not_reclassify_an_existing_finding(self):
+        stored = tools.store_webpage_finding(self.finding)
+        tools.add_source_rule('domain', 'example.test', 'classify', 'official_publisher', note='Verified later')
+        existing = tools.get_webpage_finding(stored['id'])
+        self.assertEqual(existing['source_classification'], 'secondary_attributed')
 
     def test_fallback_provider_is_seeded_and_can_fill_a_country_gap(self):
         finding = {**self.finding, 'url': 'https://www.statista.com/statistics/japan', 'geography': 'Japan'}

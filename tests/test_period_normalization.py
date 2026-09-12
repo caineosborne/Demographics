@@ -1,6 +1,7 @@
 import unittest
 
-from agents import RelevantResult, annualize_flow_statistics, mark_partial_periods
+from agents import (RelevantResult, annualize_flow_statistics, has_useful_numeric_datapoint,
+                    mark_partial_periods)
 
 
 class FlowPeriodNormalisationTests(unittest.TestCase):
@@ -100,3 +101,37 @@ class FlowPeriodNormalisationTests(unittest.TestCase):
         self.assertEqual(result.statistics.births.value, 36_600)
         self.assertEqual(result.statistics.births.conversion_factor, 366)
         self.assertEqual(result.statistics.births.period_start, '2024-01-01')
+
+    def test_documented_partial_date_range_is_prorated_to_its_calendar_year(self):
+        result = RelevantResult.model_validate({
+            'title': 'Example', 'url': 'https://example.test', 'source': 'Example',
+            'site_seen': '2026-09-11', 'geography': 'Argentina',
+            'effective_date': '2026-06-30',
+            'statistics': {
+                'births': {
+                    'value': 1_000, 'time_period': 'January to June 2026',
+                    'period_start': '2026-01-01', 'period_end': '2026-06-30',
+                },
+            },
+        })
+
+        annualize_flow_statistics(result)
+        mark_partial_periods(result)
+
+        births = result.statistics.births
+        self.assertAlmostEqual(births.value, 1_000 * 365 / 181)
+        self.assertEqual(births.source_value, 1_000)
+        self.assertEqual(births.time_period, 'annual')
+        self.assertTrue(births.comparison_eligible)
+
+    def test_non_comparable_numeric_metric_remains_useful_evidence(self):
+        result = RelevantResult.model_validate({
+            'title': 'Example', 'url': 'https://example.test', 'source': 'Example',
+            'site_seen': '2026-09-11', 'geography': 'Argentina',
+            'statistics': {'net_overseas_migration': {'value': 25, 'time_period': 'partial period'}},
+        })
+        mark_partial_periods(result)
+        finding = result.model_dump(mode='json')
+
+        self.assertFalse(result.statistics.net_overseas_migration.comparison_eligible)
+        self.assertTrue(has_useful_numeric_datapoint(finding))

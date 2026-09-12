@@ -183,7 +183,7 @@ def discovery_issue(candidate: dict) -> str | None:
     parsed = urlsplit(candidate.get('url') or '')
     domain = (parsed.hostname or '').casefold().removeprefix('www.')
     title_and_path = f"{candidate.get('title') or ''} {parsed.path}".casefold()
-    if domain in LOW_VALUE_DOMAINS:
+    if domain in LOW_VALUE_DOMAINS or any(domain.endswith(f'.{low_value}') for low_value in LOW_VALUE_DOMAINS):
         return f'Excluded low-value discovery domain: {domain}.'
     if any(term in title_and_path for term in LOW_VALUE_TERMS):
         return 'Excluded explainer or methodology page rather than a release.'
@@ -306,6 +306,10 @@ def tavily_alternative_sources(candidate: dict, limit: int = 3) -> list[dict]:
             'canonical_url': canonical,
             'title': str(row.get('title') or ''),
             'snippet': str(row.get('content') or ''),
+            # This belongs to the recovered page, not to the inaccessible
+            # discovery result.  It is needed for fallback-source recency
+            # checks and for the provenance saved with an extracted finding.
+            'published_date': row.get('published_date'),
         })
         if len(alternatives) >= limit:
             break
@@ -515,6 +519,7 @@ class BossAgent:
                     historical_candidates.setdefault(canonical_url(prior_url), prior_candidate_id)
                 except ValueError:
                     pass
+            automatic_rechecks = tools.pending_automatic_rechecks()
             seen = {}
             domains_seen = {}
             processed = 0
@@ -541,7 +546,9 @@ class BossAgent:
                         record_outcome('excluded_source_rule')
                         yield run_id, f'EXCLUDED BY SOURCE RULE — {candidate.get("title") or url}'
                         continue
-                    if url in seen or url in historical_candidates or url in known:
+                    historical_loaded = url in historical_candidates
+                    recheck = automatic_rechecks.get(url)
+                    if url in seen or (historical_loaded and not recheck) or url in known:
                         duplicate_candidate_id = seen.get(url)
                         finding_id = known.get(url)
                         prior_candidate_id = historical_candidates.get(url)
@@ -565,6 +572,13 @@ class BossAgent:
                         record_outcome('duplicate')
                         yield run_id, f'DUPLICATE — {candidate.get("title") or url} — matches {duplicate_of}'
                         continue
+                    if historical_loaded and recheck:
+                        tools.consume_automatic_recheck(url, run_id, candidate_id)
+                        store.update_candidate(
+                            candidate_id, automatic_recheck='consumed',
+                            automatic_recheck_requested_at=recheck['requested_at'],
+                            canonical_url=url,
+                        )
                     # Reserve the URL as soon as it is seen so every later
                     # variant is excluded before discovery review, fetching,
                     # extraction, or comparison.
@@ -712,6 +726,44 @@ class BossAgent:
                                 for alternative in alternatives:
                                     alternative_url = alternative['url']
                                     try:
+                                        alternative_canonical_url = canonical_url(alternative_url)
+                                    except ValueError:
+                                        attempts.append({
+                                            **alternative, 'status': 'excluded_invalid_url',
+                                            'reason': 'Alternative source URL could not be canonicalized.',
+                                        })
+                                        continue
+                                    if alternative_canonical_url in blocked:
+                                        attempts.append({
+                                            **alternative, 'status': 'excluded_blocked_source',
+                                            'reason': 'Blocked by reviewer; alternative source will not be fetched.',
+                                        })
+                                        continue
+                                    alternative_source_rule = tools.source_rule_for_url(alternative_canonical_url)
+                                    if alternative_source_rule and alternative_source_rule['action'] == 'exclude':
+                                        attempts.append({
+                                            **alternative, 'status': 'excluded_source_rule',
+                                            'reason': alternative_source_rule.get('note') or 'Excluded by configured source rule.',
+                                        })
+                                        continue
+                                    if (alternative_canonical_url in seen
+                                            or alternative_canonical_url in historical_candidates
+                                            or alternative_canonical_url in known):
+                                        attempts.append({
+                                            **alternative, 'status': 'duplicate',
+                                            'reason': 'Alternative source has already been loaded or recorded as a finding.',
+                                        })
+                                        continue
+                                    alternative_issue = discovery_issue({
+                                        **candidate, **alternative, 'url': alternative_url,
+                                    })
+                                    if alternative_issue:
+                                        attempts.append({
+                                            **alternative, 'status': 'excluded_discovery',
+                                            'reason': alternative_issue,
+                                        })
+                                        continue
+                                    try:
                                         page = self.skills.fetch_article(alternative_url)
                                     except tools.PageAccessError as alternative_error:
                                         attempts.append({
@@ -725,7 +777,13 @@ class BossAgent:
                                         'url': alternative_url,
                                         'title': alternative.get('title') or candidate.get('title'),
                                         'snippet': alternative.get('snippet') or candidate.get('snippet'),
+                                        'published_date': alternative.get('published_date'),
                                     }
+                                    # A successfully recovered page is now a
+                                    # loaded URL in this run and must not be
+                                    # fetched again if it appears as a later
+                                    # discovery candidate.
+                                    seen[alternative_canonical_url] = candidate_id
                                     content_transport = 'alternative_source'
                                     break
                                 store.update_candidate(
@@ -740,7 +798,7 @@ class BossAgent:
                         fetch_seconds = round(perf_counter() - started, 2)
                         model_page = compact_article_text(page)
                         store.update_candidate(
-                            candidate_id, status='reviewing_full_text', full_text=page,
+                            candidate_id, status='reviewing_full_text', full_text=page, page_loaded=True,
                             loaded_url=retrieval_url,
                             fetch_seconds=fetch_seconds, model_text_characters=len(model_page),
                             original_text_characters=len(page),
@@ -748,6 +806,12 @@ class BossAgent:
                             tavily_extract_seconds=tavily_seconds if content_transport == 'tavily_extract' else None,
                             tavily_extract_error=tavily_failures.get(url),
                         )
+                        # A successful direct/Tavily reload restores normal
+                        # historical duplicate handling. If recovery loaded a
+                        # different page, the original remains eligible: it
+                        # still has not itself loaded successfully.
+                        if canonical_url(retrieval_url) == url and url in automatic_rechecks:
+                            tools.complete_automatic_recheck(url, candidate_id)
                         started = perf_counter()
                         decision = self.skills.review_full_article(analysis_candidate, settings.review_criteria, model_page)
                         check_stopped()
@@ -766,7 +830,7 @@ class BossAgent:
                         state = self.skills.extract_useful_info(analysis_candidate, model_page, {
                             'submission_type': 'automatic', 'discovery_source': candidate['source'],
                             'search_run_id': run_id, 'search_candidate_id': candidate_id,
-                            'published_date': candidate.get('published_date'),
+                            'published_date': analysis_candidate.get('published_date'),
                         })
                         check_stopped()
                         storage = state.get('storage') or {}

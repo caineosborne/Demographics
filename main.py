@@ -318,7 +318,8 @@ def remove_database_record(finding_id: int, revision: int):
         delete_webpage_finding(finding_id)
     except ValueError as exc:
         return load_database_table(), load_database_country_summary(), revision, gr.skip(), gr.skip(), f"Could not delete: {exc}", gr.skip()
-    return load_database_table(), load_database_country_summary(), revision + 1, "", "", "Record deleted.", ""
+    return (load_database_table(), load_database_country_summary(), revision + 1, "", "",
+            "Record removed. It can be manually resubmitted and will receive one automatic recheck if it is found again.", "")
 
 
 def remove_database_record_and_block(finding_id: int, revision: int):
@@ -554,7 +555,7 @@ if __name__ == "__main__":
                     article_picker = gr.Dropdown(label="Article", choices=[], allow_custom_value=False, scale=2)
                     graph_targets = gr.CheckboxGroup(label="Delete from graphs", choices=GRAPH_CHOICES, value=[key for _label, key in GRAPH_CHOICES], scale=3)
                     hide_article = gr.Button("Hide for selected graphs (this view)")
-                    delete_everywhere = gr.Button("Delete everywhere")
+                    delete_everywhere = gr.Button("Remove and allow rerun")
                     delete_and_block_everywhere = gr.Button("Delete and block source", variant="stop")
                 with gr.Row():
                     metric_to_delete = gr.Dropdown(
@@ -613,7 +614,7 @@ if __name__ == "__main__":
                     save_record = gr.Button("Save changes", variant="primary")
                     metric_to_delete_record = gr.Dropdown(label="Metric", choices=GRAPH_CHOICES, scale=2)
                     delete_metric_record = gr.Button("Delete selected metric")
-                    delete_record = gr.Button("Delete selected record")
+                    delete_record = gr.Button("Remove and allow rerun")
                     delete_and_block_record = gr.Button("Delete and block source", variant="stop")
                 database_status = gr.Markdown()
                 gr.Markdown("### Blocked sources")

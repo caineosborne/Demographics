@@ -311,6 +311,44 @@ def _annual_period_days(statistic: Statistic, effective_date: str | None) -> tup
     return None
 
 
+def _dated_partial_period_factor(statistic: Statistic) -> tuple[int, float] | None:
+    """Return a reporting year and annualisation factor for an explicit date range."""
+    if not statistic.period_start or not statistic.period_end:
+        return None
+    try:
+        start = date.fromisoformat(statistic.period_start)
+        end = date.fromisoformat(statistic.period_end)
+    except ValueError:
+        return None
+    if end < start or start.year != end.year:
+        return None
+    duration_days = (end - start).days + 1
+    days_in_year = (date(start.year, 12, 31) - date(start.year, 1, 1)).days + 1
+    if duration_days >= days_in_year:
+        return None
+    return start.year, days_in_year / duration_days
+
+
+def _explicit_duration_factor(statistic: Statistic, effective_date: str | None) -> tuple[int, float] | None:
+    """Annualise a documented multi-month/quarter period without guessing."""
+    dated = _dated_partial_period_factor(statistic)
+    if dated:
+        return dated
+    period = (statistic.time_period or '').casefold()
+    match = re.search(r'\b(\d+(?:\.\d+)?)\s*months?\b', period)
+    unit = 'months'
+    if not match:
+        match = re.search(r'\b(\d+(?:\.\d+)?)\s*quarters?\b', period)
+        unit = 'quarters'
+    if not match:
+        return None
+    amount = float(match.group(1))
+    effective_day = _effective_day(effective_date)
+    if amount <= 0 or not effective_day:
+        return None
+    return effective_day.year, (12 / amount if unit == 'months' else 4 / amount)
+
+
 def annualize_flow_statistics(result: RelevantResult) -> None:
     """Convert explicitly daily/monthly/quarterly source flows to annual totals.
 
@@ -326,7 +364,13 @@ def annualize_flow_statistics(result: RelevantResult) -> None:
             continue
         cadence = _flow_cadence(statistic.time_period)
         if cadence not in {'daily', 'monthly', 'quarterly'}:
-            continue
+            explicit_duration = _explicit_duration_factor(statistic, result.effective_date)
+            if not explicit_duration:
+                continue
+            year, factor = explicit_duration
+            source_cadence = statistic.time_period or 'documented partial period'
+        else:
+            source_cadence = cadence
 
         if cadence == 'daily':
             annual_period = _annual_period_days(statistic, result.effective_date)
@@ -336,7 +380,7 @@ def annualize_flow_statistics(result: RelevantResult) -> None:
                 statistic.comparison_reason = 'Daily source figure has no reporting year to annualize.'
                 continue
             year, factor = annual_period
-        else:
+        elif cadence in {'monthly', 'quarterly'}:
             effective_day = _effective_day(result.effective_date)
             if not effective_day:
                 statistic.comparison_eligible = False
@@ -347,7 +391,7 @@ def annualize_flow_statistics(result: RelevantResult) -> None:
 
         source_value = statistic.value
         statistic.source_value = source_value
-        statistic.source_time_period = cadence
+        statistic.source_time_period = source_cadence
         statistic.conversion_factor = float(factor)
         statistic.value = source_value * factor
         statistic.time_period = 'annual'
@@ -356,7 +400,7 @@ def annualize_flow_statistics(result: RelevantResult) -> None:
         statistic.comparison_eligible = True
         statistic.comparison_reason = None
         statistic.normalization_note = (
-            f'Annualized from the article’s {cadence} figure of {source_value:g} '
+            f'Annualized from the article’s {source_cadence} figure of {source_value:g} '
             f'using a factor of {factor:g}.'
         )
 
@@ -375,7 +419,7 @@ def is_full_year_statistic(statistic: Statistic) -> bool:
 
 
 def mark_partial_periods(result: RelevantResult) -> None:
-    """Keep partial flows, but prevent annual UN comparison and charting."""
+    """Keep partial flows as evidence, but prevent annual UN comparison."""
     if not isinstance(result, RelevantResult):
         return
     for comparison_field, statistic_field in FLOW_STATISTICS.items():
@@ -385,6 +429,14 @@ def mark_partial_periods(result: RelevantResult) -> None:
             statistic.comparison_reason = (
                 'Partial or unclear reporting period; retained as source evidence but not comparable to annual UN figures.'
             )
+
+
+def has_useful_numeric_datapoint(finding: dict) -> bool:
+    """Whether extraction contains evidence worth storing, comparable or not."""
+    return any(
+        isinstance(metric, dict) and metric.get("value") is not None
+        for metric in (finding.get("statistics") or {}).values()
+    )
 
 
 def apply_period_compatibility_filter(comparison: ComparisonResult, result: RelevantResult) -> ComparisonResult:
@@ -546,8 +598,10 @@ def research_agent(state: State):
         also contains 2026 annual population projections. Do not annualize or
         otherwise change the numeric value yourself: preserve the published
         figure and cadence; deterministic post-processing will annualize only
-        eligible flow counts. Population, total fertility rate, and every other
-        non-flow statistic must remain exactly as reported.
+        eligible flow counts. For a documented partial date range, also set
+        period_start and period_end as ISO dates; this permits a transparent
+        deterministic annualisation. Population, total fertility rate, and
+        every other non-flow statistic must remain exactly as reported.
         """),
         *conversation[1:],
         # Gemini rejects generation requests ending with an assistant turn.
@@ -570,24 +624,18 @@ def research_agent(state: State):
             "result": result,
             "storage": {"status": "excluded_subnational", "reason": reason},
         }
-    # Keep the findings database focused on figures that can actually be
-    # reviewed against the UN series. A value explicitly marked ineligible
-    # (for example, an unclear or partial migration period) remains visible in
-    # the audit log but is not persisted as a comparable finding.
-    has_usable_data_point = any(
-        isinstance(metric, dict)
-        and metric.get("value") is not None
-        and metric.get("comparison_eligible", True) is not False
-        for metric in (finding.get("statistics") or {}).values()
-    )
-    if not has_usable_data_point:
+    # A numeric national demographic claim is useful evidence even when it is
+    # not comparable with the annual WPP reference (for example, an unclear
+    # partial migration period). Its stored comparison caveat makes that
+    # distinction visible without discarding the source document.
+    if not has_useful_numeric_datapoint(finding):
         report_activity("[Research agent] excluded: no extractable demographic data points")
         return {
             "messages": new_messages,
             "result": result,
             "storage": {
                 "status": "excluded_no_data",
-                "reason": "No usable comparable demographic data points; finding was not saved.",
+                "reason": "No useful numeric demographic data points; finding was not saved.",
             },
         }
     storage = store_webpage_finding(finding, provenance=state.get("provenance"))

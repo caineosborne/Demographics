@@ -375,6 +375,19 @@ def initialise_findings_table() -> None:
                 note TEXT
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS automatic_rechecks (
+                canonical_url TEXT PRIMARY KEY,
+                state TEXT NOT NULL CHECK(state IN ('requested', 'consumed', 'loaded', 'cancelled')),
+                requested_at TEXT NOT NULL,
+                requested_finding_id INTEGER,
+                consumed_at TEXT,
+                consumed_run_id TEXT,
+                consumed_candidate_id INTEGER,
+                completed_at TEXT,
+                completed_candidate_id INTEGER
+            )
+        """)
         _backfill_canonical_urls(conn)
         _archive_legacy_url_collisions(conn)
         conn.execute("""
@@ -449,6 +462,76 @@ def _record_finding_action(
     )
 
 
+def _request_automatic_recheck(
+    conn: sqlite3.Connection, canonical_url: str, finding_id: int | None,
+) -> None:
+    """Record one explicit override of historical-loaded URL suppression."""
+    requested_at = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """INSERT INTO automatic_rechecks
+               (canonical_url, state, requested_at, requested_finding_id)
+           VALUES (?, 'requested', ?, ?)
+           ON CONFLICT(canonical_url) DO UPDATE SET
+               state = 'requested', requested_at = excluded.requested_at,
+               requested_finding_id = excluded.requested_finding_id,
+               consumed_at = NULL, consumed_run_id = NULL,
+               consumed_candidate_id = NULL, completed_at = NULL,
+               completed_candidate_id = NULL""",
+        (canonical_url, requested_at, finding_id),
+    )
+
+
+def pending_automatic_rechecks() -> dict[str, dict[str, Any]]:
+    """Return URL rechecks that still override an old successful page load."""
+    initialise_findings_table()
+    with get_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT * FROM automatic_rechecks
+               WHERE state IN ('requested', 'consumed')"""
+        ).fetchall()
+    return {row['canonical_url']: dict(row) for row in rows}
+
+
+def list_automatic_rechecks() -> list[dict[str, Any]]:
+    """Return the compact audit trail for reviewer visibility."""
+    initialise_findings_table()
+    with get_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM automatic_rechecks ORDER BY requested_at DESC, canonical_url"
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def consume_automatic_recheck(canonical_url: str, run_id: str, candidate_id: int) -> None:
+    """Mark the one historical-load override as used by an automatic candidate."""
+    canonical_url = canonicalise_source_url(canonical_url)
+    initialise_findings_table()
+    with get_connection() as conn:
+        conn.execute(
+            """UPDATE automatic_rechecks
+               SET state = 'consumed', consumed_at = COALESCE(consumed_at, ?),
+                   consumed_run_id = COALESCE(consumed_run_id, ?),
+                   consumed_candidate_id = COALESCE(consumed_candidate_id, ?)
+               WHERE canonical_url = ? AND state = 'requested'""",
+            (datetime.now(timezone.utc).isoformat(), run_id, candidate_id, canonical_url),
+        )
+
+
+def complete_automatic_recheck(canonical_url: str, candidate_id: int) -> None:
+    """Close an override once that URL itself has successfully loaded again."""
+    canonical_url = canonicalise_source_url(canonical_url)
+    initialise_findings_table()
+    with get_connection() as conn:
+        conn.execute(
+            """UPDATE automatic_rechecks
+               SET state = 'loaded', completed_at = ?, completed_candidate_id = ?
+               WHERE canonical_url = ? AND state IN ('requested', 'consumed')""",
+            (datetime.now(timezone.utc).isoformat(), candidate_id, canonical_url),
+        )
+
+
 def blocked_source_urls() -> set[str]:
     """Return canonical URLs intentionally excluded by the reviewer."""
     initialise_findings_table()
@@ -482,6 +565,11 @@ def delete_and_block_webpage_finding(finding_id: int) -> str:
             "INSERT OR REPLACE INTO blocked_sources (canonical_url, original_url, blocked_at) VALUES (?, ?, ?)",
             (canonical_url, row[0], datetime.now(timezone.utc).isoformat()),
         )
+        conn.execute(
+            """UPDATE automatic_rechecks SET state = 'cancelled'
+               WHERE canonical_url = ? AND state IN ('requested', 'consumed')""",
+            (canonical_url,),
+        )
         conn.execute("DELETE FROM webpage_findings WHERE id = ?", (finding_id,))
         _record_finding_action(conn, finding_id, canonical_url, "removed_and_suppressed")
     return canonical_url
@@ -493,6 +581,7 @@ def unblock_source_url(url: str) -> str:
     initialise_findings_table()
     with get_connection() as conn:
         conn.execute("DELETE FROM blocked_sources WHERE canonical_url = ?", (canonical_url,))
+        _request_automatic_recheck(conn, canonical_url, None)
         _record_finding_action(conn, None, canonical_url, "unblocked")
     return canonical_url
 
@@ -912,6 +1001,7 @@ def delete_webpage_finding(finding_id: int) -> None:
             raise ValueError(f"No stored finding exists with ID {finding_id}.")
         canonical_url = row[1] or canonicalise_source_url(row[0])
         conn.execute("DELETE FROM webpage_findings WHERE id = ?", (finding_id,))
+        _request_automatic_recheck(conn, canonical_url, finding_id)
         _record_finding_action(conn, finding_id, canonical_url, "removed_allow_rerun")
 
 

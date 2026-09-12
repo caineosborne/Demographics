@@ -123,7 +123,7 @@ class ResearchTests(unittest.TestCase):
         prior_run = store.start_run(self.settings)
         prior_id = store.add_candidate(prior_run, candidate())
         store.update_candidate(
-            prior_id, status='irrelevant_full_text', full_text='Previously loaded page',
+            prior_id, status='irrelevant_full_text', page_loaded=True,
             loaded_url='https://example.test/article', summary_reason='Previously reviewed as not relevant',
         )
         store.finish_run(prior_run, 'completed')
@@ -137,6 +137,21 @@ class ResearchTests(unittest.TestCase):
         self.fetch.assert_not_called()
         self.compare.assert_not_called()
 
+    def test_legacy_full_text_marker_remains_a_historical_duplicate(self):
+        prior_run = store.start_run(self.settings)
+        prior_id = store.add_candidate(prior_run, candidate())
+        store.update_candidate(
+            prior_id, status='irrelevant_full_text', full_text='Previously loaded page',
+            loaded_url='https://example.test/article',
+        )
+        store.finish_run(prior_run, 'completed')
+
+        row = self.run_boss([candidate()])[0]
+
+        self.assertEqual(row['status'], 'duplicate')
+        self.assertEqual(row['duplicate_candidate_id'], prior_id)
+        self.fetch.assert_not_called()
+
     def test_historical_unloaded_candidate_is_retried(self):
         prior_run = store.start_run(self.settings)
         prior_id = store.add_candidate(prior_run, candidate())
@@ -147,6 +162,54 @@ class ResearchTests(unittest.TestCase):
 
         self.assertEqual(rows[0]['status'], 'complete')
         self.fetch.assert_called_once()
+
+    def test_remove_and_allow_rerun_bypasses_one_historical_loaded_duplicate(self):
+        prior_run = store.start_run(self.settings)
+        prior_id = store.add_candidate(prior_run, candidate())
+        store.update_candidate(
+            prior_id, status='irrelevant_full_text', page_loaded=True,
+            loaded_url='https://example.test/article',
+        )
+        store.finish_run(prior_run, 'completed')
+        stored = tools.store_webpage_finding({
+            'url': 'https://example.test/article', 'geography': 'Japan',
+            'statistics': {'population': {'value': 100}},
+        })
+        tools.delete_webpage_finding(stored['id'])
+
+        row = self.run_boss([candidate()])[0]
+
+        self.assertEqual(row['status'], 'complete')
+        self.fetch.assert_called_once_with('https://example.test/article')
+        recheck = tools.list_automatic_rechecks()[0]
+        self.assertEqual(recheck['state'], 'loaded')
+        self.assertEqual(recheck['consumed_candidate_id'], row['id'])
+
+        self.fetch.reset_mock()
+        later = self.run_boss([candidate()])[0]
+        self.assertEqual(later['status'], 'duplicate')
+        self.fetch.assert_not_called()
+
+    def test_a_failed_recheck_remains_eligible_until_the_url_loads(self):
+        prior_run = store.start_run(self.settings)
+        prior_id = store.add_candidate(prior_run, candidate())
+        store.update_candidate(prior_id, status='irrelevant_full_text', page_loaded=True)
+        store.finish_run(prior_run, 'completed')
+        stored = tools.store_webpage_finding({
+            'url': 'https://example.test/article', 'geography': 'Japan',
+            'statistics': {'population': {'value': 100}},
+        })
+        tools.delete_webpage_finding(stored['id'])
+        self.fetch.side_effect = tools.PageAccessError('Still unavailable')
+
+        failed = self.run_boss([candidate()])[0]
+
+        self.assertEqual(failed['status'], 'relevant_access_blocked')
+        self.assertEqual(tools.list_automatic_rechecks()[0]['state'], 'consumed')
+        self.fetch.side_effect = None
+        self.fetch.return_value = 'Now available'
+        later = self.run_boss([candidate()])[0]
+        self.assertEqual(later['status'], 'complete')
 
     def test_canonical_url_unifies_http_and_www_variants(self):
         self.assertEqual(
@@ -228,7 +291,7 @@ class ResearchTests(unittest.TestCase):
         self.fetch.side_effect = [tools.PageAccessError('Timed out'), 'Official release text']
         self.skills.find_alternative_sources = MagicMock(return_value=[{
             'url': alternative, 'canonical_url': alternative,
-            'title': 'Official release', 'snippet': 'Official figures',
+            'title': 'Official release', 'snippet': 'Official figures', 'published_date': '2026-09-01',
         }])
 
         row = self.run_boss([candidate()])[0]
@@ -239,6 +302,47 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(stored['replacement_url'], alternative)
         self.assertEqual(stored['alternative_sources'][0]['status'], 'accessed')
         self.assertEqual(self.extract.call_args.args[0]['url'], alternative)
+        self.assertEqual(self.extract.call_args.args[2]['published_date'], '2026-09-01')
+
+    def test_access_recovery_skips_low_value_alternative_source(self):
+        alternative = 'https://official.example.test/release'
+        self.fetch.side_effect = [tools.PageAccessError('Timed out'), 'Official release text']
+        self.skills.find_alternative_sources = MagicMock(return_value=[
+            {'url': 'https://m.facebook.com/agency/posts/123', 'canonical_url': 'https://facebook.com/agency/posts/123',
+             'title': 'Social post', 'snippet': 'Unverified social post', 'published_date': '2026-09-01'},
+            {'url': alternative, 'canonical_url': alternative, 'title': 'Official release',
+             'snippet': 'Official figures', 'published_date': '2026-09-01'},
+        ])
+
+        row = self.run_boss([candidate()])[0]
+
+        self.assertEqual(row['status'], 'complete')
+        self.assertEqual(self.fetch.call_args_list[0].args[0], 'https://example.test/article')
+        self.assertEqual(self.fetch.call_args_list[1].args[0], alternative)
+        self.assertEqual(self.fetch.call_count, 2)
+        attempts = store.get_candidate(row['id'])['details']['alternative_sources']
+        self.assertEqual(attempts[0]['status'], 'excluded_discovery')
+        self.assertIn('facebook.com', attempts[0]['reason'])
+
+    def test_access_recovery_applies_source_rules_before_fetching(self):
+        blocked_alternative = 'https://excluded.example.test/release'
+        alternative = 'https://official.example.test/release'
+        tools.add_source_rule('domain', 'excluded.example.test', 'exclude', note='Excluded publisher')
+        self.fetch.side_effect = [tools.PageAccessError('Timed out'), 'Official release text']
+        self.skills.find_alternative_sources = MagicMock(return_value=[
+            {'url': blocked_alternative, 'canonical_url': blocked_alternative, 'title': 'Excluded release',
+             'snippet': 'Excluded figures', 'published_date': '2026-09-01'},
+            {'url': alternative, 'canonical_url': alternative, 'title': 'Official release',
+             'snippet': 'Official figures', 'published_date': '2026-09-01'},
+        ])
+
+        row = self.run_boss([candidate()])[0]
+
+        self.assertEqual(row['status'], 'complete')
+        self.assertEqual(self.fetch.call_count, 2)
+        attempts = store.get_candidate(row['id'])['details']['alternative_sources']
+        self.assertEqual(attempts[0]['status'], 'excluded_source_rule')
+        self.assertEqual(attempts[0]['reason'], 'Excluded publisher')
 
     def test_existing_finding_is_not_downloaded_or_relabelled(self):
         tools.store_webpage_finding({'url': 'https://example.test/article', 'statistics': {}})
@@ -356,6 +460,18 @@ class ResearchTests(unittest.TestCase):
         )
         self.assertEqual({category['time_range'] for category in settings['categories']}, {'week'})
         self.assertEqual({category['topic'] for category in settings['categories']}, {'news'})
+
+    def test_administrator_can_explicitly_include_a_fallback_domain(self):
+        import research_ui
+
+        rows = research_ui.settings_rows(self.settings)
+        rows[0][5] = 'ourworldindata.org, statista.com'
+        settings = research_ui.parse_settings(
+            rows, 'news', 'week', False, 30, 20, 2, self.settings['review_criteria'],
+        )
+        self.assertEqual(
+            settings['categories'][0]['include_domains'], ['ourworldindata.org', 'statista.com'],
+        )
 
     def test_country_hunt_uses_a_one_year_country_specific_query(self):
         import research_ui

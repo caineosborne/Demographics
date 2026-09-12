@@ -75,9 +75,13 @@ Therefore, duplicate detection does work for manually submitted links. A
 manual submission of an HTTP/HTTPS URL variant of an existing finding does not
 download or reanalyse the page.
 
-An explicit rerun is only eligible after the finding has been removed, or when
-an administrator uses the explicit internal rerun path. Suppression must be
-removed first; rerun does not override the block list.
+Removing a finding is the **Remove and allow rerun** control. It permits a
+manual resubmission immediately and records an automatic recheck for the
+canonical URL. The next automatic discovery of a URL that was previously
+loaded may pass the historical-loaded check. If that page loads, the ordinary
+duplicate rule resumes; if it does not load, later discovery remains eligible
+under the ordinary failed-load rule. Suppression must be removed first; a
+recheck never overrides the block list.
 
 If a message does not contain an explicit URL, the system cannot perform this
 deterministic pre-check at submission time. In that case the normal model-led
@@ -99,25 +103,49 @@ For each discovered candidate:
 4. A URL already present in the active findings database is marked `duplicate`
    with the existing finding ID and is not sent to summary review, retrieval,
    extraction, Tavily extraction, or comparison.
-5. A URL already present in any earlier search-result batch is marked
-   `duplicate`, even if the earlier candidate was marked irrelevant, excluded,
-   or never saved as a finding. It points to the earlier candidate and is not
-   sent to summary review, retrieval, extraction, Tavily extraction, or
-   comparison.
+5. A URL whose page content successfully loaded in an earlier search-result
+   batch is marked `duplicate`, even if the loaded page was later marked
+   irrelevant or was never saved as a finding. It points to the earlier
+   candidate and is not sent to summary review, retrieval, extraction, Tavily
+   extraction, or comparison, unless an administrator has recorded an active
+   automatic recheck for that canonical URL. A summary-only,
+   excluded-before-load, or failed candidate remains eligible for a later
+   retry.
 6. A URL already seen earlier in the same run is marked `duplicate` and points
    to the earlier candidate. It is not processed twice.
 7. Only a new, eligible URL can proceed to discovery screening, publisher
    limits, budget limits, summary review, retrieval, extraction, and storage.
 
-The URL is reserved as soon as it is seen in the run, and earlier search runs
-are also treated as prior sightings. This means a later URL variant cannot
-become eligible merely because the first candidate was later excluded for
-another reason.
+The URL is reserved as soon as it is seen in the run. Earlier search runs are
+treated as prior sightings only after a page was successfully loaded. This
+means same-run URL variants cannot be processed twice, while a prior failed
+or never-loaded result does not permanently block a legitimate retry.
 
 Bulk research stores eligible extracted findings but does not run the separate
 manual comparison agent. WPP remains the graph reference series.
 
-## 5. Storage-time duplicate rules
+## 5. Fallback providers and explicit search configuration
+
+Statista and Our World in Data are fallback providers, not special search
+providers. The application never creates a Statista/OWID-only news or country
+hunt. A result from either domain is accepted only when it is naturally
+returned by normal discovery (or an administrator explicitly places the domain
+in a search category's Include domains control), has a usable publication date
+within the configured limit, and the country has no article datapoint acquired
+in the preceding configured gap period.
+
+The Include domains control remains an administrator choice. It is not blocked
+for fallback domains. Configuring such a domain does not make it official or
+independent corroboration.
+
+When an inaccessible automatic result is recovered through an alternative
+page, that alternative passes the same blocked-URL, source-rule, duplicate,
+low-value-domain, stale-result, and geography checks before it is fetched. Its
+own publication date—not the inaccessible result's date—governs any fallback
+provider eligibility. Facebook and other excluded sources are therefore never
+retrieved merely because they appear as an alternative.
+
+## 6. Storage-time duplicate rules
 
 The canonical URL check is the primary URL identity rule and is enforced by a
 unique canonical URL index on `webpage_findings`.
@@ -129,18 +157,35 @@ same effective date and population value under the existing rule.
 
 This rule is intentionally unchanged in Phase 1.
 
-## 6. Removal, suppression, and unblocking
+## 7. Removal, suppression, and unblocking
 
 | Action | Result | Future URL eligibility |
 |---|---|---|
-| Delete finding | Removes the active finding and records `removed_allow_rerun` | Eligible again, subject to the normal duplicate rules |
+| Remove and allow rerun | Removes the active finding, records `removed_allow_rerun`, and requests an automatic recheck | Eligible for manual resubmission; a historical-loaded automatic result may retry |
 | Delete and block source | Removes the finding, adds its canonical URL to `blocked_sources`, and records `removed_and_suppressed` | Rejected before retrieval |
-| Unblock source | Removes the canonical URL from `blocked_sources` and records `unblocked` | Eligible again; no finding is recreated automatically |
+| Unblock source | Removes the canonical URL from `blocked_sources`, records `unblocked`, and requests an automatic recheck | Eligible again; no finding is recreated automatically |
 
 The blocked-source list is exact and canonical-URL based. It is not a broad
-domain block list.
+domain block list. The compact `automatic_rechecks` audit records requested,
+consumed, loaded, and cancelled states without altering old candidate history.
+Successful candidate loads are preserved by a small `page_loaded` audit marker;
+legacy audit rows with retained `full_text` remain recognised until the audit
+cleanup removes that content.
 
-## 7. Legacy migration behavior
+## 8. Source classes, period evidence, and legacy records
+
+New findings receive their source class at storage time. Updating a source rule
+only affects subsequent findings; it does not silently rewrite existing or
+legacy records. A deliberate bulk reclassification tool belongs to Phase 2.
+
+Every useful numeric national metric is retained, even when it is not directly
+comparable with annual WPP values. Explicit daily, monthly, quarterly,
+multi-month, or dated count flows are annualised deterministically and retain
+the original value, cadence, factor, and note. Population stocks, fertility
+rates, and unclear-duration partial figures remain as reported and carry a
+not-comparable-to-annual-WPP explanation instead.
+
+## 9. Legacy migration behavior
 
 Before the canonical URL unique index was created, existing findings were
 backfilled. One legacy canonical collision was found in the live database:
@@ -151,7 +196,7 @@ backfilled. One legacy canonical collision was found in the live database:
 
 The dated pre-migration backup remains the full rollback source.
 
-## 8. Audit and review statuses
+## 10. Audit and review statuses
 
 Duplicates remain visible in the research audit. Typical statuses include:
 

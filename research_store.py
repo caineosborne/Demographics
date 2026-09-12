@@ -139,10 +139,15 @@ def list_historical_candidate_urls(exclude_run_id):
     """
     initialise()
     with tools.get_connection() as conn:
+        # ``page_loaded`` is a deliberately small durable marker.  Keeping it
+        # separate from the article body lets the later audit-cleanup job drop
+        # large ``full_text`` values without re-enabling URLs that we already
+        # successfully fetched.  The ``full_text`` branch keeps pre-marker
+        # audit rows working until that cleanup has run.
         rows = conn.execute(
             'SELECT id, url, details_json FROM search_candidates '
-            'WHERE run_id != ? AND details_json LIKE ? ORDER BY id ASC',
-            (exclude_run_id, '%"full_text"%'),
+            'WHERE run_id != ? AND (details_json LIKE ? OR details_json LIKE ?) ORDER BY id ASC',
+            (exclude_run_id, '%"page_loaded"%', '%"full_text"%'),
         ).fetchall()
     loaded = []
     for candidate_id, candidate_url, details_json in rows:
@@ -150,7 +155,7 @@ def list_historical_candidate_urls(exclude_run_id):
             details = json.loads(details_json)
         except (TypeError, json.JSONDecodeError):
             continue
-        if 'full_text' not in details:
+        if details.get('page_loaded') is not True and 'full_text' not in details:
             continue
         loaded_url = details.get('loaded_url') or details.get('replacement_url') or candidate_url
         if loaded_url:

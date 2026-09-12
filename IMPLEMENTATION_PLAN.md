@@ -186,6 +186,10 @@ canonical URL is a duplicate.
 - For automatic discovery, also treat a URL whose page content was successfully
   loaded in an earlier run as a duplicate. A URL that was only discovered,
   summary-reviewed, or failed to load remains eligible for a later retry.
+- An administrator can explicitly request a **recheck** for a previously loaded
+  URL. That URL bypasses the historical-loaded duplicate check once in the next
+  automatic run. If it loads again, it returns to the normal duplicate set; if
+  it does not load, it remains eligible under the ordinary failed-load rule.
 - At manual submission time, show the existing record and do not re-run it
   unless the administrator first chooses the explicit rerun path below.
 
@@ -193,13 +197,15 @@ canonical URL is a duplicate.
 
 | Admin action | Stored finding | Canonical URL next time | Block list |
 |---|---|---|---|
-| Remove and allow rerun | Delete the active finding | Eligible for future discovery/manual analysis | Unchanged/absent |
+| Remove and allow rerun | Delete the active finding and request one automatic recheck | Eligible for manual analysis and one future automatic recheck | Unchanged/absent |
 | Remove and suppress source | Delete the active finding | Rejected before fetch | Insert canonical URL |
 | Unblock source | No finding is recreated | Eligible again | Remove canonical URL |
 
 Create a compact `finding_actions` audit table with the finding ID, canonical
 URL, action, timestamp, and optional note. A normal removal therefore permits a
 future re-run without pretending the original review never occurred.
+Store outstanding automatic rechecks as canonical URLs, with an auditable
+requested/consumed state; do not infer them from a deleted finding row.
 
 #### Required tests
 
@@ -209,6 +215,7 @@ future re-run without pretending the original review never occurred.
 - A duplicate is skipped before retrieval and model work.
 - “Remove and allow rerun” allows a later run; “remove and suppress” does not;
   unblocking restores eligibility.
+- An explicit recheck permits one automatic retry of a previously loaded URL.
 - The existing same-date plus same-population behavior remains unchanged for
   different source URLs.
 
@@ -217,9 +224,11 @@ future re-run without pretending the original review never occurred.
 **Completed 2026-09-12:** canonical URL keys are stored and uniquely indexed;
 the live migration archived one older canonical collision while retaining the
 newer active record. Duplicate candidates are excluded before review, fetch,
-extraction, or comparison. Normal removal permits rerun, suppression blocks a
-canonical URL, and unblocking restores eligibility. The existing
-effective-date plus population duplicate rule remains unchanged.
+extraction, or comparison. Normal removal permits manual rerun and creates an
+auditable automatic recheck; a successful reload closes that override, while a
+failed reload remains eligible. Suppression blocks a canonical URL, and
+unblocking creates the same automatic recheck. The existing effective-date
+plus population duplicate rule remains unchanged.
 
 ### Step 1.3 — Include and rank every source type
 
@@ -382,10 +391,36 @@ naturally in the ordinary news or country-hunt results. In other words, daily
 news search may retain a suitable Statista/OWID result that it independently
 found; the system never performs an “OWID hunt.”
 
+An administrator may nevertheless deliberately enter a fallback domain in a
+manual search category or include-domain control. That is an explicit operator
+choice, not a system-created provider hunt; the same enabled/date/country-gap
+fallback checks still apply to any resulting automatic candidate.
+
 Fallback providers are not official merely because they are configured. For
 example, Statista can be a named-secondary circle when it names IMF; it remains
 an unnamed-secondary cross if it does not. OWID material that reproduces the
 same WPP series is a linked source, not independent corroboration.
+
+#### Data-retention and annualisation policy
+
+Store a useful numeric, national demographic datapoint whether or not it can
+be directly compared with WPP. Exclude an extraction only when it has no useful
+numeric demographic metric, or—on automatic discovery—does not resolve to one
+unique national geography. Relevance screening still rejects clearly
+irrelevant pages before extraction.
+
+When a source gives an explicit time period, retain its original value and
+cadence and calculate a deterministic annualised value for count flows:
+
+- daily count × days in its documented reporting year;
+- monthly count × 12;
+- quarterly count × 4;
+- an explicit multi-month or dated partial period scaled by its documented
+  duration.
+
+Do not prorate population stock figures, rates such as TFR, or a period whose
+duration is unknown. Those claims remain stored as source evidence with their
+period/caveat; they are not presented as directly comparable annual WPP values.
 
 #### Required tests
 
@@ -399,6 +434,10 @@ same WPP series is a linked source, not independent corroboration.
   acquired in the preceding 90 days.
 - A fallback candidate older than 90 days, or without a date, is excluded.
 - Disabling a configured provider takes effect without a code change.
+- Alternative-source recovery applies the publication date of the page actually
+  loaded when evaluating fallback eligibility.
+- A useful partial-period metric is stored; count flows with an explicit cadence
+  receive the documented annualisation while population stocks and rates do not.
 
 **Complete when:** normal automatic discovery can fill a country that has had
 no datapoint in the preceding 90 days with a recent Statista/OWID result,
@@ -410,6 +449,11 @@ calling the UN comparison agent or applying an outlier-deletion branch. The
 durable `fallback_providers` table seeds Statista and OWID with the configured
 90-day limits; enabled-provider, publication-date, and country-gap checks run
 at finding storage and record `excluded_fallback_not_needed` in the audit.
+Explicitly configured Include domains remain allowed for those fallback
+domains; the system itself never creates a fallback-provider-only hunt. Useful
+non-comparable numeric national evidence is stored with its comparison caveat,
+and documented partial count periods are annualised while retaining their
+source value, cadence, factor, and note.
 
 ### Post-1.4 implementation order
 
@@ -427,6 +471,8 @@ Keep in `search_candidates.details_json` only:
 - processing status, source class, decision reasons, duplicate/finding IDs, and
   concise errors;
 - structured extraction/storage result and measured provider/model timings.
+- `page_loaded`, the actual loaded URL, and compact alternative-attempt status
+  metadata. These are identity/audit markers, not retained article content.
 
 Remove when a candidate finishes, fails, or is deferred:
 
@@ -439,9 +485,10 @@ The accepted finding continues to keep the structured extracted metrics and its
 original article URL. The audit records *why* a candidate was accepted,
 rejected, duplicate, deferred, or blocked, not a copy of the article.
 
-Run a one-time sanitisation over existing candidate JSON, record the number of
-bytes removed, then run SQLite `VACUUM` on the working database after the
-verified backup exists.
+Run a one-time sanitisation over existing candidate JSON, preserving a
+`page_loaded` marker for legacy rows whose `full_text` proves a successful
+load. Record the number of bytes removed, then run SQLite `VACUUM` on the
+working database after the verified backup exists.
 
 **Complete when:** the current audit remains useful for outcomes and debugging without accumulating full article text, and no accepted finding or source URL has been removed.
 
@@ -451,13 +498,23 @@ verified backup exists.
 - Keep the current working database under `databases/` and retain only offline
   source material under `Data_Files/`.
 - Create a repeatable build command that generates a small `wpp_serving.sqlite` from that archive.
-- Keep `estimates` and `medium_variant` as separate tables inside the same serving file rather than separate SQLite files.
+- Keep `estimates` and `medium_variant` as separate tables inside the same
+  serving file. They are the two logical WPP datasets; splitting the existing
+  archive into duplicate full SQLite files would add operational cost without
+  improving the Railway or static-export architecture.
 - Convert years and measures to appropriate numeric types during generation.
 - Add indexes for ISO3 and year.
 - Attach a manifest containing the WPP vintage, generation time, source checksum, included columns, and schema version.
 - Confirm that every existing comparison and graph produces the same values from the serving copy.
 
 **Complete when:** the filtered database can be rebuilt from scratch and passes comparison tests against the full archive, without changing the running Gradio application.
+
+**Review 2026-09-12:** this remains required. Step 1.5 is now safe because
+historical URL suppression uses the compact `page_loaded` marker rather than
+the retained article text. Step 1.6 remains required to reduce the 65-column
+WPP tables before deployment. The current source archive is one SQLite file
+with two WPP tables, so the recommended target is likewise one generated
+read-only serving file with two filtered tables—not four physical SQLite files.
 
 ### Step 1.7 — Verify record and metric deletion
 
@@ -479,7 +536,12 @@ visible immediately in the graphs, and preserve the intended URL eligibility.
 database and visualisation controls, reloads the stored JSON after saving, and
 records a `metric_removed` action. Deleting the final remaining metric is
 rejected so the administrator must explicitly delete the full record. Full
-deletion, suppress/unblock, and rerun eligibility have regression coverage.
+deletion now presents as “Remove and allow rerun”, records an auditable
+automatic recheck, and has regression coverage for successful and failed
+rechecks. Suppress/unblock and source/metric deletion likewise have regression
+coverage. Search categories remain directly editable, including arbitrary
+terms such as `Russia population` when the WPP country label is `Russian
+Federation`.
 
 ### Phase 1 SQLite database shape after completion
 
@@ -493,6 +555,7 @@ and fields; it does not yet introduce Postgres or the Phase 2 claim tables.
 | `source_rules` | New configurable domain/exact-URL classification or exclusion rules. |
 | `fallback_providers` | New configured domains, enabled flag, max age, and “only when the country has no datapoint acquired in the previous 90 days” rule. |
 | `finding_actions` | New compact log of remove, suppress, unblock, and metric-delete actions. |
+| `automatic_rechecks` | Compact requested/consumed/loaded/cancelled state for explicit automatic retries of historically loaded canonical URLs. |
 | `search_candidates` | Existing rows, but large webpage/provider content removed from `details_json` after processing. |
 | `search_runs` / `research_settings` | Existing job and search controls, with links to source/fallback configuration where needed. |
 | WPP SQLite files | Full offline archive plus a generated read-only serving copy; neither stores article findings. |
