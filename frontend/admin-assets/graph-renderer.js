@@ -152,7 +152,37 @@ function formatValue(value, metric) {
     : Math.round(value).toLocaleString();
 }
 
-function marker(svg, point, markerType, color, metric) {
+function addTooltipInteractions(node, chart, details) {
+  const tooltip = chart.querySelector(".graph-tooltip");
+  if (!tooltip) return;
+  const show = (event) => {
+    tooltip.textContent = details;
+    tooltip.hidden = false;
+    const chartBox = chart.getBoundingClientRect();
+    const nodeBox = event?.currentTarget?.getBoundingClientRect();
+    const x = event?.clientX ?? (nodeBox ? nodeBox.left + nodeBox.width / 2 : chartBox.left + chartBox.width / 2);
+    const y = event?.clientY ?? (nodeBox ? nodeBox.top : chartBox.top + 20);
+    const left = x - chartBox.left + 12;
+    const top = y - chartBox.top - tooltip.offsetHeight - 10;
+    tooltip.style.left = `${Math.min(Math.max(8, left), Math.max(8, chart.clientWidth - tooltip.offsetWidth - 8))}px`;
+    tooltip.style.top = `${Math.max(8, top)}px`;
+  };
+  node.addEventListener("mouseenter", show);
+  node.addEventListener("mouseleave", () => { tooltip.hidden = true; });
+  node.addEventListener("focus", show);
+  node.addEventListener("blur", () => { tooltip.hidden = true; });
+}
+
+function findingTooltipDetails(point, metric) {
+  const finding = point.item.finding || {};
+  const statistic = articleStatistic(finding, metric);
+  const sourceName = finding.source || finding.quoted_source || "Source not named";
+  const period = statistic.time_period || statistic.measured_period || point.item.effective_date || "Period not specified";
+  const classification = SOURCE_CLASS_LABELS[point.item.source_type] || "Secondary · unnamed source";
+  return `Finding #${point.id}\nMetric: ${GRAPH_METRICS[metric].label}\nValue: ${formatValue(point.y, metric)}\nEffective date: ${point.item.effective_date || "No effective date"}\nPeriod: ${period}\nSource: ${sourceName}\nClassification: ${classification}${finding.url || point.item.source_url ? `\nURL: ${finding.url || point.item.source_url}` : ""}`;
+}
+
+function marker(chart, point, markerType, color, metric) {
   const finding = point.item.finding || {};
   const statistic = articleStatistic(finding, metric);
   const sourceName = finding.source || finding.quoted_source || "Source not named";
@@ -173,6 +203,7 @@ function marker(svg, point, markerType, color, metric) {
   title.textContent = evidenceLabel;
   group.append(title);
   group.setAttribute("transform", `translate(${point.px} ${point.py})`);
+  addTooltipInteractions(group, chart, findingTooltipDetails(point, metric));
   return group;
 }
 
@@ -180,19 +211,22 @@ function linePath(points) {
   return points.map((point, index) => `${index ? "L" : "M"}${point.px.toFixed(2)} ${point.py.toFixed(2)}`).join(" ");
 }
 
-function referencePoint(svg, point, label, color, metric) {
+function referencePoint(svg, chart, point, label, color, metric) {
   const year = point.row?.Year || "No year";
   const value = formatValue(point.y, metric);
+  const details = `${label}\nMetric: ${GRAPH_METRICS[metric].label}\nYear: ${year}\nValue: ${value}`;
   const group = svgElement("g", {
     class: "graph-reference-point",
     role: "img",
-    "aria-label": `${label} · ${year} · ${value}`,
+    tabindex: "0",
+    "aria-label": details.replaceAll("\n", " · "),
   });
   const title = svgElement("title");
-  title.textContent = `${label} · ${year} · ${value}`;
+  title.textContent = details.replaceAll("\n", " · ");
   group.append(title, svgElement("circle", {
-    cx: point.px, cy: point.py, r: 3, fill: color, opacity: 0.01,
+    cx: point.px, cy: point.py, r: 7, fill: color, opacity: 0.01,
   }));
+  addTooltipInteractions(group, chart, details);
   svg.append(group);
 }
 
@@ -202,14 +236,14 @@ function text(svg, value, attributes) {
   svg.append(element);
 }
 
-function addLegend(container) {
+function addLegend(container, alternateRevisions) {
   const legend = document.createElement("div");
   legend.className = "graph-legend";
   legend.setAttribute("aria-label", "Graph provenance legend");
   [
-    ["line solid", "WPP historic"], ["line dashed", "WPP forecast"], ["line dotted", "WPP alternate release"],
+    ["line solid", "WPP 2024 historic"], ["line dashed", "WPP 2024 forecast"],
     ["diamond official", "Official publisher"], ["circle-open attributed", "Secondary · named source"], ["cross unattributed", "Secondary · no named source"], ["star legacy", "Legacy · unreviewed"],
-  ].forEach(([className, label]) => {
+  ].concat((alternateRevisions || []).map((revision) => ["line dotted", `WPP ${revision}`])).forEach(([className, label]) => {
     const item = document.createElement("span"); item.className = "graph-legend-item";
     const swatch = document.createElement("i"); swatch.className = `graph-swatch ${className}`; swatch.setAttribute("aria-hidden", "true");
     item.append(swatch, document.createTextNode(label)); legend.append(item);
@@ -234,11 +268,13 @@ export function calculateYAxisExtent(values, scale = 1000) {
 }
 
 /** Render one metric as an accessible, responsive SVG chart. */
-export function renderMetricGraph(container, payload, metric, { hiddenFindingIds = new Set(), onFindingSelect = () => {} } = {}) {
+export function renderMetricGraph(container, payload, metric, { hiddenFindingIds = new Set(), alternateRevisions = [], onFindingSelect = () => {} } = {}) {
   const config = GRAPH_METRICS[metric];
   if (!container || !config) return;
-  container.replaceChildren();
   const chart = document.createElement("article"); chart.className = "graph-panel";
+  chart.style.position = "relative";
+  const tooltip = document.createElement("div"); tooltip.className = "graph-tooltip"; tooltip.hidden = true; tooltip.setAttribute("role", "status");
+  chart.append(tooltip);
   const heading = document.createElement("div"); heading.className = "graph-panel-heading";
   const title = document.createElement("h3"); title.textContent = `${config.label} · ${payload.country || payload.iso3 || "Selected country"}`;
   const unit = document.createElement("span"); unit.className = "graph-unit"; unit.textContent = config.unit;
@@ -246,7 +282,9 @@ export function renderMetricGraph(container, payload, metric, { hiddenFindingIds
 
   const historic = rowPoints(payload.historic, metric);
   const forecast = rowPoints(payload.forecast, metric);
-  const alternate = Object.entries(payload.alternate_releases || {}).flatMap(([revision, rows]) => [{ revision, points: rowPoints(rows, metric) }]);
+  const alternate = Object.entries(payload.alternate_releases || {})
+    .filter(([revision]) => alternateRevisions.includes(revision))
+    .flatMap(([revision, rows]) => [{ revision, points: rowPoints(rows, metric) }]);
   const findings = findingPoints(payload.findings, metric, hiddenFindingIds);
   const allPoints = [...historic, ...forecast, ...alternate.flatMap((item) => item.points), ...findings];
   if (!allPoints.length) {
@@ -281,19 +319,19 @@ export function renderMetricGraph(container, payload, metric, { hiddenFindingIds
   text(svg, config.unit, { x: 17, y: margin.top + plotHeight / 2, "text-anchor": "middle", transform: `rotate(-90 17 ${margin.top + plotHeight / 2})`, class: "graph-axis-title" });
 
   const series = [
-    [historic, "WPP historic", "#4c78a8", ""], [forecast, "WPP forecast", "#f58518", "6 5"],
-    ...alternate.map((item) => [item.points, `WPP ${item.revision} alternate`, WPP_REVISION_COLORS[item.revision] || "#6f4e9b", "2 5"]),
+    [historic, "WPP 2024 historic", "#4c78a8", ""], [forecast, "WPP 2024 forecast", "#f58518", "6 5"],
+    ...alternate.map((item) => [item.points, `WPP ${item.revision}`, WPP_REVISION_COLORS[item.revision] || "#6f4e9b", "2 5"]),
   ];
   series.forEach(([points, label, color, dash]) => {
     if (!points.length) return;
     const positioned = points.map((point) => ({ ...point, px: xPosition(point.x), py: yPosition(point.y) }));
     const path = svgElement("path", { d: linePath(positioned), class: "graph-series-line", fill: "none", stroke: color, "stroke-width": 2.25, "stroke-dasharray": dash });
     const pathTitle = svgElement("title"); pathTitle.textContent = label; path.append(pathTitle); svg.append(path);
-    positioned.forEach((point) => referencePoint(svg, point, label, color, metric));
+    positioned.forEach((point) => referencePoint(svg, chart, point, label, color, metric));
   });
-  findings.forEach((point) => { const positioned = { ...point, px: xPosition(point.x), py: yPosition(point.y) }; const className = SOURCE_CLASS_MARKERS[point.item.source_type] || "cross"; const color = SOURCE_CLASS_COLORS[point.item.source_type] || SOURCE_CLASS_COLORS.secondary_unattributed; const node = marker(svg, positioned, className, color, metric); node.addEventListener("click", () => onFindingSelect(point.id)); node.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onFindingSelect(point.id); } }); svg.append(node); });
+  findings.forEach((point) => { const positioned = { ...point, px: xPosition(point.x), py: yPosition(point.y) }; const className = SOURCE_CLASS_MARKERS[point.item.source_type] || "cross"; const color = SOURCE_CLASS_COLORS[point.item.source_type] || SOURCE_CLASS_COLORS.secondary_unattributed; const node = marker(chart, positioned, className, color, metric); node.addEventListener("click", () => onFindingSelect(point.id)); node.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onFindingSelect(point.id); } }); svg.append(node); });
   chart.append(svg); container.append(chart);
-  addLegend(chart);
+  addLegend(chart, alternate.filter((item) => item.points.length).map((item) => item.revision));
 }
 
 /** Render per-view hide/show choices while preserving stable finding IDs. */

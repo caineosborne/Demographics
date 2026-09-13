@@ -10,7 +10,7 @@
     {"Year": 2024, "Population 1 Jul": 124300, "Total Births": 790, "Total Deaths": 1600, "Natural Change": -810, "Net Migration": 440, "Total Fertility Rate (live births per woman)": 1.18},
     {"Year": 2025, "Population 1 Jul": 123900, "Total Births": 780, "Total Deaths": 1610, "Natural Change": -830, "Net Migration": 450, "Total Fertility Rate (live births per woman)": 1.17}
   ],
-  "alternate_releases": {"2022": [{"Year": 2022, "Population 1 Jul": 125100, "Total Births": 820, "Total Deaths": 1570, "Natural Change": -750, "Net Migration": 400, "Total Fertility Rate (live births per woman)": 1.30}]},
+  "alternate_releases": {"2022": [{"Year": 2022, "Population 1 Jul": 125100, "Total Births": 820, "Total Deaths": 1570, "Natural Change": -750, "Net Migration": 400, "Total Fertility Rate (live births per woman)": 1.30}], "2017": [{"Year": 2017, "Population 1 Jul": 126800, "Total Births": 980, "Total Deaths": 1450, "Natural Change": -470, "Net Migration": 350, "Total Fertility Rate (live births per woman)": 1.45}]},
   "findings": [
     {"id": 7, "effective_date": "2023-06-30", "source_type": "official_publisher", "source_url": "https://example.org/official", "finding": {"title": "National estimate", "source": "Statistics Bureau of Japan", "url": "https://example.org/official", "statistics": {"population": {"value": 124600000, "time_period": "2023"}}}},
     {"id": 8, "effective_date": "2024-02-01", "source_type": "secondary_attributed", "source_url": "https://example.org/secondary", "finding": {"title": "Population brief", "source": "Reuters", "quoted_source": "Statistics Bureau of Japan", "url": "https://example.org/secondary", "statistics": {"population": {"value": 124700000, "time_period": "2024"}}}},

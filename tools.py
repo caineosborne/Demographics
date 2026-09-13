@@ -1392,9 +1392,9 @@ def _country_reference() -> tuple[tuple[str, str], ...]:
     return tuple((str(row["Country"]), str(row["ISO3"] or "")) for row in rows)
 
 
-def normalise_country_name(country_name: str) -> str | None:
+def normalise_country_name(country_name: str | None) -> str | None:
     """Return the canonical database country name from a name or ISO3 code."""
-    candidate = country_name.strip().casefold()
+    candidate = str(country_name or '').strip().casefold()
     if not candidate:
         return None
     candidate = COUNTRY_ALIASES.get(candidate, candidate).casefold()

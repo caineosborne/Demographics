@@ -34,6 +34,18 @@ def test_admin_uat_script_exposes_safe_mutation_and_audit_behaviour():
     assert 'body: { url: rawUrl, country_iso3' not in script
 
 
+def test_research_uses_core_searches_and_opens_batch_results_in_findings():
+    script = TestClient(create_app()).get("/admin-assets/admin.js").text
+    assert "function coreResearchCategories()" in script
+    assert "renderCategoryEditors(coreResearchCategories())" in script
+    assert "The 3 core searches are ready." in script
+    assert "await Promise.all([loadCountryQueue(), loadRunHistory(), loadFindings()])" in script
+    assert 'window.location.hash = "findings"' in script
+    assert "data-reset-research-settings" in TestClient(create_app()).get("/admin/").text
+    assert "data-run-log-toggle" in TestClient(create_app()).get("/admin/").text
+    assert "maxAttempts: 60" in script
+
+
 def test_admin_topbar_stays_visible_when_anchor_navigation_scrolls():
     css = TestClient(create_app()).get("/admin-assets/admin.css").text
     assert "position:sticky" in css

@@ -1,0 +1,42 @@
+{
+  "url": "https://www.bbc.com/news/articles/c79r7v7qr53o",
+  "title": "China's population falls again",
+  "source": "BBC News",
+  "site_seen": "bbc.com",
+  "geography": null,
+  "geography_iso3": null,
+  "effective_date": null,
+  "statistics": {
+    "population": {
+      "value": 1416000000,
+      "metric_type": "population total",
+      "observation_status": "low",
+      "time_period": "2025",
+      "evidence_excerpt": "China's population fell to 1.416 billion people in 2025."
+    },
+    "births": {
+      "value": 6.77,
+      "metric_type": "births",
+      "unit": "births per 1,000 people",
+      "observation_status": "low",
+      "time_period": "2025",
+      "evidence_excerpt": "China's crude birth rate was 6.77 births per 1,000 people in 2025."
+    },
+    "deaths": {
+      "value": 7.58,
+      "metric_type": "deaths",
+      "unit": "deaths per 1,000 people",
+      "observation_status": "high",
+      "time_period": "2025",
+      "evidence_excerpt": "China's crude death rate was 7.58 deaths per 1,000 people in 2025."
+    },
+    "total_fertility_rate": {
+      "value": 1,
+      "metric_type": "total_fertility_rate",
+      "observation_status": "low",
+      "time_period": "2025",
+      "evidence_excerpt": "China's total fertility rate was one birth per woman in 2025."
+    }
+  },
+  "comments": "BBC reporting says this is a WPP projection, although this is not a UN source."
+}

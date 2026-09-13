@@ -194,7 +194,9 @@ class ApiBoundaryTests(unittest.TestCase):
             self.assertEqual(client.post("/api/v1/research/country-hunts", json={"country_iso3": "JPN"}).status_code, 202)
             self.assertEqual(client.post("/api/v1/research/bulk-country-hunts", json={"country_iso3s": ["JPN", "AUS"]}).status_code, 202)
 
-        analysis.assert_called_once_with("https://example.test", country_iso3=None, compare=True)
+        analysis.assert_called_once_with(
+            "https://example.test", country_iso3=None, compare=True, review_before_store=False
+        )
         research.assert_called_once_with({})
         hunt.assert_called_once_with("JPN", max_results=12)
         bulk.assert_called_once_with(["JPN", "AUS"], max_results=5)

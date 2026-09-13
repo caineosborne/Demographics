@@ -19,6 +19,7 @@
 .run-row span { color:var(--muted); }
 .run-row strong { color:var(--teal); }
 .run-detail { border-top:1px solid var(--line); margin-top:18px; padding-top:16px; }
+.run-detail-heading { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; }
 .run-detail h4 { margin:0; color:var(--teal); }
 .event-list,.candidate-list { max-height:240px; overflow:auto; margin-top:12px; padding:10px; background:#f4f7f1; font:.68rem/1.5 ui-monospace,monospace; color:#566761; }
 .event-list p,.candidate-list p { margin:0 0 6px; }

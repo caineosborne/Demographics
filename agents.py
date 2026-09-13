@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import date
+from datetime import date, datetime
 from typing import Annotated, Optional, TypedDict
 from urllib.parse import urlsplit
 
@@ -204,6 +204,174 @@ _NUMBER_TOKEN = re.compile(
     re.IGNORECASE,
 )
 
+_SAFE_METRIC_UNITS = {
+    "population": "people",
+    "births": "births",
+    "deaths": "deaths",
+    "natural_change": "people",
+    "net_overseas_migration": "people",
+    "migration_arrivals": "people",
+    "migration_departures": "people",
+    "total_fertility_rate": "live births per woman",
+}
+_NATIONAL_WORDING = re.compile(
+    r"\b(?:national|nationwide|countrywide|whole\s+country|entire\s+country|"
+    r"across\s+the\s+country|country's|country’s)\b", re.IGNORECASE,
+)
+_EXPLICIT_PERIOD = re.compile(
+    r"\b(?:19|20)\d{2}(?:[-/]\d{1,2})?\b|"
+    r"\b(?:January|February|March|April|May|June|July|August|September|October|"
+    r"November|December)\s+(?:19|20)\d{2}\b",
+    re.IGNORECASE,
+)
+_WORD_NUMBER = re.compile(
+    r"\b(one|two|three|four|five|six|seven|eight|nine|ten)\b"
+    r"\s*(billion|million|thousand)?\b", re.IGNORECASE,
+)
+
+
+def _canonical_metric_type(value: str | None) -> str:
+    """Make provider spellings comparable without changing their meaning."""
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").strip().casefold()).strip()
+
+
+_METRIC_TYPE_SYNONYMS = {
+    "population total": "population",
+    "total population": "population",
+    "national population": "population",
+    "total fertility rate": "total fertility rate",
+}
+
+
+def _period_from_text(*values: str | None) -> str | None:
+    """Return the first explicit reporting period from bounded evidence."""
+    for value in values:
+        match = _EXPLICIT_PERIOD.search(str(value or ""))
+        if match:
+            return match.group(0)
+    return None
+
+
+def _country_from_evidence(result: "RelevantResult", page_text: str,
+                           provenance: dict | None) -> tuple[str | None, str | None]:
+    """Resolve a country only when article/result evidence names one clearly."""
+    supplied = str((provenance or {}).get("country_iso3") or "").strip().upper()
+    if supplied:
+        resolved = resolve_country_iso3(supplied)
+        if resolved:
+            return resolved.upper(), normalise_country_name(resolved)
+    for value in (result.geography_iso3, result.geography):
+        resolved = resolve_country_iso3(str(value or "").strip()) if value else None
+        if resolved:
+            return resolved.upper(), normalise_country_name(resolved)
+
+    evidence = " ".join(
+        [result.title or "", result.summary or "", result.comments or ""]
+        + [str(metric.evidence_excerpt or "")
+           for metric in (getattr(result.statistics, name, None)
+                          for name in result.statistics.__class__.model_fields)
+           if metric is not None]
+        + [str(page_text or "")[:20_000]],
+    )
+    names: dict[str, str] = {"china": "China"}
+    try:
+        names.update({name.casefold(): name for name in tools.list_country_names()})
+    except (OSError, ValueError, KeyError):
+        pass
+    scored: list[tuple[int, str, str | None]] = []
+    for name, canonical in names.items():
+        escaped = re.escape(name)
+        score = 0
+        if re.search(rf"\b{escaped}\s*[’']s\s+(?:national\s+)?(?:population|births?|deaths?|fertility|migration)", evidence, re.IGNORECASE):
+            score += 5
+        if re.search(rf"\b(?:population|births?|deaths?|fertility|migration)\s+of\s+{escaped}\b", evidence, re.IGNORECASE):
+            score += 4
+        if re.search(rf"\bin\s+{escaped}\b", evidence, re.IGNORECASE):
+            score += 2
+        if score:
+            resolved = resolve_country_iso3(canonical)
+            if resolved:
+                scored.append((score, canonical, resolved.upper()))
+    if not scored:
+        return None, None
+    highest = max(row[0] for row in scored)
+    winners = [row for row in scored if row[0] == highest]
+    if len(winners) != 1:
+        return None, None
+    _score, canonical, iso3 = winners[0]
+    return iso3, normalise_country_name(canonical) or canonical
+
+
+def normalize_extracted_result(result: "RelevantResult", page_text: str = "",
+                               provenance: dict | None = None) -> "RelevantResult":
+    """Repair only unambiguous metadata around numeric model evidence.
+
+    Recovery providers sometimes return the number and excerpt but omit the
+    surrounding fields.  These defaults are derived from the statistic field
+    and explicit source wording; they never create a value or convert a rate
+    into a count.
+    """
+    if not isinstance(result, RelevantResult):
+        return result
+    iso3, country = _country_from_evidence(result, page_text, provenance)
+    if iso3:
+        result.geography_iso3 = iso3
+        result.geography = country
+    article_period = _period_from_text(result.effective_date,
+                                       (provenance or {}).get("published_date"),
+                                       result.title, result.summary, page_text[:20_000])
+    for name in result.statistics.__class__.model_fields:
+        metric = getattr(result.statistics, name, None)
+        if metric is None or metric.value is None:
+            continue
+        metric_type = _METRIC_TYPE_SYNONYMS.get(
+            _canonical_metric_type(metric.metric_type),
+            _canonical_metric_type(metric.metric_type),
+        )
+        allowed_metric_types = {
+            _canonical_metric_type(value)
+            for value in _ALLOWED_METRIC_TYPES.get(name, set()) | {name}
+        }
+        if not metric.metric_type or metric_type in allowed_metric_types:
+            metric.metric_type = _METRIC_LABELS.get(name, name)
+        if not metric.unit:
+            metric.unit = _SAFE_METRIC_UNITS.get(name)
+        evidence = str(metric.evidence_excerpt or "")
+        if (metric.observation_status or "").casefold() in {
+                "low", "high", "medium", "average", "unknown", "not applicable"}:
+            metric.observation_status = "reported"
+        if not metric.observation_status:
+            if _FUTURE_OR_SCENARIO.search(evidence):
+                metric.observation_status = "projected"
+            elif re.search(r"\bprovisional\b", evidence, re.IGNORECASE):
+                metric.observation_status = "provisional"
+            elif re.search(r"\bestimat(?:e|ed|ion)\b", evidence, re.IGNORECASE):
+                metric.observation_status = "estimate"
+            else:
+                metric.observation_status = OBSERVED_STATUS
+        if not metric.national_scope_status:
+            context = " ".join((evidence, result.title or "", result.summary or ""))
+            if _NATIONAL_WORDING.search(context):
+                metric.national_scope_status = "national"
+            elif country and re.search(
+                    rf"\b{re.escape(country)}\b.*(?:population|births?|deaths?|fertility|migration)|"
+                    rf"(?:population|births?|deaths?|fertility|migration).*\b{re.escape(country)}\b",
+                    context, re.IGNORECASE):
+                metric.national_scope_status = "national"
+        if not metric.measured_period:
+            metric.measured_period = _period_from_text(
+                evidence, metric.source_time_period, metric.time_period, article_period,
+            )
+        if not result.effective_date and metric.measured_period:
+            result.effective_date = metric.measured_period
+    if (result.comments and not result.official_source
+            and re.search(r"\bwpp\b.*\b(?:projection|projected|forecast)\b",
+                          result.comments, re.IGNORECASE | re.DOTALL)):
+        # WPP comparison/provenance belongs in the comparison payload, not as
+        # an assertion that a secondary article itself is a WPP projection.
+        result.comments = None
+    return result
+
 
 def _evidence_numbers(text: str) -> list[float]:
     """Parse numeric claims from an evidence excerpt, ignoring bare years."""
@@ -221,6 +389,16 @@ def _evidence_numbers(text: str) -> list[float]:
             "k": 1_000, "thousand": 1_000,
         }.get((match.group(2) or "").casefold(), 1)
         values.append(value * multiplier)
+    word_values = {
+        "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+        "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    }
+    for match in _WORD_NUMBER.finditer(text or ""):
+        multiplier = {
+            "million": 1_000_000, "billion": 1_000_000_000,
+            "thousand": 1_000,
+        }.get((match.group(2) or "").casefold(), 1)
+        values.append(word_values[match.group(1).casefold()] * multiplier)
     return values
 
 
@@ -314,8 +492,15 @@ def validate_extracted_result(result: "RelevantResult", *, retain_rejected_metri
             issues.append({"metric": name, "level": "needs_review", "reason":
                            f"{label} is missing metric type, unit, status, national scope, or measured period."})
             continue
-        canonical_metric_type = re.sub(r"\s+", " ", metric.metric_type.strip().casefold())
-        if canonical_metric_type not in _ALLOWED_METRIC_TYPES.get(name, set()):
+        canonical_metric_type = _METRIC_TYPE_SYNONYMS.get(
+            _canonical_metric_type(metric.metric_type),
+            _canonical_metric_type(metric.metric_type),
+        )
+        allowed_metric_types = {
+            _canonical_metric_type(value)
+            for value in _ALLOWED_METRIC_TYPES.get(name, set()) | {name}
+        }
+        if canonical_metric_type not in allowed_metric_types:
             reasons.append(f"metric type {metric.metric_type!r} does not match {label}")
         if metric.observation_status.casefold() not in {
                 "observed", "reported", "actual", "historical", "estimate", "provisional"}:
@@ -373,12 +558,9 @@ def validate_extracted_result(result: "RelevantResult", *, retain_rejected_metri
             issues.extend({"metric": name, "level": "reject", "reason": reason} for reason in reasons)
             if not retain_rejected_metrics:
                 metric.value = None
-    if issues:
-        rendered = "; ".join(f"{item['metric']}: {item['reason']}" for item in issues)
-        result.comments = ((result.comments + " ") if result.comments else "") + f"[validation] {rendered}"
-    if rejected:
-        result.comments = ((result.comments + " ") if result.comments else "") + \
-            f"[{PROJECTION_LABEL}/review] Rejected metric fields: {', '.join(rejected)}."
+    # Validation diagnostics are returned in the audit payload. Keep the
+    # article's own comments separate so rejected metric warnings do not look
+    # like claims made by the publisher.
     needs_review = any(item["level"] == "needs_review" for item in issues)
     return {
         "status": "needs_review" if needs_review else ("rejected" if rejected else "validated"),
@@ -501,7 +683,15 @@ def _effective_day(value: str | None) -> date | None:
         except ValueError:
             return None
     match = re.fullmatch(r'(\d{4})', value)
-    return date(int(match.group(1)), 7, 1) if match else None
+    if match:
+        return date(int(match.group(1)), 7, 1)
+    for format_string, day in (("%B %Y", 15), ("%b %Y", 15)):
+        try:
+            parsed = datetime.strptime(value, format_string)
+            return date(parsed.year, parsed.month, day)
+        except ValueError:
+            continue
+    return None
 
 
 def _closest_population_reference(rows: list[dict], effective_day: date | None) -> dict | None:
@@ -769,8 +959,13 @@ def extract_from_page_text(page_text: str, article_url: str, provenance: dict | 
 You are extracting one demographic result from retrieved, untrusted page text.{context_note}
 Extraction contract version: {EXTRACTION_RULE_VERSION}. Return one JSON object
 matching the RelevantResult fields; do not wrap it in markdown or commentary.
-Use only facts in the page. Keep absolute observed national measurements in
-metric fields. Every non-null metric needs a short evidence_excerpt containing
+Use only facts in the page. Extract each metric independently. Keep absolute
+population, births, and deaths counts; never use a change, percentage, ratio,
+crude rate, or other relativity in an absolute count field. An invalid
+individual metric must be left null without rejecting other valid metrics or
+the article. Store the article when at least one useful valid demographic
+figure remains. Keep absolute observed national measurements in metric fields.
+Every non-null metric needs a short evidence_excerpt containing
 its number, metric_type, unit, observation_status, national_scope_status, and
 measured_period. Leave a metric null for projections, rates in count fields,
 subsets, categories, currency, or ambiguous evidence. Set geography_iso3 only
@@ -786,7 +981,11 @@ Retrieved page text:
     if not isinstance(result, RelevantResult):
         result = RelevantResult.model_validate(result)
     result.url = article_url
-    validation = validate_extracted_result(result, retain_rejected_metrics=True)
+    normalize_extracted_result(result, page_text, provenance)
+    # Keep rejected metric evidence/explanations in the validation payload,
+    # but remove the rejected numeric value so manual storage and comparison
+    # cannot mistake a crude rate for an absolute count.
+    validation = validate_extracted_result(result)
     result.extraction_prompt_version = EXTRACTION_PROMPT_VERSION
     result.extraction_rule_version = EXTRACTION_RULE_VERSION
     provenance.update({
@@ -799,6 +998,8 @@ Retrieved page text:
         # Some national publishers refer to New Zealand as Aotearoa without
         # repeating the database country label in the extracted header.
         if re.search(r"\b(?:Aotearoa|New Zealand)\b", page_text, re.IGNORECASE):
+            model_geography = "New Zealand"
+        elif re.search(r"(?:^|/)nz-news(?:/|$)", urlsplit(article_url).path, re.IGNORECASE):
             model_geography = "New Zealand"
     resolved_iso3 = resolve_country_iso3(model_iso3 or model_geography)
     result.geography_iso3 = resolved_iso3.upper() if resolved_iso3 else None
@@ -921,7 +1122,12 @@ def research_agent(state: State):
         scenarios, conditional claims, future-year statements, subsets, and
         administrative categories belong only in the summary/comments with an
         explicit [projection] or [review] label; leave their metric value null.
-        Every non-null metric MUST include evidence_excerpt (a short excerpt
+            Extract each metric independently. Keep absolute population, births,
+            and deaths counts; never use a change, percentage, ratio, crude rate,
+            or other relativity in an absolute count field. An invalid individual
+            metric must be left null without rejecting other valid metrics or the
+            article. Store the article when at least one useful valid demographic
+            figure remains. Every non-null metric MUST include evidence_excerpt (a short excerpt
         containing the number), metric_type, unit, observation_status,
         national_scope_status, and measured_period. Use observation_status
         "observed" only for a reported measurement, and national_scope_status
@@ -993,6 +1199,7 @@ def research_agent(state: State):
     # Persist the URL actually fetched, rather than a URL inferred by the model.
     if fetched_urls:
         result.url = fetched_urls[-1]
+    normalize_extracted_result(result, state.get("page_text", ""), provenance)
     validation = validate_extracted_result(result)
     if isinstance(result, RelevantResult):
         # Keep versions in both the structured audit payload and provenance so
@@ -1068,9 +1275,25 @@ def research_agent(state: State):
                 "reason": "No useful numeric demographic data points; finding was not saved.",
             },
         }
+    comparison = None
+    un_data = []
+    if (state.get("provenance") or {}).get("submission_type") == "automatic":
+        # Automatic findings use the same deterministic UN comparison as the
+        # manual path, after geography/period normalization and before the
+        # finding is written.  A comparison-provider failure must not discard
+        # otherwise useful numeric source evidence.
+        try:
+            compared = compare_to_un({"result": result, "storage": {"status": "validated"}})
+            comparison = compared.get("comparison")
+            un_data = compared.get("un_data") or []
+            finding["comparison"] = comparison.model_dump(mode="json") if comparison else None
+            finding["un_data"] = un_data
+        except Exception as exc:
+            report_activity(f"[Compare to UN] automatic comparison unavailable: {exc}")
     storage = store_webpage_finding(finding, provenance=state.get("provenance"))
     report_activity(f"[Research agent] finding storage: {storage['status']}")
-    return {"messages": new_messages, "result": result, "storage": storage}
+    return {"messages": new_messages, "result": result, "storage": storage,
+            "comparison": comparison, "un_data": un_data}
 
 
 def compare_to_un(state: State):

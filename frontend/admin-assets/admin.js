@@ -1,5 +1,5 @@
 import { ApiError, createApiClient } from "./api-client.js";
-import { GRAPH_METRICS, renderFindingChoices, renderMetricGraph } from "./graph-renderer.js";
+import { GRAPH_METRICS, renderMetricGraph } from "./graph-renderer.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -132,13 +132,12 @@ function reviewGraphFinding(findingId) {
 
 function renderGraphs(payload) {
   const grid = $(`[data-graph-grid]`);
-  const choices = $(`[data-graph-findings]`);
-  if (!grid || !choices || !payload) return;
+  if (!grid || !payload) return;
   const metrics = selectedGraphMetrics();
+  const alternateRevisions = selectedGraphRevisions();
   const hidden = graphState.hiddenByCountry.get(payload.iso3) || new Set();
   grid.replaceChildren();
-  metrics.forEach((metric) => renderMetricGraph(grid, payload, metric, { hiddenFindingIds: hidden, onFindingSelect: reviewGraphFinding }));
-  renderFindingChoices(choices, payload, metrics, hidden, () => renderGraphs(payload), reviewGraphFinding);
+  metrics.forEach((metric) => renderMetricGraph(grid, payload, metric, { hiddenFindingIds: hidden, alternateRevisions, onFindingSelect: reviewGraphFinding }));
 }
 
 async function loadGraphs({ force = false } = {}) {
@@ -153,6 +152,10 @@ async function loadGraphs({ force = false } = {}) {
   const requestNumber = ++graphState.requestNumber;
   graphState.currentCountry = iso3;
   setState(state, "loading", `Loading ${iso3} reporting series…`);
+  const findingsPromise = api.request(`/api/v1/findings?iso3=${encodeURIComponent(iso3)}`).then(
+    (payload) => ({ payload }),
+    (error) => ({ error }),
+  );
   try {
     const payload = force || !graphState.payloadByCountry.has(iso3)
       ? await api.request(`/api/v1/graph-series/${encodeURIComponent(iso3)}?${query}`)
@@ -161,8 +164,17 @@ async function loadGraphs({ force = false } = {}) {
     graphState.payloadByCountry.set(iso3, payload);
     if (!graphState.hiddenByCountry.has(iso3)) graphState.hiddenByCountry.set(iso3, new Set());
     renderGraphs(payload);
+    try {
+      const findingsResult = await findingsPromise;
+      if (requestNumber !== graphState.requestNumber) return;
+      if (findingsResult.error) throw findingsResult.error;
+      renderGraphFindings(findingsResult.payload.items || [], payload.country || iso3);
+    } catch (error) {
+      if (requestNumber !== graphState.requestNumber) return;
+      renderGraphFindingsError(error);
+    }
     const findingCount = (payload.findings || []).length;
-    const releaseCount = Object.values(payload.alternate_releases || {}).filter((rows) => Array.isArray(rows) && rows.length).length;
+    const releaseCount = selectedGraphRevisions().filter((revision) => Array.isArray(payload.alternate_releases?.[revision]) && payload.alternate_releases[revision].length).length;
     $(`[data-graph-summary]`).textContent = `${payload.country || iso3}: ${payload.historic?.length || 0} WPP historical rows, ${payload.forecast?.length || 0} WPP forecast rows, ${findingCount} stored finding${findingCount === 1 ? "" : "s"}${releaseCount ? `, ${releaseCount} alternate release${releaseCount === 1 ? "" : "s"}` : ""}. Hidden points are browser-only; durable edits reload this series.`;
     setState(state, "completed", `Series ready for ${payload.country || iso3}.`);
   } catch (error) {
@@ -192,6 +204,19 @@ function renderCategoryEditors(categories) {
   list.replaceChildren(...(categories || []).map(categoryEditor));
 }
 
+function coreResearchCategories() {
+  const year = new Date().getFullYear();
+  return [
+    { name: "Population", topic: "news", time_range: "day", search_depth: "advanced", max_results: 10, query: `${year} "national population estimate" census statistical release` },
+    { name: "Births, deaths and fertility", topic: "news", time_range: "day", search_depth: "advanced", max_results: 10, query: `${year} "annual vital statistics" births deaths "total fertility rate" national` },
+    { name: "Migration", topic: "news", time_range: "day", search_depth: "advanced", max_results: 10, query: `${year} "annual net international migration" immigration emigration national statistics` },
+  ];
+}
+
+function coreResearchSettings() {
+  return { categories: coreResearchCategories(), max_candidates: 20, max_per_domain: 2, reddit_limit: 30, reddit_enabled: true };
+}
+
 function readCategoryEditors() {
   return $$(`[data-category-row], .category-row`).map((row) => {
     const value = (key) => $(`[data-category="${key}"]`, row)?.value?.trim() || "";
@@ -202,15 +227,15 @@ function readCategoryEditors() {
 
 async function loadResearchSettings() {
   const state = $(`[data-settings-state]`);
-  setState(state, "loading", "Loading saved discovery controls…");
+  renderCategoryEditors(coreResearchCategories());
+  setState(state, "loading", "Loading core discovery searches…");
   try {
     const payload = await api.request("/api/v1/research/settings");
     const settings = payload?.settings || {};
-    renderCategoryEditors(settings.categories || []);
     const form = $(`[data-research-settings-form]`);
     ["max_candidates", "max_per_domain", "reddit_limit"].forEach((key) => { if (form?.elements[key] && settings[key] !== undefined) form.elements[key].value = settings[key]; });
     if (form?.elements.reddit_enabled) form.elements.reddit_enabled.checked = settings.reddit_enabled !== false;
-    setState(state, "completed", `${(settings.categories || []).length} news categories loaded.`);
+    setState(state, "completed", "The 3 core searches are ready. Saved limits and Reddit controls were restored.");
   } catch (error) { setState(state, "failed", "Settings could not be loaded.", error.message); showGlobalError(error); }
 }
 
@@ -246,16 +271,68 @@ async function loadRunHistory() {
   } catch (error) { list.innerHTML = `<p class="help">${escapeHtml(error.message)}</p>`; showGlobalError(error); }
 }
 
-async function loadRunDetail(runId) {
+function renderResearchRunDetail(run, { resetLogVisibility = false } = {}) {
   const detail = $(`[data-run-detail]`);
+  if (!detail) return;
+  detail.hidden = false;
+  $(`[data-run-detail-title]`, detail).textContent = `Run ${run.id} · ${run.status || "running"}`;
+  const events = run.events || run.progress?.logs || [];
+  $(`[data-run-detail-summary]`, detail).textContent = `${run.candidates?.length || 0} candidates · ${events.length} log entr${events.length === 1 ? "y" : "ies"}. Select Show log for live progress.`;
+  const toggle = $(`[data-run-log-toggle]`, detail);
+  if (toggle && !toggle.dataset.bound) {
+    toggle.dataset.bound = "true";
+    toggle.addEventListener("click", () => {
+      const visible = toggle.getAttribute("aria-expanded") === "true";
+      $(`[data-run-events]`, detail).hidden = visible;
+      toggle.setAttribute("aria-expanded", String(!visible));
+      toggle.textContent = visible ? "Show log" : "Hide log";
+    });
+  }
+  if (resetLogVisibility && toggle) {
+    $(`[data-run-events]`, detail).hidden = true;
+    toggle.setAttribute("aria-expanded", "false");
+    toggle.textContent = "Show log";
+  }
+  const eventList = $(`[data-run-events]`, detail);
+  eventList.replaceChildren();
+  events.slice(-30).forEach((event) => {
+    const p = document.createElement("p");
+    p.textContent = `${event.at || event.created_at || ""} · ${event.event || event.stage || "progress"} · ${event.message || event.error || JSON.stringify(event.outcomes || event)}`;
+    eventList.append(p);
+  });
+  if (!eventList.children.length) {
+    const p = document.createElement("p");
+    p.textContent = "No log events have been recorded yet. The run is still working or has not reported progress.";
+    eventList.append(p);
+  }
+  const candidates = $(`[data-run-candidates]`, detail);
+  candidates.replaceChildren();
+  (run.candidates || []).forEach((candidate) => { const button = document.createElement("button"); button.className = "candidate-row"; button.type = "button"; const scope = candidate.scope_country_iso3 ? ` · scope ${candidate.scope_country || candidate.scope_country_iso3}` : ""; const mismatch = candidate.scope_mismatch ? " · SCOPE MISMATCH" : ""; button.textContent = `#${candidate.id} · ${candidate.status}${scope}${mismatch} · ${candidate.full_reason || candidate.summary_reason || ""}`; button.addEventListener("click", () => loadCandidateDetail(candidate.id)); candidates.append(button); });
+}
+
+async function loadRunDetail(runId) {
   try {
     const run = await api.request(`/api/v1/research/jobs/${encodeURIComponent(runId)}`);
-    detail.hidden = false;
-    $(`[data-run-detail-title]`, detail).textContent = `Run ${run.id} · ${run.status}`;
-    $(`[data-run-detail-summary]`, detail).textContent = `${run.candidates?.length || 0} candidates · ${run.events?.length || 0} progress events. Scheduled and bulk paths use deterministic UN lookup only.`;
-    const events = $(`[data-run-events]`, detail); events.replaceChildren(); (run.events || []).slice(-30).forEach((event) => { const p = document.createElement("p"); p.textContent = `${event.at || ""} · ${event.event || "progress"} · ${event.message || event.error || JSON.stringify(event.outcomes || {})}`; events.append(p); });
-    const candidates = $(`[data-run-candidates]`, detail); candidates.replaceChildren(); (run.candidates || []).forEach((candidate) => { const button = document.createElement("button"); button.className = "candidate-row"; button.type = "button"; const scope = candidate.scope_country_iso3 ? ` · scope ${candidate.scope_country || candidate.scope_country_iso3}` : ""; const mismatch = candidate.scope_mismatch ? " · SCOPE MISMATCH" : ""; button.textContent = `#${candidate.id} · ${candidate.status}${scope}${mismatch} · ${candidate.full_reason || candidate.summary_reason || ""}`; button.addEventListener("click", () => loadCandidateDetail(candidate.id)); candidates.append(button); });
+    renderResearchRunDetail(run, { resetLogVisibility: true });
   } catch (error) { showGlobalError(error); }
+}
+
+function researchPollUpdate(runId, current) {
+  renderResearchRunDetail({ ...current, id: runId });
+  return current.status === "complete" || current.status === "completed_with_errors" ? "completed" : current.status === "interrupted" || current.status === "failed" ? "failed" : "running";
+}
+
+async function resetResearchSettings(form) {
+  const state = $(`[data-settings-state]`);
+  const defaults = coreResearchSettings();
+  renderCategoryEditors(defaults.categories);
+  ["max_candidates", "max_per_domain", "reddit_limit"].forEach((key) => { if (form?.elements[key]) form.elements[key].value = defaults[key]; });
+  if (form?.elements.reddit_enabled) form.elements.reddit_enabled.checked = defaults.reddit_enabled;
+  setState(state, "running", "Restoring the core research defaults…");
+  try {
+    await api.request("/api/v1/research/settings", { method: "PUT", body: { settings: defaults } });
+    setState(state, "completed", "Default research settings restored and saved.");
+  } catch (error) { setState(state, "failed", "Defaults are shown locally but could not be saved.", error.message); showGlobalError(error); }
 }
 
 async function loadCandidateDetail(candidateId) {
@@ -281,19 +358,21 @@ async function loadCandidateDetail(candidateId) {
 
 async function runDiscovery(form) {
   const state = $(`[data-settings-state]`); setState(state, "running", "Saving controls and queueing discovery…");
+  let runId = "";
   try {
     const payload = { categories: readCategoryEditors(), max_candidates: Number(form.elements.max_candidates.value), max_per_domain: Number(form.elements.max_per_domain.value), reddit_limit: Number(form.elements.reddit_limit.value), reddit_enabled: form.elements.reddit_enabled.checked };
     await api.request("/api/v1/research/settings", { method: "PUT", body: { settings: payload } });
     const job = await api.request("/api/v1/research/jobs", { method: "POST", body: { settings: payload } });
-    const runId = job.run_id || job.id; setState(state, "running", `Run ${runId} is running.`);
-    await api.pollJob(`/api/v1/research/jobs/${runId}`, { onUpdate: (current) => setState(state, current.status === "complete" || current.status === "completed_with_errors" ? "completed" : current.status === "interrupted" || current.status === "failed" ? "failed" : "running", `${current.status} · ${(current.events || []).length} durable events.`) });
+    runId = job.run_id || job.id; setState(state, "running", `Run ${runId} is running.`);
+    await api.pollJob(`/api/v1/research/jobs/${runId}`, { maxAttempts: 60, onUpdate: (current) => { const currentState = researchPollUpdate(runId, current); setState(state, currentState, `${current.status} · ${(current.events || current.progress?.logs || []).length} log entries.`); } });
     await loadRunHistory();
-  } catch (error) { setState(state, "failed", error.message); showGlobalError(error); }
+  } catch (error) { if (runId && error.message.includes("timed out")) { await loadRunHistory(); await loadRunDetail(runId); setState(state, "failed", "Polling timed out, but the run is still visible in the audit trail. Open its log for the latest recorded progress.", error.message); } else setState(state, "failed", error.message); showGlobalError(error); }
 }
 
 async function submitCountryHunt(form, bulk = false) {
   const state = $(`[data-${bulk ? "gap" : "country-hunt"}-state]`);
   setState(state, "running", "Queueing country hunt…");
+  let runId = "";
   try {
     const values = Object.fromEntries(new FormData(form));
     const selected = bulk ? $$(`[data-gap-selection] input:checked`).map((input) => input.value) : [values.country_iso3];
@@ -301,11 +380,15 @@ async function submitCountryHunt(form, bulk = false) {
     const endpoint = bulk ? "/api/v1/research/bulk-country-hunts" : "/api/v1/research/country-hunts";
     const body = bulk ? { country_iso3s: selected, max_results: Number(values.max_results || 5) } : { country_iso3: selected[0], max_results: Number(values.max_results || 12) };
     const job = await api.request(endpoint, { method: "POST", body });
-    const runId = job.run_id || job.id;
+    runId = job.run_id || job.id;
     setState(state, "running", `Run ${runId} is running.`);
-    await api.pollJob(`/api/v1/research/jobs/${runId}`, { onUpdate: (current) => setState(state, current.status === "complete" || current.status === "completed_with_errors" ? "completed" : current.status === "interrupted" ? "failed" : "running", `${current.status} · ${(current.events || []).length} durable events.`) });
-    await Promise.all([loadCountryQueue(), loadRunHistory()]);
-  } catch (error) { setState(state, "failed", error.message); showGlobalError(error); }
+    await api.pollJob(`/api/v1/research/jobs/${runId}`, { maxAttempts: 60, onUpdate: (current) => { const currentState = researchPollUpdate(runId, current); setState(state, currentState, `${current.status} · ${(current.events || current.progress?.logs || []).length} log entries.`); } });
+    await Promise.all([loadCountryQueue(), loadRunHistory(), loadFindings()]);
+    if (bulk) {
+      window.location.hash = "findings";
+      setState(state, "completed", "Batch complete. Results are open in the Findings table.");
+    }
+  } catch (error) { if (runId && error.message.includes("timed out")) { await loadRunHistory(); await loadRunDetail(runId); setState(state, "failed", "Polling timed out, but the run is still visible in the audit trail. Open its log for the latest recorded progress.", error.message); } else setState(state, "failed", error.message); showGlobalError(error); }
 }
 
 async function previewGaps(form) {
@@ -410,6 +493,7 @@ async function checkHealth() {
 
 async function submitJob(form, kind) {
   const state = $(`[data-${kind}-state]`);
+  let lastAnalysisProgress = { logs: [] };
   setState(state, "running", "Queueing job…");
   const values = Object.fromEntries(new FormData(form));
   try {
@@ -432,14 +516,15 @@ async function submitJob(form, kind) {
       const statusMessage = current.status === "failed" ? (current.error || "Analysis failed.") : current.progress?.stage ? `Analysis stage: ${current.progress.stage}.` : `Job status: ${current.status}.`;
       setState(state, currentState, statusMessage);
       if (kind === "analysis") {
+        lastAnalysisProgress = current.progress || { logs: current.logs || [] };
         updateAnalysisProgress(current.progress?.stage, current.progress?.fetch_status);
-        updateAnalysisLog(current.progress || { logs: current.logs || [] }, current.error);
+        updateAnalysisLog(lastAnalysisProgress, current.error);
       }
       if (kind === "analysis" && current.status === "complete") renderDraft(current.draft || draftFromResult(current));
     } });
   } catch (error) {
     setState(state, "failed", error.message);
-    if (kind === "analysis") updateAnalysisLog({ logs: [] }, error.message);
+    if (kind === "analysis") updateAnalysisLog(lastAnalysisProgress, error.message);
     showGlobalError(error);
   }
 }
@@ -612,16 +697,60 @@ function findingMetricValues(item) {
   }).join("; ") || "—";
 }
 
+function appendFindingIdLink(cell, item) {
+  const id = item.ID ?? item.id;
+  const url = item["Webpage URL"] || item["Canonical URL"] || item.url || item.canonical_url;
+  const link = safeSourceLink(url, `#${id}`);
+  if (link.nodeName === "A") {
+    link.title = "Open source URL";
+    link.addEventListener("click", (event) => event.stopPropagation());
+    cell.append(link);
+  } else {
+    cell.textContent = `#${id}`;
+  }
+}
+
+function renderFindingRows(body, items) {
+  body.replaceChildren();
+  (items || []).forEach((item) => {
+    const row = document.createElement("tr");
+    row.tabIndex = 0;
+    row.innerHTML = `<td></td><th>${escapeHtml(item.Country || item.ISO3 || "—")} <small>${escapeHtml(item.ISO3 || "")}</small></th><td>${escapeHtml(item["Effective date"] || "—")}</td><td>${escapeHtml(findingMetricValues(item))}</td><td>${escapeHtml(item["Source classification"] || "—")}</td><td>${escapeHtml(item.Source || item["Quoted source"] || "—")}</td><td class="source-cell"></td>`;
+    appendFindingIdLink(row.firstElementChild, item);
+    row.lastElementChild.append(safeSourceLink(item["Webpage URL"] || item["Canonical URL"] || item.url || item.canonical_url));
+    row.addEventListener("click", () => loadRecord(item.ID ?? item.id));
+    row.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); loadRecord(item.ID ?? item.id); } });
+    body.append(row);
+  });
+  if (!body.children.length) body.innerHTML = '<tr><td colspan="7" class="empty-cell">No findings match the current filters.</td></tr>';
+}
+
 async function loadFindings() {
   const body = $(`[data-findings-body]`); if (!body) return;
   try {
     const query = new URLSearchParams(); const iso3 = $(`[data-findings-country]`)?.value; const metric = $(`[data-findings-metric]`)?.value;
     if (iso3) query.set("iso3", iso3); if (metric) query.set("metric", metric);
-    const payload = await api.request(`/api/v1/findings${query.toString() ? `?${query}` : ""}`); body.replaceChildren();
-    (payload.items || []).forEach((item) => { const row = document.createElement("tr"); row.tabIndex = 0; row.innerHTML = `<td>${escapeHtml(String(item.ID))}</td><th>${escapeHtml(item.Country || item.ISO3 || "—")} <small>${escapeHtml(item.ISO3 || "")}</small></th><td>${escapeHtml(item["Effective date"] || "—")}</td><td>${escapeHtml(findingMetricValues(item))}</td><td>${escapeHtml(item["Source classification"] || "—")}</td><td>${escapeHtml(item.Source || item["Quoted source"] || "—")}</td><td class="source-cell"></td>`; row.lastElementChild.append(safeSourceLink(item["Webpage URL"])); row.addEventListener("click", () => loadRecord(item.ID)); row.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); loadRecord(item.ID); } }); body.append(row); });
-    if (!body.children.length) body.innerHTML = '<tr><td colspan="7" class="empty-cell">No findings match the current filters.</td></tr>';
+    const payload = await api.request(`/api/v1/findings${query.toString() ? `?${query}` : ""}`);
+    renderFindingRows(body, payload.items || []);
     $(`[data-findings-status]`).textContent = `${(payload.items || []).length} finding${(payload.items || []).length === 1 ? "" : "s"} returned.`;
   } catch (error) { body.innerHTML = `<tr><td colspan="7">${escapeHtml(error.message)}</td></tr>`; showGlobalError(error); }
+}
+
+function renderGraphFindings(items, country) {
+  const body = $(`[data-graph-findings-body]`);
+  if (!body) return;
+  renderFindingRows(body, items);
+  const title = $(`[data-graph-findings-title]`);
+  if (title) title.textContent = `${country} findings`;
+  const status = $(`[data-graph-findings-status]`);
+  if (status) status.textContent = `${items.length} finding${items.length === 1 ? "" : "s"} for ${country}. Select an ID to open its source URL.`;
+}
+
+function renderGraphFindingsError(error) {
+  const body = $(`[data-graph-findings-body]`);
+  if (body) body.innerHTML = `<tr><td colspan="7" class="empty-cell">${escapeHtml(error.message)}</td></tr>`;
+  const status = $(`[data-graph-findings-status]`);
+  if (status) status.textContent = "The country findings table could not be loaded.";
 }
 
 async function loadCoverage() {
@@ -769,6 +898,7 @@ function wire() {
   $(`[data-research-settings-form]`)?.addEventListener("submit", (event) => { event.preventDefault(); saveResearchSettings(event.currentTarget); });
   $(`[data-run-discovery]`)?.addEventListener("click", () => runDiscovery($(`[data-research-settings-form]`)));
   $(`[data-add-category]`)?.addEventListener("click", () => $(`[data-category-list]`)?.append(categoryEditor()));
+  $(`[data-reset-research-settings]`)?.addEventListener("click", () => resetResearchSettings($(`[data-research-settings-form]`)));
   $(`[data-country-hunt-form]`)?.addEventListener("submit", (event) => { event.preventDefault(); submitCountryHunt(event.currentTarget); });
   $(`[data-gap-form]`)?.addEventListener("submit", (event) => { event.preventDefault(); previewGaps(event.currentTarget); });
   $(`[data-queue-batch]`)?.addEventListener("click", () => submitCountryHunt($(`[data-gap-form]`), true));

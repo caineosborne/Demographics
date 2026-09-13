@@ -47,7 +47,7 @@ export function createApiClient({ baseUrl = "", fetchImpl = globalThis.fetch, ge
     return payload;
   };
 
-  const pollJob = async (path, { intervalMs = 1000, maxAttempts = 90, onUpdate = () => {}, isTerminal = (job) => TERMINAL_JOB_STATES.has(job?.status) } = {}) => {
+  const pollJob = async (path, { intervalMs = 1000, maxAttempts = 20, onUpdate = () => {}, isTerminal = (job) => TERMINAL_JOB_STATES.has(job?.status) } = {}) => {
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const job = await request(path);
       onUpdate(job);
