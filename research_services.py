@@ -24,6 +24,21 @@ from research import BossAgent, CRITERIA, DEFAULT_SETTINGS, SearchSettings
 HUNT_QUERY = ('"{country}" (population OR births OR deaths OR fertility OR migration) '
               '("official statistics" OR "statistical office" census OR release)')
 
+# Search providers benefit from the common article name as well as the WPP
+# canonical label. Keep this allow-list deliberately small and deterministic;
+# it is not a free-form query expansion mechanism.
+COUNTRY_HUNT_ALIASES = {
+    'Russian Federation': ('Russia',),
+    'Türkiye': ('Turkey',),
+    'Republic of Korea': ('South Korea',),
+    'United States of America': ('United States', 'USA'),
+}
+
+
+def _country_hunt_query_name(label: str) -> str:
+    aliases = COUNTRY_HUNT_ALIASES.get(label, ())
+    return '" OR "'.join((label, *aliases))
+
 _jobs: dict[str, dict[str, Any]] = {}
 _jobs_lock = threading.RLock()
 _research_workers: dict[str, tuple[threading.Thread, threading.Event, str, str]] = {}
@@ -32,7 +47,7 @@ _research_lock = threading.RLock()
 
 def start_manual_analysis(url: str, *, country_iso3: str | None = None,
                           compare: bool = True, idempotency_key: str | None = None,
-                          allow_rerun: bool = False) -> dict[str, Any]:
+                          allow_rerun: bool = False, review_before_store: bool = False) -> dict[str, Any]:
     url = str(url or '').strip()
     canonical_url = tools.canonicalise_source_url(url)
     if any(character.isspace() for character in url) or url.count('://') != 1:
@@ -43,7 +58,8 @@ def start_manual_analysis(url: str, *, country_iso3: str | None = None,
         'id': job_id, 'kind': 'manual_analysis', 'status': 'queued',
         'url': url, 'country_iso3': context['iso3'] if context else None,
         'country': context['label'] if context else None,
-        'compare': bool(compare), 'allow_rerun': bool(allow_rerun), 'logs': [], 'fetch_status': None,
+        'compare': bool(compare), 'allow_rerun': bool(allow_rerun),
+        'review_before_store': bool(review_before_store), 'logs': [], 'fetch_status': None,
         'extraction_prompt_version': agents.EXTRACTION_PROMPT_VERSION,
         'extraction_rule_version': agents.EXTRACTION_RULE_VERSION,
         'created_at': _now(), 'updated_at': _now(),
@@ -51,6 +67,7 @@ def start_manual_analysis(url: str, *, country_iso3: str | None = None,
     payload = {
         'url': url, 'canonical_url': canonical_url, 'country_iso3': job['country_iso3'],
         'compare': bool(compare), 'allow_rerun': bool(allow_rerun),
+        'review_before_store': bool(review_before_store),
         'extraction_prompt_version': agents.EXTRACTION_PROMPT_VERSION,
         'extraction_rule_version': agents.EXTRACTION_RULE_VERSION,
     }
@@ -70,7 +87,8 @@ def start_manual_analysis(url: str, *, country_iso3: str | None = None,
     job['owner_id'] = worker_owner
     stop_event = threading.Event()
     worker = threading.Thread(target=_run_manual,
-                              args=(job_id, url, context, bool(compare), worker_owner, stop_event, bool(allow_rerun), True),
+                              args=(job_id, url, context, bool(compare), worker_owner, stop_event,
+                                    bool(allow_rerun), True, bool(review_before_store)),
                               name=f'manual-analysis-{job_id}', daemon=True)
     worker.start()
     return _public_job(job)
@@ -100,6 +118,30 @@ def get_analysis_draft_actions(draft_id: str) -> list[dict[str, Any]]:
     return research_store.list_analysis_draft_actions(draft_id)
 
 
+def _validate_manual_finding(finding: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run the same schema and deterministic Step 3.4 guards as extraction."""
+    try:
+        model = agents.RelevantResult.model_validate(finding)
+    except Exception as exc:
+        return finding, {
+            'status': 'needs_review',
+            'issues': [{'level': 'needs_review', 'reason': f'Finding schema validation failed: {exc}'}],
+        }
+    validation = agents.validate_extracted_result(model)
+    if validation.get('status') == 'validated' and not any(
+            isinstance(metric, agents.Statistic) and metric.value is not None
+            for metric in model.statistics.__dict__.values()):
+        validation = {
+            **validation,
+            'status': 'rejected',
+            'issues': [*(validation.get('issues') or []), {
+                'level': 'reject',
+                'reason': 'No numeric demographic metric is available for approval.',
+            }],
+        }
+    return model.model_dump(mode='json'), validation
+
+
 def edit_analysis_draft(draft_id: str, finding: dict[str, Any], *, expected_revision: int | None = None) -> dict[str, Any]:
     draft = research_store.get_analysis_draft(draft_id)
     if draft is None:
@@ -109,8 +151,11 @@ def edit_analysis_draft(draft_id: str, finding: dict[str, Any], *, expected_revi
     if not isinstance(finding, dict) or not str(finding.get('url') or '').strip():
         raise ValueError('Draft finding must be an object with a non-empty url.')
     tools.canonicalise_source_url(finding['url'])
+    normalized, validation = _validate_manual_finding(finding)
     return _public_draft(research_store.update_analysis_draft(
-        draft_id, finding=finding, expected_revision=expected_revision, action='edited'
+        draft_id, finding=normalized, validation=validation,
+        expected_revision=expected_revision, action='edited',
+        note=f"validation={validation.get('status', 'needs_review')}",
     ))
 
 
@@ -125,6 +170,21 @@ def approve_analysis_draft(draft_id: str) -> dict[str, Any]:
     finding = draft.get('finding') or {}
     if not isinstance(finding, dict) or not str(finding.get('url') or '').strip():
         raise ValueError('The draft has no valid finding to approve.')
+    normalized, validation = _validate_manual_finding(finding)
+    if validation.get('status') != 'validated':
+        # Keep the latest guard result durable so a reviewer can correct the
+        # draft and retry.  Approval is never inferred from an old validation
+        # payload supplied by a client or a previous extraction run.
+        research_store.update_analysis_draft(
+            draft_id, finding=normalized, validation=validation,
+            action='validation_failed',
+            note=f"validation={validation.get('status', 'needs_review')}",
+        )
+        raise ValueError(
+            'The draft cannot be approved until deterministic validation passes: '
+            + '; '.join(item.get('reason', 'review required') for item in validation.get('issues', []))
+        )
+    finding = normalized
     if not any(isinstance(metric, dict) and metric.get('value') is not None
                for metric in (finding.get('statistics') or {}).values()):
         raise ValueError('The draft has no numeric demographic metric to approve.')
@@ -134,6 +194,17 @@ def approve_analysis_draft(draft_id: str) -> dict[str, Any]:
         'extraction_prompt_version': finding.get('extraction_prompt_version'),
         'extraction_rule_version': finding.get('extraction_rule_version'),
     })
+    if stored.get('status') != 'stored':
+        outcome = str(stored.get('status') or 'not_stored')
+        reason = str(stored.get('reason') or '').strip()
+        research_store.update_analysis_draft(
+            draft_id, action='storage_failed', note=outcome,
+        )
+        raise ValueError(
+            f'Finding was not stored ({outcome})'
+            + (f': {reason}' if reason else '')
+            + '; the draft remains pending review.'
+        )
     finding_id = stored.get('id') or stored.get('existing_id')
     updated = research_store.update_analysis_draft(
         draft_id, status='approved', finding_id=finding_id, action='approved',
@@ -242,7 +313,9 @@ def start_country_hunt(country_iso3: str, *, max_results: int = 12) -> dict[str,
     context = _country_context(country_iso3)
     settings = country_hunt_settings(context, max_results)
     research_store.upsert_country_hunt_queue([context])
-    result = _start_research(settings.model_dump(), queue_iso3s=[context['iso3']])
+    result = _start_research(
+        settings.model_dump(), queue_iso3s=[context['iso3']], persist_settings=False,
+    )
     result.update({'country_iso3': context['iso3'], 'country': context['label']})
     return result
 
@@ -253,7 +326,7 @@ def country_hunt_settings(context: dict[str, str], max_results: int = 12) -> Sea
     return SearchSettings(
         categories=[{
             'name': f'Country hunt: {context["label"]}',
-            'query': HUNT_QUERY.format(country=context['label']),
+            'query': HUNT_QUERY.format(country=_country_hunt_query_name(context['label'])),
             'topic': 'news', 'max_results': int(max_results),
             'time_range': 'year', 'search_depth': 'advanced',
             'country_iso3': context['iso3'],
@@ -272,7 +345,7 @@ def start_bulk_country_hunt(country_iso3s: list[str], *, max_results: int = 5) -
         raise ValueError('max_results must be between 1 and 20.')
     categories = [{
         'name': f'Country hunt: {context["label"]}',
-        'query': HUNT_QUERY.format(country=context['label']),
+        'query': HUNT_QUERY.format(country=_country_hunt_query_name(context['label'])),
         'topic': 'news', 'max_results': int(max_results),
         'time_range': 'year', 'search_depth': 'advanced',
         'country_iso3': context['iso3'],
@@ -284,7 +357,10 @@ def start_bulk_country_hunt(country_iso3s: list[str], *, max_results: int = 5) -
         country_hunt_mode='bulk', country_hunt_iso3s=[context['iso3'] for context in contexts],
     )
     research_store.upsert_country_hunt_queue(contexts)
-    result = _start_research(settings.model_dump(), queue_iso3s=[context['iso3'] for context in contexts])
+    result = _start_research(
+        settings.model_dump(), queue_iso3s=[context['iso3'] for context in contexts],
+        persist_settings=False,
+    )
     result.update({'country_iso3s': [context['iso3'] for context in contexts]})
     return result
 
@@ -326,7 +402,10 @@ def stop_research(run_id: str) -> dict[str, Any]:
     return {'run_id': run_id, 'status': status}
 
 
-def _start_research(settings: dict[str, Any], queue_iso3s: list[str] | None = None) -> dict[str, Any]:
+def _start_research(
+    settings: dict[str, Any], queue_iso3s: list[str] | None = None, *,
+    persist_settings: bool = True,
+) -> dict[str, Any]:
     ready = threading.Event()
     holder: dict[str, Any] = {}
     stop_event = threading.Event()
@@ -354,7 +433,10 @@ def _start_research(settings: dict[str, Any], queue_iso3s: list[str] | None = No
         )
         heartbeat.start()
         try:
-            iterator = BossAgent().run(settings, stop_event=stop_event, owner_id=worker_owner)
+            iterator = BossAgent().run(
+                settings, stop_event=stop_event, owner_id=worker_owner,
+                persist_settings=persist_settings,
+            )
             first = next(iterator)
             holder['run_id'] = first[0]
             if queue_iso3s:
@@ -442,7 +524,8 @@ def _start_research(settings: dict[str, Any], queue_iso3s: list[str] | None = No
 
 def _run_manual(job_id: str, url: str, context: dict[str, str] | None, compare: bool,
                 worker_owner: str | None = None, stop_event: threading.Event | None = None,
-                allow_rerun: bool = False, direct_service: bool = False) -> None:
+                allow_rerun: bool = False, direct_service: bool = False,
+                review_before_store: bool = False) -> None:
     if not direct_service:
         return _run_manual_legacy(job_id, url, context, compare, worker_owner, stop_event)
     worker_owner = worker_owner or research_store.owner_id()
@@ -463,7 +546,7 @@ def _run_manual(job_id: str, url: str, context: dict[str, str] | None, compare: 
             **({'country_iso3': context['iso3']} if context else {}),
         }
         canonical_url = tools.canonicalise_source_url(url)
-        draft_status = 'pending_review'
+        draft_status = 'pending_review' if review_before_store else 'approved'
         reference_finding_id = None
         if not allow_rerun and canonical_url in tools.blocked_source_urls():
             draft_status = 'suppressed_source'
@@ -486,19 +569,36 @@ def _run_manual(job_id: str, url: str, context: dict[str, str] | None, compare: 
                                 'canonical_url': canonical_url}, 'validation': {}}
             else:
                 _set_job(job_id, stage='fetching')
-                page_text = tools.get_page_text(url)
+                page_text = (tools.get_page_text.invoke({'url': url})
+                             if hasattr(tools.get_page_text, 'invoke')
+                             else tools.get_page_text(url))
                 _set_job(job_id, stage='extracting')
                 extracted = agents.extract_from_page_text(
                     page_text, url, provenance=provenance, country_context=context
                 )
         else:
             _set_job(job_id, stage='fetching')
-            page_text = tools.get_page_text(url)
+            page_text = (tools.get_page_text.invoke({'url': url})
+                         if hasattr(tools.get_page_text, 'invoke')
+                         else tools.get_page_text(url))
             _set_job(job_id, stage='extracting')
             extracted = agents.extract_from_page_text(
                 page_text, url, provenance=provenance, country_context=context
             )
         result = dict(extracted)
+        extracted_finding = result.get('result')
+        if isinstance(extracted_finding, dict):
+            geography_value = (extracted_finding.get('geography_iso3')
+                               or extracted_finding.get('geography'))
+        else:
+            geography_value = (getattr(extracted_finding, 'geography_iso3', None)
+                               or getattr(extracted_finding, 'geography', None))
+        derived_iso3 = (tools.resolve_country_iso3(str(geography_value).strip())
+                        if geography_value else None)
+        if derived_iso3:
+            derived_iso3 = derived_iso3.strip().upper()
+            derived_country = tools.normalise_country_name(derived_iso3)
+            _set_job(job_id, country_iso3=derived_iso3, country=derived_country)
         if compare and hasattr(extracted.get('result'), 'model_dump_json') and extracted.get('storage', {}).get('status') not in {
                 'excluded_duplicate_url', 'excluded_blocked_source', 'excluded_no_data',
                 'excluded_country_mismatch'}:
@@ -508,6 +608,15 @@ def _run_manual(job_id: str, url: str, context: dict[str, str] | None, compare: 
             result.update(compared)
         else:
             result.update({'comparison': None, 'un_data': []})
+        finding_id = None
+        if not review_before_store and isinstance(result.get('result'), dict):
+            stored = tools.store_webpage_finding(result['result'], provenance={
+                'submission_type': 'manual', 'discovery_source': 'api',
+            })
+            result['storage'] = stored
+            finding_id = stored.get('id') or stored.get('existing_id')
+            if stored.get('status') != 'stored':
+                draft_status = 'pending_review'
         draft = research_store.create_analysis_draft(
             job_id, finding=_jsonable(result.get('result') or {}),
             comparison=_jsonable(result.get('comparison')),
@@ -515,6 +624,11 @@ def _run_manual(job_id: str, url: str, context: dict[str, str] | None, compare: 
             validation=_jsonable(result.get('validation') or {}),
             status=draft_status, reference_finding_id=reference_finding_id,
         )
+        if finding_id:
+            draft = research_store.update_analysis_draft(
+                draft['id'], finding_id=finding_id, action='stored_by_default',
+                note='Manual analysis stored automatically.'
+            )
         payload = {
             'draft_id': draft['id'], 'draft_status': draft['status'],
             'finding': draft['finding'], 'comparison': draft['comparison'],
@@ -636,16 +750,24 @@ def _record_job_progress(job_id: str, event: dict[str, Any]) -> None:
             job['fetch_status'] = event.get('status')
         job['updated_at'] = _now()
         progress = {'stage': job.get('stage'), 'fetch_status': job.get('fetch_status'), 'logs': logs}
+        job['progress'] = progress
     research_store.update_job(job_id, progress=progress)
 
 
 def _durable_manual_public_job(job: dict[str, Any]) -> dict[str, Any]:
     payload = job.get('payload') or {}
     progress = job.get('progress') or {}
+    result = job.get('result') or {}
+    finding = (result.get('finding') or {}) if isinstance(result, dict) else {}
+    geography_value = (payload.get('country_iso3') or finding.get('geography_iso3')
+                       or finding.get('geography'))
+    derived_iso3 = (tools.resolve_country_iso3(str(geography_value).strip())
+                    if geography_value else None)
     draft = research_store.get_analysis_draft_for_job(job['id'])
     return {
         'id': job['id'], 'kind': job['kind'], 'status': job['status'],
-        'url': payload.get('url'), 'country_iso3': payload.get('country_iso3'),
+        'url': payload.get('url'), 'country_iso3': derived_iso3,
+        'country': tools.normalise_country_name(derived_iso3) if derived_iso3 else None,
         'compare': payload.get('compare', True), 'created_at': job['created_at'],
         'updated_at': job['updated_at'], 'stage': progress.get('stage'),
         'fetch_status': progress.get('fetch_status'), 'logs': progress.get('logs', []),

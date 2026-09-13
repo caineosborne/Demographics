@@ -475,9 +475,16 @@ class BossAgent:
         self.skills = skills or ResearchSkills()
         self.providers = providers if providers is not None else {'tavily': tavily_links, 'reddit': reddit_links}
 
-    def run(self, settings, stop_event=None, owner_id=None):
+    def run(self, settings, stop_event=None, owner_id=None, persist_settings=None):
         settings = SearchSettings.model_validate(settings)
-        store.save_settings(settings.model_dump())
+        # Country hunts are generated, bounded settings and must not replace
+        # the operator's saved automatic-discovery controls.  Keep the flag
+        # explicit for production callers, while making direct callers safe
+        # by defaulting from the durable hunt mode.
+        if persist_settings is None:
+            persist_settings = settings.country_hunt_mode == 'automatic'
+        if persist_settings:
+            store.save_settings(settings.model_dump())
         run_settings = {
             **settings.model_dump(),
             "extraction_prompt_version": agents.EXTRACTION_PROMPT_VERSION,

@@ -23,6 +23,16 @@ SEARCH_WINDOWS = [
 
 HUNT_QUERY = ('"{country}" (population OR births OR deaths OR fertility OR migration) '
               '("official statistics" OR "statistical office" OR census OR release)')
+COUNTRY_HUNT_ALIASES = {
+    'Russian Federation': ('Russia',),
+    'Türkiye': ('Turkey',),
+    'Republic of Korea': ('South Korea',),
+    'United States of America': ('United States', 'USA'),
+}
+
+
+def _country_hunt_query_name(country: str) -> str:
+    return '" OR "'.join((country, *COUNTRY_HUNT_ALIASES.get(country, ())))
 
 _ACTIVE_RUNS = {}
 _ACTIVE_RUNS_LOCK = threading.Lock()
@@ -105,7 +115,7 @@ def country_hunt_settings(country: str, *, max_results: int = 12) -> dict:
     return SearchSettings(
         categories=[{
             'name': f'Country hunt: {country}',
-            'query': HUNT_QUERY.format(country=country),
+            'query': HUNT_QUERY.format(country=_country_hunt_query_name(country)),
             'topic': 'news',
             'max_results': max_results,
             'time_range': 'year',
@@ -186,7 +196,7 @@ def bulk_country_hunt_settings(prefix: str, days: int = 31, country_count: int =
         raise ValueError('That prefix matches more than 100 countries. Add more letters to narrow it.')
     categories = [{
         'name': f'Gap hunt: {country}',
-        'query': HUNT_QUERY.format(country=country),
+        'query': HUNT_QUERY.format(country=_country_hunt_query_name(country)),
         'topic': 'news',
         'max_results': 5,
         'time_range': 'year',

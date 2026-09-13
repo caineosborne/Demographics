@@ -206,7 +206,8 @@ def get_analysis_draft_for_job(job_id):
 
 
 def update_analysis_draft(draft_id, *, finding=None, expected_revision=None,
-                          status=None, finding_id=None, action='edited', note=None):
+                          status=None, finding_id=None, validation=None,
+                          action='edited', note=None):
     """Apply an optimistic and auditable draft edit or state transition."""
     initialise()
     timestamp = now()
@@ -218,6 +219,9 @@ def update_analysis_draft(draft_id, *, finding=None, expected_revision=None,
         updates.append('status = ?'); values.append(str(status))
     if finding_id is not None:
         updates.append('finding_id = ?'); values.append(int(finding_id))
+    if validation is not None:
+        updates.append('validation_json = ?')
+        values.append(json.dumps(validation, default=str))
     values.append(str(draft_id))
     where = 'id = ?'
     if expected_revision is not None:
@@ -395,6 +399,18 @@ def recover_orphaned_worker_jobs():
                 f"error = COALESCE(error, ?), owner_id = NULL, heartbeat_at = NULL, "
                 f"lease_expires_at = NULL WHERE id IN ({placeholders})",
                 (timestamp, 'Worker process ended before the job completed.', *ids),
+            )
+            # A country hunt queue row is work-in-progress while its linked
+            # worker job is queued.  Do not leave it looking runnable after
+            # recovery: interrupted is terminal for this attempt, with no
+            # cooldown so the operator can explicitly retry it.  Keep the
+            # job linkage for audit and retry diagnostics.
+            conn.execute(
+                f'''UPDATE country_hunt_queue
+                    SET outcome = 'interrupted', next_eligible_at = NULL,
+                        updated_at = ?
+                    WHERE last_job_id IN ({placeholders}) AND outcome = 'queued' ''',
+                (timestamp, *ids),
             )
             conn.execute(f"DELETE FROM worker_locks WHERE job_id IN ({placeholders})", ids)
         # Only expired locks may be reclaimed.  A lock belonging to a
@@ -617,6 +633,17 @@ def recover_orphaned_runs():
                 'UPDATE search_runs SET status = ?, finished_at = ?, events_json = ?, '
                 'owner_id = NULL, heartbeat_at = NULL, lease_expires_at = NULL WHERE id = ?',
                 ('interrupted', now(), json.dumps(events), run_id),
+            )
+            # This covers runs that were created/linked before a worker job
+            # record was available, and is idempotent with worker-job
+            # recovery above.  A queue row must never remain queued for an
+            # orphaned run; NULL keeps the interrupted attempt retryable.
+            conn.execute(
+                '''UPDATE country_hunt_queue
+                   SET outcome = 'interrupted', next_eligible_at = NULL,
+                       updated_at = ?
+                   WHERE last_run_id = ? AND outcome = 'queued' ''',
+                (now(), str(run_id)),
             )
     return len(rows)
 

@@ -24,6 +24,7 @@ const fixtureRoutes = {
   "/api/v1/admin/source-rule-actions": "/fixtures/api/source-rule-actions.json",
   "/api/v1/admin/blocked-sources": "/fixtures/api/blocked-sources.json",
   "/api/v1/admin/findings/7": "/fixtures/api/finding-detail.json",
+  "/api/v1/admin/finding-actions": "/fixtures/api/finding-actions.json",
 };
 
 const fixtureFetch = async (path, options = {}) => {
@@ -73,6 +74,7 @@ const fixtureFetch = async (path, options = {}) => {
     });
   }
   const fixturePath = fixtureRoutes[routePath]
+    || (/^\/api\/v1\/graph-series\/[A-Z]{3}$/i.test(routePath) ? "/fixtures/api/graph-series.json" : null)
     || (/^\/api\/v1\/analysis\/jobs\/[^/]+$/.test(routePath) ? "/fixtures/api/analysis-job.json" : null)
     || (/^\/api\/v1\/research\/jobs\/[^/]+$/.test(routePath) ? "/fixtures/api/worker-job.json" : null)
     || (/^\/api\/v1\/research\/candidates\/\d+$/.test(routePath) ? "/fixtures/api/candidate-detail.json" : null);
@@ -88,6 +90,18 @@ const fixtureFetch = async (path, options = {}) => {
   if (candidateMatch) {
     const payload = await response.json();
     payload.id = Number(candidateMatch[1]);
+    return new Response(JSON.stringify(payload), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
+  const graphMatch = routePath.match(/^\/api\/v1\/graph-series\/([A-Z]{3})$/i);
+  if (graphMatch && fixturePath === "/fixtures/api/graph-series.json") {
+    const payload = await response.json();
+    const iso3 = graphMatch[1].toUpperCase();
+    const country = iso3 === "AUS" ? "Australia" : (iso3 === "JPN" ? "Japan" : iso3);
+    payload.iso3 = iso3;
+    payload.country = country;
+    // Article findings belong to the fixture's source country; do not display
+    // them as evidence for an adapted country series.
+    if (iso3 !== "JPN") payload.findings = [];
     return new Response(JSON.stringify(payload), { status: 200, headers: { "Content-Type": "application/json" } });
   }
   return response;
@@ -148,7 +162,7 @@ async function loadGraphs({ force = false } = {}) {
     if (!graphState.hiddenByCountry.has(iso3)) graphState.hiddenByCountry.set(iso3, new Set());
     renderGraphs(payload);
     const findingCount = (payload.findings || []).length;
-    const releaseCount = Object.keys(payload.alternate_releases || {}).length;
+    const releaseCount = Object.values(payload.alternate_releases || {}).filter((rows) => Array.isArray(rows) && rows.length).length;
     $(`[data-graph-summary]`).textContent = `${payload.country || iso3}: ${payload.historic?.length || 0} WPP historical rows, ${payload.forecast?.length || 0} WPP forecast rows, ${findingCount} stored finding${findingCount === 1 ? "" : "s"}${releaseCount ? `, ${releaseCount} alternate release${releaseCount === 1 ? "" : "s"}` : ""}. Hidden points are browser-only; durable edits reload this series.`;
     setState(state, "completed", `Series ready for ${payload.country || iso3}.`);
   } catch (error) {
@@ -329,9 +343,14 @@ function populateCountries(items) {
   $$(`[data-country-control]`).forEach((select) => {
     const previous = select.value;
     const findingsFilter = select.hasAttribute("data-findings-country");
-    const includeEmpty = findingsFilter || (select.name === "country_iso3" && select.closest("[data-analysis-form], [data-research-form]"));
+    const coverageFilter = select.hasAttribute("data-coverage-country");
+    const countryHunt = select.hasAttribute("data-country-hunt-country");
+    const optionalContext = select.name === "country_iso3" && select.closest("[data-analysis-form], [data-research-form]");
+    const graphCountry = select.hasAttribute("data-graph-country");
     select.replaceChildren();
-    if (includeEmpty) select.append(new Option(findingsFilter || select.closest("[data-research-form]") ? "All countries" : "No country context", ""));
+    if (findingsFilter || coverageFilter) select.append(new Option("All countries", ""));
+    else if (countryHunt || graphCountry) select.append(new Option("Choose a country", ""));
+    else if (optionalContext) select.append(new Option("No country context", ""));
     items.forEach(({ iso3, name }) => select.append(new Option(`${name} · ${iso3}`, iso3)));
     if ([...select.options].some((option) => option.value === previous)) select.value = previous;
   });
@@ -377,8 +396,7 @@ async function checkHealth() {
   const card = $(`[data-health-card]`);
   try {
     const health = await api.request("/health");
-    card.dataset.state = "completed";
-    $("[data-health-card-label]").textContent = "API is online";
+    setState(card, "completed", "API is online");
     $("[data-health-detail]").textContent = `${health.version || "v1"} · ${health.environment || "unknown"}`;
     $("[data-health-label]").textContent = "Connected";
     $("[data-health-dot]").dataset.state = "completed";
@@ -402,7 +420,8 @@ async function submitJob(form, kind) {
       try { parsed = new URL(rawUrl); } catch { throw new Error("Enter one complete HTTP(S) URL."); }
       if (!/^https?:$/.test(parsed.protocol) || !parsed.hostname || parsed.username || parsed.password || /\s/.test(rawUrl) || (rawUrl.match(/:\/\//g) || []).length !== 1) throw new Error("Enter one complete HTTP(S) URL without credentials.");
       $(`[data-analysis-review]`).hidden = true;
-      job = await api.request("/api/v1/analysis/jobs", { method: "POST", body: { url: rawUrl, country_iso3: values.country_iso3 || null, compare: form.compare.checked } });
+      updateAnalysisLog({ logs: [] });
+      job = await api.request("/api/v1/analysis/jobs", { method: "POST", body: { url: rawUrl, compare: form.compare.checked, review_before_store: form.review_before_store.checked } });
     }
     else job = await api.request("/api/v1/research/jobs", { method: "POST", body: { settings: { max_articles: Number(values.max_articles || 1), country_iso3: values.country_iso3 || null } } });
     setState(state, "running", `Job ${job.id || job.run_id || "queued"} is running.`);
@@ -410,12 +429,17 @@ async function submitJob(form, kind) {
     const statusPath = kind === "analysis" ? `/api/v1/analysis/jobs/${id}` : `/api/v1/research/jobs/${id}`;
     await api.pollJob(statusPath, { onUpdate: (current) => {
       const currentState = current.status === "failed" ? "failed" : (current.status === "complete" || current.status === "completed" ? "completed" : "running");
-      setState(state, currentState, current.progress?.stage ? `Analysis stage: ${current.progress.stage}.` : `Job status: ${current.status}.`);
-      if (kind === "analysis") updateAnalysisProgress(current.progress?.stage, current.progress?.fetch_status);
+      const statusMessage = current.status === "failed" ? (current.error || "Analysis failed.") : current.progress?.stage ? `Analysis stage: ${current.progress.stage}.` : `Job status: ${current.status}.`;
+      setState(state, currentState, statusMessage);
+      if (kind === "analysis") {
+        updateAnalysisProgress(current.progress?.stage, current.progress?.fetch_status);
+        updateAnalysisLog(current.progress || { logs: current.logs || [] }, current.error);
+      }
       if (kind === "analysis" && current.status === "complete") renderDraft(current.draft || draftFromResult(current));
     } });
   } catch (error) {
     setState(state, "failed", error.message);
+    if (kind === "analysis") updateAnalysisLog({ logs: [] }, error.message);
     showGlobalError(error);
   }
 }
@@ -437,6 +461,32 @@ function updateAnalysisProgress(stage, fetchStatus) {
   if (fetchStatus) progress.title = fetchStatus;
 }
 
+function updateAnalysisLog(progress = {}, error = "") {
+  const list = $(`[data-analysis-log-list]`);
+  const status = $(`[data-analysis-log-status]`);
+  if (!list) return;
+  list.replaceChildren();
+  const entries = Array.isArray(progress.logs) ? progress.logs : [];
+  entries.forEach((entry) => {
+    const item = document.createElement("li");
+    item.textContent = [entry.at, entry.message].filter(Boolean).join(" · ");
+    list.append(item);
+  });
+  if (error) {
+    const item = document.createElement("li");
+    item.className = "log-error";
+    item.textContent = `Error · ${error}`;
+    list.append(item);
+  }
+  if (!list.children.length) {
+    const item = document.createElement("li");
+    item.className = "log-empty";
+    item.textContent = "No activity yet.";
+    list.append(item);
+  }
+  if (status) status.textContent = error ? "failed" : entries.length ? "live" : "waiting";
+}
+
 function renderDraft(draft) {
   if (!draft?.id) return;
   const review = $(`[data-analysis-review]`);
@@ -450,10 +500,11 @@ function renderDraft(draft) {
   const body = $(`[data-metrics-body]`, review);
   body.replaceChildren();
   Object.entries(stats).forEach(([metric, value]) => {
-    if (!value || value.value === null || value.value === undefined) return;
+    const reportedValue = value?.value ?? value?.source_value;
+    if (!value || reportedValue === null || reportedValue === undefined) return;
     const row = document.createElement("tr");
     const evidence = value.evidence_excerpt || "No excerpt supplied";
-    row.innerHTML = `<th scope="row">${escapeHtml(metric.replaceAll("_", " "))}</th><td>${escapeHtml(String(value.value))}</td><td>${escapeHtml([value.unit, value.measured_period || finding.effective_date].filter(Boolean).join(" · "))}</td><td>${escapeHtml(evidence)}</td>`;
+    row.innerHTML = `<th scope="row">${escapeHtml(metric.replaceAll("_", " "))}</th><td>${escapeHtml(String(reportedValue))}</td><td>${escapeHtml([value.unit, value.measured_period || finding.effective_date].filter(Boolean).join(" · "))}</td><td>${escapeHtml(evidence)}</td>`;
     body.append(row);
   });
   if (!body.children.length) body.innerHTML = '<tr><td colspan="4" class="empty-cell">No numeric metric was extracted. This draft can be rejected or rerun.</td></tr>';
@@ -468,6 +519,7 @@ function renderDraft(draft) {
   Object.entries(comparisonValues).filter(([, value]) => value && typeof value === "object" && (value.reported !== null || value.un_expected !== null || value.assessment)).forEach(([metric, value]) => { const p = document.createElement("p"); p.textContent = `${metric.replaceAll("_", " ")}: ${value.assessment || "compared"}${value.difference !== null && value.difference !== undefined ? ` · difference ${value.difference}` : ""}`; comparison.append(p); });
   if (!comparison.children.length) comparison.textContent = draft.un_data?.length ? "UN reference returned; no metric comparison was produced." : "No UN comparison available.";
   $(`[data-draft-editor]`, review).value = JSON.stringify(finding, null, 2);
+  loadDraftActions(draft.id);
   const editable = draft.status === "pending_review";
   const referenceOnly = ["existing_record", "suppressed_source"].includes(draft.status);
   $$(`[data-draft-approve], [data-draft-save], [data-draft-reject]`, review).forEach((button) => { button.hidden = !editable; });
@@ -476,6 +528,23 @@ function renderDraft(draft) {
 }
 
 function escapeHtml(value) { const node = document.createElement("span"); node.textContent = value; return node.innerHTML; }
+
+async function loadDraftActions(draftId) {
+  const box = $(`[data-draft-actions]`);
+  if (!box) return;
+  box.replaceChildren();
+  try {
+    const payload = await api.request(`/api/v1/analysis/drafts/${encodeURIComponent(draftId)}/actions`);
+    (payload.items || []).forEach((item) => {
+      const event = document.createElement("p");
+      event.textContent = `${item.acted_at || ""} · ${String(item.action || "action").replaceAll("_", " ")}${item.note ? ` · ${item.note}` : ""}`;
+      box.append(event);
+    });
+    if (!box.children.length) box.textContent = "No draft actions recorded.";
+  } catch (error) {
+    box.textContent = `Draft action history unavailable: ${error.message}`;
+  }
+}
 
 async function draftAction(action, body) {
   const review = $(`[data-analysis-review]`);
@@ -490,7 +559,8 @@ async function draftAction(action, body) {
       if (!rerunId) throw new Error("Rerun did not return a job identifier.");
       await api.pollJob(`/api/v1/analysis/jobs/${rerunId}`, { onUpdate: (current) => {
         updateAnalysisProgress(current.progress?.stage, current.progress?.fetch_status);
-        setState(state, current.status === "failed" ? "failed" : current.status === "complete" ? "completed" : "running", current.progress?.stage ? `Analysis stage: ${current.progress.stage}.` : `Job status: ${current.status}.`);
+        updateAnalysisLog(current.progress, current.error);
+        setState(state, current.status === "failed" ? "failed" : current.status === "complete" ? "completed" : "running", current.status === "failed" ? (current.error || "Analysis failed.") : current.progress?.stage ? `Analysis stage: ${current.progress.stage}.` : `Job status: ${current.status}.`);
         if (current.status === "complete") renderDraft(current.draft || draftFromResult(current));
       }});
       setState(state, "completed", "Rerun complete; review the new draft.");
@@ -499,6 +569,8 @@ async function draftAction(action, body) {
     if (payload?.id) renderDraft(payload);
     setState(state, "completed", action === "approve" ? "Approved and stored." : `${action[0].toUpperCase()}${action.slice(1)} complete.`);
     if (["remove", "suppress", "reject"].includes(action)) renderDraft(payload);
+    if (["approve", "remove", "suppress"].includes(action)) await loadGraphs({ force: true });
+    await loadDraftActions(draftId);
   } catch (error) { setState(state, "failed", error.message); showGlobalError(error); }
 }
 
@@ -525,7 +597,20 @@ function safeSourceLink(url, label = "Open source ↗") {
   } catch { return document.createTextNode("No safe source URL"); }
 }
 
-function findingMetrics(item) { return (Array.isArray(item?.Metrics) ? item.Metrics : []).map((metric) => findingMetricLabels[metric] || metric.replaceAll("_", " ")).join(", ") || "—"; }
+const findingMetricFields = {
+  population: "Population", births: "Births", deaths: "Deaths",
+  natural_change: "Natural change", net_migration: "Net migration", total_fertility_rate: "TFR",
+};
+
+function findingMetricValues(item) {
+  return (Array.isArray(item?.Metrics) ? item.Metrics : []).map((metric) => {
+    const label = findingMetricFields[metric] || findingMetricLabels[metric] || metric.replaceAll("_", " ");
+    const metricValues = item?.["Metric values"] || {};
+    const value = metricValues[metric] ?? metricValues[metric === "net_migration" ? "net_overseas_migration" : metric]
+      ?? item[metric === "total_fertility_rate" ? "TFR" : (metric === "net_migration" ? "Net migration" : findingMetricFields[metric])];
+    return `${label}: ${value === null || value === undefined || value === "" ? "value not returned" : value}`;
+  }).join("; ") || "—";
+}
 
 async function loadFindings() {
   const body = $(`[data-findings-body]`); if (!body) return;
@@ -533,7 +618,7 @@ async function loadFindings() {
     const query = new URLSearchParams(); const iso3 = $(`[data-findings-country]`)?.value; const metric = $(`[data-findings-metric]`)?.value;
     if (iso3) query.set("iso3", iso3); if (metric) query.set("metric", metric);
     const payload = await api.request(`/api/v1/findings${query.toString() ? `?${query}` : ""}`); body.replaceChildren();
-    (payload.items || []).forEach((item) => { const row = document.createElement("tr"); row.tabIndex = 0; row.innerHTML = `<td>${escapeHtml(String(item.ID))}</td><th>${escapeHtml(item.Country || item.ISO3 || "—")} <small>${escapeHtml(item.ISO3 || "")}</small></th><td>${escapeHtml(item["Effective date"] || "—")}</td><td>${escapeHtml(findingMetrics(item))}</td><td>${escapeHtml(item["Source classification"] || "—")}</td><td>${escapeHtml(item.Source || item["Quoted source"] || "—")}</td><td class="source-cell"></td>`; row.lastElementChild.append(safeSourceLink(item["Webpage URL"])); row.addEventListener("click", () => loadRecord(item.ID)); row.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); loadRecord(item.ID); } }); body.append(row); });
+    (payload.items || []).forEach((item) => { const row = document.createElement("tr"); row.tabIndex = 0; row.innerHTML = `<td>${escapeHtml(String(item.ID))}</td><th>${escapeHtml(item.Country || item.ISO3 || "—")} <small>${escapeHtml(item.ISO3 || "")}</small></th><td>${escapeHtml(item["Effective date"] || "—")}</td><td>${escapeHtml(findingMetricValues(item))}</td><td>${escapeHtml(item["Source classification"] || "—")}</td><td>${escapeHtml(item.Source || item["Quoted source"] || "—")}</td><td class="source-cell"></td>`; row.lastElementChild.append(safeSourceLink(item["Webpage URL"])); row.addEventListener("click", () => loadRecord(item.ID)); row.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); loadRecord(item.ID); } }); body.append(row); });
     if (!body.children.length) body.innerHTML = '<tr><td colspan="7" class="empty-cell">No findings match the current filters.</td></tr>';
     $(`[data-findings-status]`).textContent = `${(payload.items || []).length} finding${(payload.items || []).length === 1 ? "" : "s"} returned.`;
   } catch (error) { body.innerHTML = `<tr><td colspan="7">${escapeHtml(error.message)}</td></tr>`; showGlobalError(error); }
@@ -541,17 +626,97 @@ async function loadFindings() {
 
 async function loadCoverage() {
   const body = $(`[data-coverage-body]`); if (!body) return;
-  try { const iso3 = $(`[data-findings-country]`)?.value; const payload = await api.request(`/api/v1/admin/findings/coverage${iso3 ? `?iso3=${encodeURIComponent(iso3)}` : ""}`); body.replaceChildren(); (payload.items || []).forEach((item) => { const row = document.createElement("tr"); row.innerHTML = `<th>${escapeHtml(item.country)} <small>${escapeHtml(item.iso3)}</small></th><td>${item.findings || 0}</td><td>${item.population || 0}</td><td>${item.births || 0}</td><td>${item.deaths || 0}</td><td>${item.natural_change || 0}</td><td>${item.net_migration || 0}</td><td>${item.total_fertility_rate || 0}</td>`; body.append(row); }); if (!body.children.length) body.innerHTML = '<tr><td colspan="8" class="empty-cell">No coverage data.</td></tr>'; } catch (error) { body.innerHTML = `<tr><td colspan="8">${escapeHtml(error.message)}</td></tr>`; showGlobalError(error); }
+  try { const iso3 = $(`[data-coverage-country]`)?.value; const payload = await api.request(`/api/v1/admin/findings/coverage${iso3 ? `?iso3=${encodeURIComponent(iso3)}` : ""}`); body.replaceChildren(); (payload.items || []).forEach((item) => { const row = document.createElement("tr"); row.innerHTML = `<th>${escapeHtml(item.country)} <small>${escapeHtml(item.iso3)}</small></th><td>${item.findings || 0}</td><td>${item.population || 0}</td><td>${item.births || 0}</td><td>${item.deaths || 0}</td><td>${item.natural_change || 0}</td><td>${item.net_migration || 0}</td><td>${item.total_fertility_rate || 0}</td>`; body.append(row); }); if (!body.children.length) body.innerHTML = '<tr><td colspan="8" class="empty-cell">No coverage data.</td></tr>'; } catch (error) { body.innerHTML = `<tr><td colspan="8">${escapeHtml(error.message)}</td></tr>`; showGlobalError(error); }
+}
+
+function renderPersistedComparison(container, finding) {
+  container.replaceChildren();
+  const comparison = finding?.comparison || finding?.wpp_comparison;
+  if (!comparison || typeof comparison !== "object" || !Object.keys(comparison).length) {
+    container.textContent = "No persisted WPP comparison on this finding.";
+    return;
+  }
+  const heading = document.createElement("p");
+  heading.textContent = "Persisted WPP comparison";
+  container.append(heading);
+  Object.entries(comparison).forEach(([metric, value]) => {
+    const line = document.createElement("p");
+    line.textContent = `${metric.replaceAll("_", " ")}: ${typeof value === "object" ? JSON.stringify(value) : value}`;
+    container.append(line);
+  });
+}
+
+async function loadFindingActions(findingId) {
+  const box = $(`[data-record-actions]`);
+  if (!box) return;
+  box.replaceChildren();
+  try {
+    const payload = await api.request(`/api/v1/admin/finding-actions?finding_id=${encodeURIComponent(findingId)}`);
+    (payload.items || []).forEach((item) => {
+      const event = document.createElement("p");
+      event.textContent = `${item.acted_at || ""} · ${String(item.action || "action").replaceAll("_", " ")}${item.note ? ` · ${item.note}` : ""}`;
+      box.append(event);
+    });
+    if (!box.children.length) box.textContent = "No finding actions recorded.";
+  } catch (error) {
+    box.textContent = `Finding action history unavailable: ${error.message}`;
+  }
 }
 
 async function loadRecord(findingId) {
   const editor = $(`[data-record-editor]`); const state = $(`[data-record-state]`); setState(state, "loading", `Loading finding #${findingId}…`);
-  try { const finding = await api.request(`/api/v1/admin/findings/${encodeURIComponent(findingId)}`); editor.hidden = false; editor.dataset.findingId = String(findingId); $(`[data-record-title]`, editor).textContent = `Finding #${findingId} · ${finding.source_classification || finding.source || "stored record"}`; $(`[data-record-json]`, editor).value = JSON.stringify(finding, null, 2); const source = $(`[data-record-source]`, editor); source.replaceChildren(); source.append(safeSourceLink(finding.url), document.createTextNode(` · ${finding.url || ""}`)); setState(state, "completed", "Record loaded. Review JSON before saving."); } catch (error) { setState(state, "failed", error.message); showGlobalError(error); }
+  try {
+    const finding = await api.request(`/api/v1/admin/findings/${encodeURIComponent(findingId)}`);
+    editor.hidden = false; editor.dataset.findingId = String(findingId);
+    $(`[data-record-title]`, editor).textContent = `Finding #${findingId} · ${finding.source_classification || finding.source || "stored record"}`;
+    $(`[data-record-json]`, editor).value = JSON.stringify(finding, null, 2);
+    const source = $(`[data-record-source]`, editor); source.replaceChildren();
+    source.append(safeSourceLink(finding.url), document.createTextNode(` · ${finding.url || "No source URL"}`));
+    const metrics = $(`[data-record-metrics]`, editor); metrics.replaceChildren();
+    Object.entries(finding.statistics || {}).forEach(([metric, value]) => {
+      if (!value || value.value === null || value.value === undefined) return;
+      const line = document.createElement("p");
+      line.textContent = `${findingMetricLabels[metric] || metric.replaceAll("_", " ")}: ${value.value}${value.unit ? ` ${value.unit}` : ""}${value.measured_period || value.time_period ? ` · ${value.measured_period || value.time_period}` : ""}`;
+      metrics.append(line);
+    });
+    if (!metrics.children.length) metrics.textContent = "No numeric metrics stored.";
+    renderPersistedComparison($(`[data-record-comparison]`, editor), finding);
+    setState(state, "completed", "Record loaded. Review JSON before saving.");
+    await loadFindingActions(findingId);
+  } catch (error) { setState(state, "failed", error.message); showGlobalError(error); }
 }
 
 async function recordMutation(action) {
-  const editor = $(`[data-record-editor]`); const findingId = editor?.dataset.findingId; const state = $(`[data-record-state]`); if (!findingId) { setState(state, "failed", "Choose a finding first."); return; } setState(state, "running", `${action}…`);
-  try { let path = `/api/v1/admin/findings/${findingId}`; let method = "PUT"; let body = { finding: JSON.parse($(`[data-record-json]`, editor).value) }; if (action === "delete") { method = "DELETE"; body = undefined; } if (action === "block") { path += "/delete-and-block"; method = "POST"; body = undefined; } if (action === "rerun") { path += "/rerun"; method = "POST"; body = undefined; } if (action === "delete-metric") { path += "/delete-metric"; method = "POST"; body = { metric: $(`[data-record-metric]`).value }; } const result = await api.request(path, { method, body }); setState(state, "completed", result.status ? `${action} complete: ${String(result.status).replaceAll("_", " ")}.` : `${action} complete.`); if (["delete", "block", "rerun", "delete-metric"].includes(action)) { editor.hidden = action === "delete-metric" ? false : true; await Promise.all([loadFindings(), loadCoverage(), loadBlockedSources(), loadGraphs({ force: true })]); } if (action === "save" || action === "delete-metric") { await loadRecord(findingId); if (action === "save") await loadGraphs({ force: true }); } } catch (error) { setState(state, "failed", error.message); showGlobalError(error); }
+  const editor = $(`[data-record-editor]`); const findingId = editor?.dataset.findingId; const state = $(`[data-record-state]`);
+  if (!findingId) { setState(state, "failed", "Choose a finding first."); return; }
+  if (editor.dataset.mutationBusy === "true") return;
+  let finding = {};
+  try { finding = JSON.parse($(`[data-record-json]`, editor).value); } catch { /* the save path reports malformed JSON below */ }
+  if (["delete", "block", "rerun", "delete-metric"].includes(action)) {
+    const metric = $(`[data-record-metric]`)?.value;
+    if (action === "delete-metric" && !metric) { setState(state, "failed", "Choose a metric first."); return; }
+    const url = finding.url || finding.canonical_url || "No canonical URL available";
+    const description = action === "delete-metric" ? `delete metric “${metric}” from` : action === "block" ? "delete and block" : action === "rerun" ? "remove and allow rerun for" : "delete";
+    if (!window.confirm(`Confirm: ${description} finding #${findingId}?\nSource: ${url}`)) return;
+  }
+  editor.dataset.mutationBusy = "true";
+  $$(`[data-record-action]`, editor).forEach((button) => { button.disabled = true; });
+  setState(state, "running", `${action}…`);
+  try {
+    let path = `/api/v1/admin/findings/${findingId}`; let method = "PUT"; let body = { finding };
+    if (action === "delete") { method = "DELETE"; body = undefined; }
+    if (action === "block") { path += "/delete-and-block"; method = "POST"; body = undefined; }
+    if (action === "rerun") { path += "/rerun"; method = "POST"; body = undefined; }
+    if (action === "delete-metric") { path += "/delete-metric"; method = "POST"; body = { metric: $(`[data-record-metric]`).value }; }
+    const result = await api.request(path, { method, body });
+    setState(state, "completed", result.status ? `${action} complete: ${String(result.status).replaceAll("_", " ")}.` : `${action} complete.`);
+    if (["delete", "block", "rerun", "delete-metric"].includes(action)) {
+      editor.hidden = action === "delete-metric" ? false : true;
+      await Promise.all([loadFindings(), loadCoverage(), loadBlockedSources(), loadGraphs({ force: true })]);
+    }
+    if (action === "save" || action === "delete-metric") { await loadRecord(findingId); if (action === "save") await loadGraphs({ force: true }); }
+  } catch (error) { setState(state, "failed", error.message); showGlobalError(error); }
+  finally { editor.dataset.mutationBusy = "false"; $$(`[data-record-action]`, editor).forEach((button) => { button.disabled = false; }); }
 }
 
 async function loadBlockedSources() { const body = $(`[data-blocked-body]`); if (!body) return; try { const payload = await api.request("/api/v1/admin/blocked-sources"); body.replaceChildren(); (payload.items || []).forEach((item) => { const row = document.createElement("tr"); row.innerHTML = `<td class="source-cell"></td><td>${escapeHtml(item.blocked_at || "—")}</td><td><button class="quiet-button" type="button">Unblock</button></td>`; row.firstElementChild.append(safeSourceLink(item.canonical_url, item.canonical_url)); row.lastElementChild.firstElementChild.addEventListener("click", async () => { try { await api.request("/api/v1/admin/blocked-sources/unblock", { method: "POST", body: { url: item.canonical_url } }); await loadBlockedSources(); } catch (error) { showGlobalError(error); } }); body.append(row); }); if (!body.children.length) body.innerHTML = '<tr><td colspan="3" class="empty-cell">No blocked source URLs.</td></tr>'; } catch (error) { body.innerHTML = `<tr><td colspan="3">${escapeHtml(error.message)}</td></tr>`; showGlobalError(error); } }
@@ -562,6 +727,16 @@ async function loadSourceRuleHistory(ruleId) { try { const payload = await api.r
 
 async function saveSourceRule(form) { try { const body = Object.fromEntries(new FormData(form)); body.enabled = true; if (body.action === "exclude") body.classification = null; await api.request("/api/v1/admin/source-rules", { method: "POST", body }); form.reset(); await loadSourceRules(); } catch (error) { showGlobalError(error); } }
 
+async function refreshAllPanels() {
+  const notice = $(`[data-global-error]`); if (notice) notice.hidden = true;
+  const tasks = [checkHealth(), loadCountries(), loadResearchSettings(), loadCountryQueue(), loadRunHistory(), loadFindings(), loadCoverage(), loadBlockedSources(), loadSourceRules()];
+  if ($(`[data-graph-country]`)?.value) tasks.push(loadGraphs({ force: true }));
+  const results = await Promise.allSettled(tasks);
+  if (results.some((result) => result.status === "rejected")) {
+    showGlobalError(new Error("One or more panels could not be refreshed. Review the panel-level status messages."));
+  }
+}
+
 function selectView(view) {
   const name = view || "overview";
   $$(`[data-view-panel]`).forEach((panel) => { const active = panel.dataset.viewPanel === name; panel.hidden = !active; panel.classList.toggle("active-view", active); });
@@ -570,9 +745,16 @@ function selectView(view) {
   title.textContent = $(`[data-view="${name}"]`)?.textContent || "Overview";
 }
 
+function selectViewFromLocation() {
+  const requested = window.location.hash.replace(/^#/, "");
+  const known = requested && $(`[data-view-panel="${requested}"]`) ? requested : "overview";
+  selectView(known);
+}
+
 function wire() {
   if (fixtureMode) { const badge = $(`[data-mode-badge]`); badge.hidden = false; $("[data-mode-label]").textContent = "Fixtures"; }
   $$(`[data-view]`).forEach((link) => link.addEventListener("click", () => selectView(link.dataset.view)));
+  window.addEventListener("hashchange", selectViewFromLocation);
   $$(`[data-country-control]`).forEach((select) => select.addEventListener("change", () => updateSelected(select)));
   $$(`[data-graph-metric], [data-graph-revision]`).forEach((input) => input.addEventListener("change", () => loadGraphs({ force: true })));
   $(`[data-load-graphs]`)?.addEventListener("click", () => loadGraphs({ force: true }));
@@ -594,7 +776,8 @@ function wire() {
   $(`[data-refresh-runs]`)?.addEventListener("click", loadRunHistory);
   $(`[data-refresh-findings]`)?.addEventListener("click", loadFindings);
   $(`[data-refresh-coverage]`)?.addEventListener("click", loadCoverage);
-  $(`[data-findings-country]`)?.addEventListener("change", () => { loadFindings(); loadCoverage(); });
+  $(`[data-findings-country]`)?.addEventListener("change", loadFindings);
+  $(`[data-coverage-country]`)?.addEventListener("change", loadCoverage);
   $(`[data-findings-metric]`)?.addEventListener("change", loadFindings);
   $(`[data-record-save]`)?.addEventListener("click", () => recordMutation("save"));
   $(`[data-record-delete]`)?.addEventListener("click", () => recordMutation("delete"));
@@ -604,10 +787,11 @@ function wire() {
   $(`[data-refresh-blocked]`)?.addEventListener("click", loadBlockedSources);
   $(`[data-refresh-source-rules]`)?.addEventListener("click", loadSourceRules);
   $(`[data-source-rule-form]`)?.addEventListener("submit", (event) => { event.preventDefault(); saveSourceRule(event.currentTarget); });
-  $(`[data-refresh]`)?.addEventListener("click", () => { $("[data-global-error]").hidden = true; checkHealth(); loadCountries(); });
+  $(`[data-refresh]`)?.addEventListener("click", refreshAllPanels);
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
   wire();
+  selectViewFromLocation();
   await Promise.all([checkHealth(), loadCountries(), loadResearchSettings(), loadCountryQueue(), loadRunHistory(), loadFindings(), loadCoverage(), loadBlockedSources(), loadSourceRules()]);
 });

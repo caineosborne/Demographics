@@ -33,9 +33,6 @@ class Step34ExtractionTests(unittest.TestCase):
                                         for name in result.statistics.__class__.model_fields))
                 else:
                     self.assertNotEqual(validation["status"], "validated")
-                    self.assertTrue(all(getattr(result.statistics, name).value is None
-                                        for name in result.statistics.__class__.model_fields
-                                        if getattr(result.statistics, name) is not None))
 
     def test_ambiguous_missing_evidence_is_reviewable(self):
         finding = self.examples[-1]["finding"].copy()
@@ -44,6 +41,20 @@ class Step34ExtractionTests(unittest.TestCase):
         validation = validate_extracted_result(result)
         self.assertEqual(validation["status"], "needs_review")
         self.assertEqual(result.statistics.population.value, 124600000)
+
+    def test_source_value_is_used_when_provider_leaves_normalized_value_empty(self):
+        finding = self.examples[-1]["finding"].copy()
+        finding["statistics"] = {"population": {
+            "value": None, "source_value": 5324700,
+            "evidence_excerpt": "The estimated resident population was 5,324,700 in August 2025.",
+            "metric_type": "resident population", "unit": "people",
+            "observation_status": "provisional", "national_scope_status": "national",
+            "measured_period": "August 2025",
+        }}
+        result = RelevantResult.model_validate(finding)
+        validation = validate_extracted_result(result)
+        self.assertEqual(validation["status"], "validated")
+        self.assertEqual(result.statistics.population.value, 5324700)
 
     def test_metric_type_must_match_the_statistics_field(self):
         finding = self.examples[-1]["finding"].copy()
@@ -88,6 +99,40 @@ class Step34ExtractionTests(unittest.TestCase):
                 validation = validate_extracted_result(result)
                 self.assertEqual(validation["status"], "rejected")
                 self.assertIsNone(result.statistics.population.value)
+
+    def test_population_disease_patient_and_generic_immigrant_claims_are_rejected(self):
+        phrases = (
+            "5 million people living with diabetes in Japan in 2023.",
+            "5 million cancer patients in Japan in 2023.",
+            "5 million immigrant population lived in Japan in 2023.",
+            "5 million immigrants lived in Japan in 2023.",
+        )
+        for evidence in phrases:
+            with self.subTest(evidence=evidence):
+                finding = self.examples[-1]["finding"].copy()
+                finding["statistics"] = {"population": {
+                    "value": 5000000, "evidence_excerpt": evidence,
+                    "metric_type": "population", "unit": "people",
+                    "observation_status": "observed",
+                    "national_scope_status": "national", "measured_period": "2023",
+                }}
+                result = RelevantResult.model_validate(finding)
+                validation = validate_extracted_result(result)
+                self.assertEqual(validation["status"], "rejected")
+                self.assertIsNone(result.statistics.population.value)
+
+    def test_population_total_is_not_rejected_for_a_separate_subgroup_mention(self):
+        finding = self.examples[-1]["finding"].copy()
+        finding["statistics"] = {"population": {
+            "value": 125000000,
+            "evidence_excerpt": "Japan's total population was 125 million, including 5 million immigrants in 2023.",
+            "metric_type": "population", "unit": "people",
+            "observation_status": "observed",
+            "national_scope_status": "national", "measured_period": "2023",
+        }}
+        result = RelevantResult.model_validate(finding)
+        self.assertEqual(validate_extracted_result(result)["status"], "validated")
+        self.assertEqual(result.statistics.population.value, 125000000)
 
     def test_negative_extraction_is_not_sent_to_storage(self):
         negative = self.examples[0]["finding"]

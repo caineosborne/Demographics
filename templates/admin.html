@@ -114,15 +114,19 @@
           <article class="card analysis-intake">
             <form data-analysis-form>
               <label class="field">Source URL <input name="url" type="url" inputmode="url" placeholder="https://example.org/release" pattern="https?://.+" required aria-describedby="analysis-url-help" /></label>
-              <p id="analysis-url-help" class="help">Enter exactly one complete HTTP(S) URL. The page is fetched as-is; the system will not infer a link from notes or prose.</p>
-              <label class="field">Country context <select name="country_iso3" data-country-control><option value="">No country context</option></select></label>
+              <p id="analysis-url-help" class="help">Enter exactly one complete HTTP(S) URL. The page is fetched as-is; the country and ISO3 code are derived from the extracted evidence.</p>
               <label class="check-field"><input name="compare" type="checkbox" checked /> Compare with WPP data</label>
+              <label class="check-field"><input name="review_before_store" type="checkbox" /> Review/edit before storing</label>
               <button class="primary-button" type="submit" data-analysis-submit>Fetch and analyse</button>
             </form>
             <div class="job-state" data-analysis-state data-state="empty" role="status" aria-live="polite"><span class="state-pill">Empty</span><span data-state-message>Submit a URL to begin.</span></div>
             <ol class="analysis-progress" data-analysis-progress aria-label="Analysis progress">
               <li data-stage="fetching">Fetch source</li><li data-stage="extracting">Extract evidence</li><li data-stage="comparing">Compare with WPP</li><li data-stage="complete">Ready for review</li>
             </ol>
+            <div class="analysis-log" data-analysis-log aria-live="polite">
+              <div class="card-heading"><div><p class="kicker">Run diagnostics</p><h3>Analysis log</h3></div><span class="route-label" data-analysis-log-status>waiting</span></div>
+              <ol data-analysis-log-list><li class="log-empty">No activity yet.</li></ol>
+            </div>
           </article>
           <article class="card analysis-review" data-analysis-review hidden>
             <div class="card-heading"><div><p class="kicker">Evidence trail</p><h3>Review this draft</h3></div><span class="route-label" data-draft-status>pending review</span></div>
@@ -133,6 +137,7 @@
             <p class="help">Edits are versioned. Approval stores the edited draft; reject closes it without storing a finding.</p>
             <div class="review-actions"><button class="primary-button" type="button" data-draft-approve>Approve and store</button><button class="quiet-button" type="button" data-draft-save>Save edits</button><button class="quiet-button" type="button" data-draft-rerun>Rerun</button><button class="quiet-button danger-button" type="button" data-draft-reject>Reject</button><button class="quiet-button danger-button" type="button" data-draft-remove>Remove</button><button class="quiet-button danger-button" type="button" data-draft-suppress>Suppress source</button></div>
             <div class="inline-state" data-draft-action-state data-state="empty"><span class="state-pill">Empty</span><span data-state-message>No review action taken.</span></div>
+            <div class="timeline" data-draft-actions aria-live="polite"><p class="help">Draft actions appear after a draft is loaded.</p></div>
           </article>
         </section>
 
@@ -151,7 +156,7 @@
           <article class="card country-hunt-card">
             <div class="card-heading"><div><p class="kicker">Direct country search</p><h3>Search one country now</h3></div><span class="route-label">POST /api/v1/research/country-hunts</span></div>
             <p class="help">Direct hunts always bypass automatic recency and eligibility gates. They use deterministic UN lookup only; no LLM comparison agent is run.</p>
-            <form data-country-hunt-form><label class="field">Country <select name="country_iso3" data-country-control><option value="">Choose a country</option></select></label><label class="field">Candidate limit <input name="max_results" type="number" min="1" max="20" value="12" /></label><button class="primary-button" type="submit">Search country</button></form>
+            <form data-country-hunt-form><label class="field">Country <select name="country_iso3" data-country-control data-country-hunt-country required><option value="">Choose a country</option></select></label><label class="field">Candidate limit <input name="max_results" type="number" min="1" max="20" value="12" /></label><button class="primary-button" type="submit">Search country</button></form>
             <div class="job-state" data-country-hunt-state data-state="empty"><span class="state-pill">Empty</span><span data-state-message>No country hunt is active.</span></div>
           </article>
           <article class="card bulk-hunt-card">
@@ -165,9 +170,10 @@
         </section>
 
         <section id="coverage" class="view" data-view-panel="coverage" hidden>
-          <div class="section-intro"><p class="kicker">Record health</p><h2>Country coverage</h2><p>Counts show stored findings containing a non-zero value. Every row comes from the API, with the selected country filter applied server-side.</p></div>
+          <div class="section-intro"><p class="kicker">Record health</p><h2>Country coverage</h2><p>Counts show stored findings containing a non-null value. Use the coverage selector to inspect one country, or leave it on all countries.</p></div>
           <article class="card findings-card">
             <div class="card-heading"><div><p class="kicker">Coverage summary</p><h3>Countries and metrics</h3></div><button class="quiet-button" type="button" data-refresh-coverage>Refresh</button></div>
+            <label class="field">Country <select data-coverage-country data-country-control><option value="">All countries</option></select></label>
             <div class="table-wrap"><table class="audit-table"><thead><tr><th>Country</th><th>Findings</th><th>Population</th><th>Births</th><th>Deaths</th><th>Natural change</th><th>Migration</th><th>TFR</th></tr></thead><tbody data-coverage-body><tr><td colspan="8">Loading coverage…</td></tr></tbody></table></div>
           </article>
         </section>
@@ -177,15 +183,18 @@
           <article class="card findings-card">
             <div class="card-heading"><div><p class="kicker">Stored record</p><h3>Finding table</h3></div><button class="quiet-button" type="button" data-refresh-findings>Refresh</button></div>
             <div class="filter-grid"><label class="field">Country <select data-findings-country data-country-control><option value="">All countries</option></select></label><label class="field">Metric <select data-findings-metric><option value="">Any metric</option><option value="population">Population</option><option value="births">Births</option><option value="deaths">Deaths</option><option value="natural_change">Natural change</option><option value="net_migration">Net migration</option><option value="total_fertility_rate">Total fertility rate</option></select></label></div>
-            <div class="table-wrap"><table class="audit-table findings-table"><thead><tr><th>ID</th><th>Country</th><th>Effective</th><th>Metrics</th><th>Source class</th><th>Source</th><th>URL</th></tr></thead><tbody data-findings-body><tr><td colspan="7">Loading findings…</td></tr></tbody></table></div>
+            <div class="table-wrap"><table class="audit-table findings-table"><thead><tr><th>ID</th><th>Country</th><th>Effective</th><th>Metrics &amp; values</th><th>Source class</th><th>Source</th><th>URL</th></tr></thead><tbody data-findings-body><tr><td colspan="7">Loading findings…</td></tr></tbody></table></div>
             <div class="coverage-note" data-findings-status role="status">Choose a row to load its complete record.</div>
           </article>
           <article class="card record-editor" data-record-editor hidden>
             <div class="card-heading"><div><p class="kicker">Record picker</p><h3 data-record-title>Finding</h3></div><span class="route-label">GET / PUT /api/v1/admin/findings/{id}</span></div>
             <div class="safe-source" data-record-source></div>
+            <div class="record-metrics" data-record-metrics></div>
+            <div class="comparison-list" data-record-comparison></div>
             <label class="field">Editable finding JSON <textarea data-record-json rows="18" spellcheck="false"></textarea></label>
-            <div class="review-actions"><button class="primary-button" type="button" data-record-save>Save record</button><button class="quiet-button" type="button" data-record-rerun>Remove and allow rerun</button><button class="quiet-button danger-button" type="button" data-record-delete>Delete record</button><button class="quiet-button danger-button" type="button" data-record-block>Delete and block source</button></div>
-            <div class="metric-actions"><label class="field">Metric to delete <select data-record-metric><option value="">Choose metric</option><option value="population">Population</option><option value="births">Births</option><option value="deaths">Deaths</option><option value="natural_change">Natural change</option><option value="net_migration">Net migration</option><option value="total_fertility_rate">Total fertility rate</option></select></label><button class="quiet-button danger-button" type="button" data-record-delete-metric>Delete metric</button></div>
+            <div class="review-actions"><button class="primary-button" type="button" data-record-save>Save record</button><button class="quiet-button" type="button" data-record-rerun data-record-action>Remove and allow rerun</button><button class="quiet-button danger-button" type="button" data-record-delete data-record-action>Delete record</button><button class="quiet-button danger-button" type="button" data-record-block data-record-action>Delete and block source</button></div>
+            <div class="metric-actions"><label class="field">Metric to delete <select data-record-metric><option value="">Choose metric</option><option value="population">Population</option><option value="births">Births</option><option value="deaths">Deaths</option><option value="natural_change">Natural change</option><option value="net_migration">Net migration</option><option value="total_fertility_rate">Total fertility rate</option></select></label><button class="quiet-button danger-button" type="button" data-record-delete-metric data-record-action>Delete metric</button></div>
+            <div class="timeline" data-record-actions aria-live="polite"><p class="help">No record selected.</p></div>
             <div class="inline-state" data-record-state data-state="empty"><span class="state-pill">Empty</span><span data-state-message>No record action taken.</span></div>
           </article>
           <article class="card source-rules-card">

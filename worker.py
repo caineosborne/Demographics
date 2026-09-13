@@ -74,7 +74,10 @@ def run_job(job_id: str) -> dict[str, Any]:
                 settings = SearchSettings.model_validate(job['payload']['settings']).model_dump()
             research_store.acquire_worker_lock('discovery', job_id, worker_owner)
             try:
-                messages = list(BossAgent().run(settings, owner_id=worker_owner))
+                messages = list(BossAgent().run(
+                    settings, owner_id=worker_owner,
+                    persist_settings=(job['kind'] != 'country_search'),
+                ))
                 if job['kind'] == 'country_search' and messages:
                     run_id = messages[-1][0]
                     research_store.mark_country_hunt_run(run_id, [context['iso3']])

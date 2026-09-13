@@ -38,9 +38,9 @@ const SOURCE_CLASS_MARKERS = Object.freeze({
   official_publisher: "diamond",
   secondary_attributed: "circle-open",
   secondary_unattributed: "cross",
-  // Legacy rows have no stronger provenance guarantee; retain them as the
-  // unattributed secondary shape while keeping their class label visible.
-  legacy_unreviewed: "cross",
+  // Legacy rows have no stronger provenance guarantee. The star is a neutral
+  // historical marker so they cannot be mistaken for reviewed evidence.
+  legacy_unreviewed: "star",
 });
 
 const WPP_REVISION_COLORS = Object.freeze({ 2022: "#6f4e9b", 2017: "#3a8d7d", 2012: "#8b6f47" });
@@ -69,8 +69,37 @@ export function findingMetricValue(finding, metric) {
   let value = number(statistic.value);
   if (value === null) return null;
   if (metric === "population") {
-    const text = `${finding?.title || ""} ${finding?.summary || ""}`.toLowerCase();
+    const text = `${finding?.title || ""} ${finding?.summary || ""} ${statistic.evidence_excerpt || ""}`.toLowerCase();
     if (/(?:increase|decrease|change|gain|loss)\s+(?:of|by)\s+(?:approximately\s+)?[\d,.]+\s*(?:million|m)/.test(text)) return null;
+    // Apply the subgroup guard to the clause containing the extracted number.
+    // A later clause such as “including 5 million immigrants” must not hide a
+    // valid national total from the earlier clause.
+    const normalizedValue = value < 10000 && /\bmillions?\b/.test(text) ? value * 1000000 : value;
+    const numeric = text.match(/(?<![\w])([+-]?\d[\d,]*(?:\.\d+)?)\s*(billion|bn|b|million|mn|m|thousand|k)?\b/gi) || [];
+    const target = numeric.find((token) => {
+      const raw = token.replace(/,/g, "").match(/([+-]?\d+(?:\.\d+)?)/);
+      if (!raw) return false;
+      const multiplier = /billion|bn|\bb\b/i.test(token) ? 1e9 : /million|mn|\bm\b/i.test(token) ? 1e6 : /thousand|\bk\b/i.test(token) ? 1e3 : 1;
+      return Math.abs(Number(raw[1]) * multiplier - normalizedValue) <= Math.max(1e-6, Math.abs(normalizedValue) * 0.005);
+    });
+    if (target) {
+      const targetIndex = text.indexOf(target);
+      const sentenceStart = Math.max(text.lastIndexOf(".", targetIndex), text.lastIndexOf("!", targetIndex), text.lastIndexOf("?", targetIndex), text.lastIndexOf("\n", targetIndex)) + 1;
+      const sentenceEndCandidates = [".", "!", "?", "\n"].map((mark) => text.indexOf(mark, targetIndex + target.length)).filter((index) => index >= 0);
+      const sentence = text.slice(sentenceStart, sentenceEndCandidates.length ? Math.min(...sentenceEndCandidates) : text.length);
+      const offset = targetIndex - sentenceStart;
+      const splits = [...sentence.matchAll(/(?:(?:,(?!\d)|;(?!\d))|\bincluding\b|\bof\s+whom\b|\bamong\s+them\b)/gi)];
+      const before = splits.filter((split) => split.index < offset).at(-1);
+      const after = splits.find((split) => split.index >= offset);
+      const claim = sentence.slice(before ? before.index + before[0].length : 0, after ? after.index : sentence.length);
+      if (/(?:\bsubset\b|\bsubgroup\b|\bmigration\s+background\b|\bforeign[- ]born\b|\brefugee(?:s)?\b|\basylum\b|\bvisa\s+(?:holder|holders|application|applications|grant|grants)\b|\bimmigrant(?:s)?\s+from\b|\bimmigrant(?:s)?\b|\bmigrant(?:s)?\b|\b(?:people|persons|individuals|residents?)\s+(?:living\s+with|diagnosed\s+with|affected\s+by|suffering\s+from|with)\s+\w+|\b\w+\s+patients?\b|\bpatients?\s+with\b|\b(?:patient|disease|condition)\s+cohort(?:s)?\b|\b(?:people|persons|individuals)\s+with\s+\w+|\bpeople\s+from\b|\bby\s+(?:age|cause|sex|gender|religion|origin)\b|\bunder\s+\d+\b|\baged\s+\d+(?:\s+and\s+over)?\b|\bage\s+\d+\b|\b(?:citizenship|nationality|citizens?|non[- ]citizens?|foreign nationals?)\b)/i.test(claim)) return null;
+    } else if (/(?:\b(?:immigrant|migrant|foreign[- ]born|refugee|asylum|visa holder|patient|patients|disease|subgroup|subset)\b|\bpeople\s+(?:living\s+with|with)\b|\bresidents?\s+(?:living\s+with|with)\b)/i.test(text)
+               && !/\b(?:total|national|whole|entire)\s+population\b/i.test(text)) {
+      // Legacy rows may omit evidence excerpts. In that case only suppress a
+      // clearly subgroup-labelled record when there is no explicit total
+      // population qualifier to anchor it.
+      return null;
+    }
     if (value < 10000 && /\bmillions?\b/.test(text)) value *= 1000000;
   }
   return value;
@@ -135,6 +164,8 @@ function marker(svg, point, markerType, color, metric) {
     group.append(svgElement("path", { d: "M 0 -7 L 7 0 L 0 7 L -7 0 Z", fill: color, stroke: color, "stroke-width": 1.5 }));
   } else if (markerType === "circle-open") {
     group.append(svgElement("circle", { cx: 0, cy: 0, r: 6, fill: "#fcfdf9", stroke: color, "stroke-width": 2 }));
+  } else if (markerType === "star") {
+    group.append(svgElement("path", { d: "M 0 -8 L 2.2 -2.5 L 8 -2.5 L 3.2 1 L 5 7 L 0 3.5 L -5 7 L -3.2 1 L -8 -2.5 L -2.2 -2.5 Z", fill: color, stroke: color, "stroke-width": 1.25 }));
   } else {
     group.append(svgElement("path", { d: "M -6 -6 L 6 6 M 6 -6 L -6 6", stroke: color, "stroke-width": 2.25, "stroke-linecap": "round" }));
   }
@@ -149,6 +180,22 @@ function linePath(points) {
   return points.map((point, index) => `${index ? "L" : "M"}${point.px.toFixed(2)} ${point.py.toFixed(2)}`).join(" ");
 }
 
+function referencePoint(svg, point, label, color, metric) {
+  const year = point.row?.Year || "No year";
+  const value = formatValue(point.y, metric);
+  const group = svgElement("g", {
+    class: "graph-reference-point",
+    role: "img",
+    "aria-label": `${label} · ${year} · ${value}`,
+  });
+  const title = svgElement("title");
+  title.textContent = `${label} · ${year} · ${value}`;
+  group.append(title, svgElement("circle", {
+    cx: point.px, cy: point.py, r: 3, fill: color, opacity: 0.01,
+  }));
+  svg.append(group);
+}
+
 function text(svg, value, attributes) {
   const element = svgElement("text", attributes);
   element.textContent = value;
@@ -161,7 +208,7 @@ function addLegend(container) {
   legend.setAttribute("aria-label", "Graph provenance legend");
   [
     ["line solid", "WPP historic"], ["line dashed", "WPP forecast"], ["line dotted", "WPP alternate release"],
-    ["diamond official", "Official publisher"], ["circle-open attributed", "Secondary · named source"], ["cross unattributed", "Secondary · no named source"],
+    ["diamond official", "Official publisher"], ["circle-open attributed", "Secondary · named source"], ["cross unattributed", "Secondary · no named source"], ["star legacy", "Legacy · unreviewed"],
   ].forEach(([className, label]) => {
     const item = document.createElement("span"); item.className = "graph-legend-item";
     const swatch = document.createElement("i"); swatch.className = `graph-swatch ${className}`; swatch.setAttribute("aria-hidden", "true");
@@ -242,6 +289,7 @@ export function renderMetricGraph(container, payload, metric, { hiddenFindingIds
     const positioned = points.map((point) => ({ ...point, px: xPosition(point.x), py: yPosition(point.y) }));
     const path = svgElement("path", { d: linePath(positioned), class: "graph-series-line", fill: "none", stroke: color, "stroke-width": 2.25, "stroke-dasharray": dash });
     const pathTitle = svgElement("title"); pathTitle.textContent = label; path.append(pathTitle); svg.append(path);
+    positioned.forEach((point) => referencePoint(svg, point, label, color, metric));
   });
   findings.forEach((point) => { const positioned = { ...point, px: xPosition(point.x), py: yPosition(point.y) }; const className = SOURCE_CLASS_MARKERS[point.item.source_type] || "cross"; const color = SOURCE_CLASS_COLORS[point.item.source_type] || SOURCE_CLASS_COLORS.secondary_unattributed; const node = marker(svg, positioned, className, color, metric); node.addEventListener("click", () => onFindingSelect(point.id)); node.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onFindingSelect(point.id); } }); svg.append(node); });
   chart.append(svg); container.append(chart);

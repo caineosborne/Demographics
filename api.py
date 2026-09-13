@@ -251,6 +251,7 @@ class ManualAnalysisRequest(BaseModel):
     url: str
     country_iso3: str | None = None
     compare: bool = True
+    review_before_store: bool = False
 
     @field_validator('url')
     @classmethod
@@ -496,7 +497,8 @@ def create_app(
     def start_analysis(request: ManualAnalysisRequest,
                        idempotency_key: str | None = Header(default=None, alias='Idempotency-Key'),
                        _auth: AuthContext = Depends(auth_dependency)) -> JobStartResponse:
-        kwargs = {'country_iso3': request.country_iso3, 'compare': request.compare}
+        kwargs = {'country_iso3': request.country_iso3, 'compare': request.compare,
+                  'review_before_store': request.review_before_store}
         if idempotency_key:
             kwargs['idempotency_key'] = idempotency_key
         return JobStartResponse(**_admin_call(research_services.start_manual_analysis, request.url, **kwargs))

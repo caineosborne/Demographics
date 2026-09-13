@@ -184,11 +184,19 @@ _FUTURE_OR_SCENARIO = re.compile(
 _SUBSET_CONTEXT = re.compile(
     r"(?:\bsubset\b|\bsubgroup\b|\bmigration\s+background\b|\bforeign[- ]born\b|"
     r"\brefugee[s]?\b|\basylum\b|\bvisa\s+(?:holder|holders|application|applications|grant|grants)\b|\bimmigrant[s]?\s+from\b|"
+    r"\bimmigrant[s]?\b|\bmigrant[s]?\b|\b(?:people|persons|individuals|residents?)\s+(?:living\s+with|diagnosed\s+with|affected\s+by|suffering\s+from|with)\s+\w+|"
+    r"\b\w+\s+patients?\b|\bpatients?\s+with\b|\b(?:patient|disease|condition)\s+cohort[s]?\b|"
+    r"\b(?:people|persons|individuals)\s+with\s+\w+|"
     r"\bpeople\s+from\b|\bby\s+(?:age|cause|sex|gender|religion|origin)\b|"
     r"\bunder\s+\d+\b|\baged\s+\d+(?:\s+and\s+over)?\b|\bage\s+\d+\b|"
     r"\b(?:muslim|christian|hindu|buddhist|jewish|religious)\s+(?:population|people|residents?)\b|"
     r"\breligious\s+group\b|\b(?:citizenship|nationality|citizens?|non[- ]citizens?|foreign nationals?)\b|"
     r"\bhousehold[s]?\b|\bprogramme\b|\bprogram\b|\bpolicy\b)",
+    re.IGNORECASE,
+)
+_POPULATION_CLAUSE_SPLIT = re.compile(
+    # Do not split thousands separators such as ``124,600,000``.
+    r"(?:(?:,(?!\d)|;(?!\d))|\bincluding\b|\bof\s+whom\b|\bamong\s+them\b)",
     re.IGNORECASE,
 )
 _NUMBER_TOKEN = re.compile(
@@ -216,7 +224,51 @@ def _evidence_numbers(text: str) -> list[float]:
     return values
 
 
-def validate_extracted_result(result: "RelevantResult") -> dict[str, object]:
+def _population_claim_context(evidence: str, value: float) -> str:
+    """Return the clause that owns a population number.
+
+    Evidence excerpts often mention a valid national total and a subgroup in
+    the same sentence (for example, ``125 million total, including 5 million
+    immigrants``).  Scope checks must apply to the clause containing the
+    extracted number, not to every word in the article excerpt.
+    """
+    text = evidence or ""
+    matches = list(_NUMBER_TOKEN.finditer(text))
+    target = None
+    for match in matches:
+        raw = match.group(1).replace(",", "")
+        try:
+            number = float(raw)
+        except ValueError:
+            continue
+        multiplier = {
+            "b": 1_000_000_000, "bn": 1_000_000_000, "billion": 1_000_000_000,
+            "m": 1_000_000, "mn": 1_000_000, "million": 1_000_000,
+            "k": 1_000, "thousand": 1_000,
+        }.get((match.group(2) or "").casefold(), 1)
+        if abs(number * multiplier - float(value)) <= max(1e-6, abs(float(value)) * 0.005):
+            target = match
+            break
+    if target is None:
+        return text
+    sentence_start = max(text.rfind(mark, 0, target.start()) for mark in ".!?\n") + 1
+    sentence_end_candidates = [text.find(mark, target.end()) for mark in ".!?\n" if text.find(mark, target.end()) >= 0]
+    sentence_end = min(sentence_end_candidates) if sentence_end_candidates else len(text)
+    sentence = text[sentence_start:sentence_end]
+    offset = target.start() - sentence_start
+    clauses = list(_POPULATION_CLAUSE_SPLIT.finditer(sentence))
+    clause_start = 0
+    clause_end = len(sentence)
+    for split in clauses:
+        if split.start() < offset:
+            clause_start = split.end()
+        elif split.start() >= offset:
+            clause_end = split.start()
+            break
+    return sentence[clause_start:clause_end].strip()
+
+
+def validate_extracted_result(result: "RelevantResult", *, retain_rejected_metrics: bool = False) -> dict[str, object]:
     """Apply deterministic evidence/scope checks to fresh model extraction.
 
     Clearly unsupported claims are removed from metric fields and retained in
@@ -232,7 +284,15 @@ def validate_extracted_result(result: "RelevantResult") -> dict[str, object]:
     statistics = result.statistics
     for name, statistic in statistics.__class__.model_fields.items():
         metric = getattr(statistics, name, None)
-        if metric is None or metric.value is None:
+        if metric is None:
+            continue
+        # Some provider responses use ``source_value`` for the number printed
+        # by the article and leave the normalized ``value`` empty.  At this
+        # boundary those are equivalent until deterministic normalization
+        # needs to transform the number (for example annualisation).
+        if metric.value is None and metric.source_value is not None:
+            metric.value = metric.source_value
+        if metric.value is None:
             continue
         label = _METRIC_LABELS.get(name, name)
         evidence = (metric.evidence_excerpt or "").strip()
@@ -258,7 +318,7 @@ def validate_extracted_result(result: "RelevantResult") -> dict[str, object]:
         if canonical_metric_type not in _ALLOWED_METRIC_TYPES.get(name, set()):
             reasons.append(f"metric type {metric.metric_type!r} does not match {label}")
         if metric.observation_status.casefold() not in {
-                "observed", "reported", "actual", "historical", "estimate"}:
+                "observed", "reported", "actual", "historical", "estimate", "provisional"}:
             reasons.append(f"observation status is {metric.observation_status}")
         if metric.national_scope_status.casefold() not in {
                 "national", "whole_national", "national_total", "total_national", "country_total",
@@ -273,7 +333,19 @@ def validate_extracted_result(result: "RelevantResult") -> dict[str, object]:
         measured_year = re.search(r"\b(20\d{2})\b", metric.measured_period)
         if measured_year and int(measured_year.group(1)) > date.today().year:
             reasons.append("measured period is future-dated")
-        if _SUBSET_CONTEXT.search(context):
+        # For population, scope language belongs to the numeric claim's
+        # clause.  This allows a national total followed by a separate
+        # subgroup example in the same excerpt while still rejecting a number
+        # explicitly assigned to immigrants, patients, or a disease cohort.
+        scope_context = context
+        if name == "population":
+            claim_context = _population_claim_context(evidence, float(metric.value))
+            scope_context = " ".join((
+                claim_context, metric.metric_type or "", metric.unit or "",
+                metric.observation_status or "", metric.national_scope_status or "",
+                metric.measured_period or "",
+            ))
+        if _SUBSET_CONTEXT.search(scope_context):
             reasons.append("population subset or administrative category")
         if name in _COUNT_METRICS and _PERCENT_OR_RATE.search(context):
             reasons.append("percentage/rate cannot populate an absolute count")
@@ -299,7 +371,8 @@ def validate_extracted_result(result: "RelevantResult") -> dict[str, object]:
         if reasons:
             rejected.append(name)
             issues.extend({"metric": name, "level": "reject", "reason": reason} for reason in reasons)
-            metric.value = None
+            if not retain_rejected_metrics:
+                metric.value = None
     if issues:
         rendered = "; ".join(f"{item['metric']}: {item['reason']}" for item in issues)
         result.comments = ((result.comments + " ") if result.comments else "") + f"[validation] {rendered}"
@@ -401,12 +474,16 @@ llm = ChatOpenAI(
     max_retries=0,
 )
 web_llm = llm.bind_tools(WEB_TOOLS)
-research_llm = llm.with_structured_output(RelevantResult)
+# Use function calling rather than the newer provider-enforced JSON-schema
+# response format. OpenRouter's Gemini endpoint rejects the latter for this
+# deliberately detailed nested result, while function calling preserves the
+# schema-enforced RelevantResult parse used by the original workflow.
+research_llm = llm.with_structured_output(RelevantResult, method="function_calling")
 # A UN comparison is not valid without a database lookup. The model still
 # chooses the SQL tool and arguments, but it must make a tool call first.
 sql_llm = llm.bind_tools(SQL_TOOLS)
 sql_llm_required = llm.bind_tools(SQL_TOOLS, tool_choice="required")
-comparison_llm = llm.with_structured_output(ComparisonResult)
+comparison_llm = llm.with_structured_output(ComparisonResult, method="function_calling")
 
 
 def _effective_day(value: str | None) -> date | None:
@@ -627,7 +704,7 @@ def mark_partial_periods(result: RelevantResult) -> None:
 def has_useful_numeric_datapoint(finding: dict) -> bool:
     """Whether extraction contains evidence worth storing, comparable or not."""
     return any(
-        isinstance(metric, dict) and metric.get("value") is not None
+        isinstance(metric, dict) and (metric.get("value") is not None or metric.get("source_value") is not None)
         for metric in (finding.get("statistics") or {}).values()
     )
 
@@ -690,7 +767,8 @@ def extract_from_page_text(page_text: str, article_url: str, provenance: dict | 
                         f"({country_context['label']}); validate the article independently.")
     prompt = temporal_context() + f"""
 You are extracting one demographic result from retrieved, untrusted page text.{context_note}
-Extraction contract version: {EXTRACTION_RULE_VERSION}. Return a RelevantResult.
+Extraction contract version: {EXTRACTION_RULE_VERSION}. Return one JSON object
+matching the RelevantResult fields; do not wrap it in markdown or commentary.
 Use only facts in the page. Keep absolute observed national measurements in
 metric fields. Every non-null metric needs a short evidence_excerpt containing
 its number, metric_type, unit, observation_status, national_scope_status, and
@@ -708,7 +786,7 @@ Retrieved page text:
     if not isinstance(result, RelevantResult):
         result = RelevantResult.model_validate(result)
     result.url = article_url
-    validation = validate_extracted_result(result)
+    validation = validate_extracted_result(result, retain_rejected_metrics=True)
     result.extraction_prompt_version = EXTRACTION_PROMPT_VERSION
     result.extraction_rule_version = EXTRACTION_RULE_VERSION
     provenance.update({
@@ -717,6 +795,11 @@ Retrieved page text:
     })
     model_iso3 = str(result.geography_iso3 or '').strip().upper()
     model_geography = str(result.geography or '').strip()
+    if not model_iso3 and not model_geography:
+        # Some national publishers refer to New Zealand as Aotearoa without
+        # repeating the database country label in the extracted header.
+        if re.search(r"\b(?:Aotearoa|New Zealand)\b", page_text, re.IGNORECASE):
+            model_geography = "New Zealand"
     resolved_iso3 = resolve_country_iso3(model_iso3 or model_geography)
     result.geography_iso3 = resolved_iso3.upper() if resolved_iso3 else None
     if resolved_iso3:
@@ -1017,6 +1100,9 @@ def compare_to_un(state: State):
     if not country_iso3:
         country_iso3 = resolve_country_iso3(geography)
     effective_date = state["result"].effective_date
+    if not effective_date:
+        population = state["result"].statistics.population
+        effective_date = population.measured_period if population else None
     effective_day = _effective_day(effective_date)
     reported_year = effective_day.year if effective_day else None
     un_data = []
@@ -1059,7 +1145,9 @@ def compare_to_un(state: State):
     else:
         comparison = comparison_llm.invoke([
             SystemMessage(content=temporal_context() + """
-            Compare the research JSON to the UN database results. Population,
+            Return one JSON object matching the ComparisonResult fields; do not
+            wrap it in markdown or commentary. Compare the research JSON to the
+            UN database results. Population,
             births, deaths, natural change, and migration are in thousands of
             people, so convert them to people before comparing them to article
             values. Total fertility rate is live births per woman and must never

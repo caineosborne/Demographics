@@ -12,6 +12,33 @@ from research import BossAgent, ResearchSkills, ReviewDecision, SearchCategory, 
 
 
 class Step36ResearchControlsTests(unittest.TestCase):
+    def test_direct_and_bulk_hunts_do_not_replace_saved_automatic_settings(self):
+        saved = SearchSettings(
+            categories=[SearchCategory(name='Saved population', query='saved population')],
+            reddit_enabled=False, max_candidates=7,
+        ).model_dump()
+        for mode in ('direct', 'bulk'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory, patch.object(
+                tools, 'DB_PATH', Path(directory) / 'research.sqlite'
+            ):
+                research_store.save_settings(saved)
+                hunt_settings = SearchSettings(
+                    categories=[SearchCategory(
+                        name='Generated hunt', query='Japan demographics', country_iso3='JPN',
+                    )],
+                    reddit_enabled=False, country_hunt_mode=mode,
+                    country_hunt_iso3s=['JPN'], max_candidates=1,
+                ).model_dump()
+                list(BossAgent(providers={'tavily': lambda _category: []}).run(hunt_settings))
+                self.assertEqual(research_store.load_settings({}), saved)
+
+    def test_country_hunt_service_marks_generated_run_as_non_persisting(self):
+        with patch.object(research_services, '_country_context', return_value={'iso3': 'JPN', 'label': 'Japan'}), \
+             patch.object(research_services.research_store, 'upsert_country_hunt_queue'), \
+             patch.object(research_services, '_start_research', return_value={'run_id': 'run-1'}) as start:
+            research_services.start_country_hunt('jpn')
+        self.assertFalse(start.call_args.kwargs['persist_settings'])
+
     def test_country_queue_is_durable_and_tracks_attempt_fields(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(tools, 'DB_PATH', Path(directory) / 'research.sqlite'):
             research_store.upsert_country_hunt_queue([{'iso3': 'JPN', 'label': 'Japan'}], job_id='job-1')
@@ -31,6 +58,38 @@ class Step36ResearchControlsTests(unittest.TestCase):
         self.assertEqual(row['last_job_id'], 'job-2')
         self.assertEqual(row['outcome'], 'error')
         self.assertEqual(row['next_eligible_at'], '2026-10-14T00:00:00+00:00')
+
+    def test_recovering_orphaned_worker_interrupts_linked_country_queue(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            tools, 'DB_PATH', Path(directory) / 'research.sqlite'
+        ):
+            job = research_store.create_job('country_search', {'country_iso3': 'JPN'})
+            research_store.upsert_country_hunt_queue([{'iso3': 'JPN', 'label': 'Japan'}], job_id=job['id'])
+            owner = research_store.owner_id()
+            research_store.claim_job(job['id'], owner)
+            with tools.get_connection() as connection:
+                connection.execute(
+                    "UPDATE worker_jobs SET lease_expires_at = '2000-01-01T00:00:00+00:00' WHERE id = ?",
+                    (job['id'],),
+                )
+            self.assertEqual(research_store.recover_orphaned_worker_jobs(), 1)
+            row = research_store.list_country_hunt_queue()[0]
+        self.assertEqual(row['outcome'], 'interrupted')
+        self.assertIsNone(row['next_eligible_at'])
+        self.assertEqual(row['last_job_id'], job['id'])
+
+    def test_recovering_orphaned_run_interrupts_linked_country_queue(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            tools, 'DB_PATH', Path(directory) / 'research.sqlite'
+        ):
+            run_id = research_store.start_run({'country_hunt_mode': 'direct'})
+            research_store.upsert_country_hunt_queue([{'iso3': 'JPN', 'label': 'Japan'}])
+            research_store.mark_country_hunt_run(run_id, ['JPN'])
+            self.assertEqual(research_store.recover_orphaned_runs(), 1)
+            row = research_store.list_country_hunt_queue()[0]
+        self.assertEqual(row['outcome'], 'interrupted')
+        self.assertIsNone(row['next_eligible_at'])
+        self.assertEqual(row['last_run_id'], run_id)
 
     def test_direct_country_hunt_marks_mode_and_uses_iso3(self):
         with patch.object(research_services.tools, 'resolve_country_iso3', return_value='JPN'), \

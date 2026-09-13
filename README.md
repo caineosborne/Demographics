@@ -18,40 +18,25 @@ shows the current fetch method while the analysis runs.
 
 Run the regression checks with `uv run python -m unittest discover -s tests`.
 
-## FastAPI boundary
+## FastAPI application
 
-Start the Phase 2 API locally with:
+Start the API and non-Gradio admin frontend locally with:
 
 ```sh
 uv run uvicorn api:app --reload
 ```
 
-Open <http://127.0.0.1:8000/> for the deliberately small Phase 2.8 API desk.
-It is local-only and has no user-admin or login flow. The page loads countries,
-findings, and graph series; starts and polls analysis/research jobs; and
-includes an open route console for exercising any `/api/v1` route directly.
+Open <http://127.0.0.1:8000/admin/> for the research administration workspace.
+Use <http://127.0.0.1:8000/admin/?fixtures=1> for a non-mutating fixture tour,
+or <http://127.0.0.1:8000/docs> for the API documentation. The application is
+local-only at this stage and has no user-admin or login flow.
 
-### Phase 2.8 frontend coverage
+The admin frontend supports manual URL analysis and approval, editable Tavily
+discovery settings, direct and bounded bulk country hunts, durable run and
+candidate history, finding/source administration, coverage, and WPP graphs.
+These workflows call the FastAPI JSON boundary and do not require Gradio.
 
-The dedicated controls currently connect to:
-
-- `GET /health`
-- `GET /api/v1/countries`
-- `GET /api/v1/findings?iso3=…`
-- `GET /api/v1/graph-series/{iso3}`
-- `GET /api/v1/research/settings`
-- `POST /api/v1/analysis/jobs` and `GET /api/v1/analysis/jobs/{job_id}`
-- `POST /api/v1/research/jobs` and `GET /api/v1/research/jobs/{run_id}`
-
-The Route console can call every other versioned route, including finding
-mutations, blocked-source and source-rule administration, fallback providers,
-worker jobs, country hunts, research history, and stop/save operations.
-
-The full version should wait for Phase 3: authentication and the admin shell,
-dedicated findings and source-management screens, country-gap and bulk-hunt
-controls, detailed progress/candidate views, production chart rendering,
-validation/error states, and the complete Gradio-parity workflows. Gradio is
-still the operational reference during this testing phase.
+The original API desk remains available at <http://127.0.0.1:8000/>.
 
 The initial boundary exposes `GET /health`. Runtime settings can be adjusted
 with `DEMOGRAPHICS_APP_NAME`, `DEMOGRAPHICS_API_VERSION`, and

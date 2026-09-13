@@ -1,7 +1,12 @@
 import json
 import base64
+import sqlite3
 import subprocess
+import tempfile
 from pathlib import Path
+from unittest.mock import patch
+
+import read_services
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,7 +32,11 @@ def test_browser_renderer_keeps_marker_contract_and_graph_series_route():
     assert 'official_publisher: "diamond"' in renderer
     assert 'secondary_attributed: "circle-open"' in renderer
     assert 'secondary_unattributed: "cross"' in renderer
+    assert 'legacy_unreviewed: "star"' in renderer
+    assert '"star legacy", "Legacy · unreviewed"' in renderer
     assert "findingMetricValue" in renderer
+    assert "graph-reference-point" in renderer
+    assert 'role: "img"' in renderer
     assert "/api/v1/graph-series/" in admin
     assert "data-finding-id" in renderer
     assert 'data-view="graphs"' in template
@@ -56,3 +65,48 @@ def test_browser_renderer_positions_july_rows_and_pads_y_extents():
         cwd=ROOT, capture_output=True, text=True, check=False,
     )
     assert completed.returncode == 0, completed.stderr or completed.stdout
+
+
+def test_browser_renderer_applies_population_subgroup_guard_to_the_claim_clause():
+    source = (ROOT / "frontend/admin-assets/graph-renderer.js").read_bytes()
+    encoded = base64.b64encode(source).decode("ascii")
+    script = f'''
+      const renderer = await import("data:text/javascript;base64,{encoded}");
+      const valid = {{ statistics: {{ population: {{ value: 125000000, evidence_excerpt: "Japan's total population was 125 million, including 5 million immigrants." }} }} }};
+      if (renderer.findingMetricValue(valid, "population") !== 125000000) throw new Error("valid national total was hidden");
+      const invalid = {{ statistics: {{ population: {{ value: 5000000, evidence_excerpt: "5 million people living with diabetes in Japan." }} }} }};
+      if (renderer.findingMetricValue(invalid, "population") !== null) throw new Error("disease subgroup was plotted");
+      const legacyInvalid = {{ title: "Immigrant population", statistics: {{ population: {{ value: 5000000 }} }} }};
+      if (renderer.findingMetricValue(legacyInvalid, "population") !== null) throw new Error("legacy subgroup was plotted");
+    '''
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+
+
+def test_release_series_falls_back_to_country_name_for_blank_iso3_vintages():
+    with tempfile.TemporaryDirectory() as directory:
+        db_path = Path(directory) / "wpp.sqlite"
+        columns = ', '.join(f'"{column}" REAL' for column in read_services.GRAPH_COLUMNS)
+        with sqlite3.connect(db_path) as connection:
+            connection.execute(f'''CREATE TABLE wpp_release_history (
+                revision INTEGER, Country TEXT, "ISO3 Alpha-code" TEXT, Year INTEGER,
+                {columns}, cadence_years INTEGER)''')
+            values = (2023, 124.0, 1.0, 2.0, -1.0, 0.0, 1.4, 1)
+            connection.execute(
+                'INSERT INTO wpp_release_history VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (2017, "Japan", "", *values),
+            )
+            connection.execute(
+                'INSERT INTO wpp_release_history VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (2022, "Japan", "JPN", *values),
+            )
+        def connect():
+            return sqlite3.connect(db_path)
+        with patch.object(read_services, "get_wpp_connection", connect), \
+             patch.object(read_services, "normalise_country_name", return_value="Japan"):
+            result = read_services._release_series("JPN", [2017, 2022])
+        assert len(result["2017"]) == 1
+        assert len(result["2022"]) == 1

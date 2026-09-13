@@ -90,8 +90,16 @@ def list_findings(iso3: str | None = None, metric: str | None = None) -> list[di
         except (TypeError, json.JSONDecodeError):
             payload = {}
         if isinstance(payload.get('statistics'), dict):
-            display['Metrics'] = [key for key, metric_value in payload['statistics'].items()
+            statistics = payload['statistics']
+            display['Metrics'] = [key for key, metric_value in statistics.items()
                                   if isinstance(metric_value, dict) and metric_value.get('value') is not None]
+            # Expose only the concise values needed by the admin table. The
+            # full extraction JSON remains private to the record detail route.
+            display['Metric values'] = {
+                key: metric_value.get('value')
+                for key, metric_value in statistics.items()
+                if isinstance(metric_value, dict) and metric_value.get('value') is not None
+            }
         findings.append(display)
     if iso3 is None:
         return findings
@@ -173,18 +181,34 @@ def _release_series(iso3: str, revisions: list[int] | None) -> dict[str, list[di
         return result
     columns = ", ".join(f'"{column}"' for column in GRAPH_COLUMNS)
     placeholders = ",".join("?" for _ in requested)
-    params: tuple[Any, ...]
-    params = (iso3, *requested, CHART_START_YEAR, CHART_END_YEAR)
-    where = '"ISO3 Alpha-code" = ?'
-    sql = f'''SELECT revision, Year, {columns}, cadence_years
-              FROM wpp_release_history
-              WHERE {where} AND revision IN ({placeholders})
-                AND CAST(Year AS INTEGER) BETWEEN ? AND ?
-              ORDER BY revision DESC, Year'''
     try:
         with get_wpp_connection() as connection:
             connection.row_factory = sqlite3.Row
-            rows = connection.execute(sql, params).fetchall()
+            rows = connection.execute(
+                f'''SELECT revision, Year, {columns}, cadence_years
+                    FROM wpp_release_history
+                    WHERE "ISO3 Alpha-code" = ? AND revision IN ({placeholders})
+                      AND CAST(Year AS INTEGER) BETWEEN ? AND ?
+                    ORDER BY revision DESC, Year''',
+                (iso3, *requested, CHART_START_YEAR, CHART_END_YEAR),
+            ).fetchall()
+            # Some imported WPP vintages have blank ISO3 values. Fill only
+            # missing revisions from the canonical country label, preserving
+            # ISO3-matched rows and avoiding duplicate overlay points.
+            found_revisions = {int(row["revision"]) for row in rows}
+            missing_revisions = tuple(revision for revision in requested if revision not in found_revisions)
+            if missing_revisions:
+                fallback_placeholders = ",".join("?" for _ in missing_revisions)
+                country = normalise_country_name(iso3)
+                if country:
+                    rows += connection.execute(
+                        f'''SELECT revision, Year, {columns}, cadence_years
+                            FROM wpp_release_history
+                            WHERE Country = ? AND revision IN ({fallback_placeholders})
+                              AND CAST(Year AS INTEGER) BETWEEN ? AND ?
+                            ORDER BY revision DESC, Year''',
+                        (country, *missing_revisions, CHART_START_YEAR, CHART_END_YEAR),
+                    ).fetchall()
     except sqlite3.OperationalError:
         return result
     for row in rows:

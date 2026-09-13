@@ -5,7 +5,7 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -23,6 +23,15 @@ FINDING = {
                                   'evidence_excerpt': 'Population was 124.6 million people in 2023.',
                                   'measured_period': '2023'}},
 }
+VALID_FINDING = {
+    **FINDING,
+    'statistics': {'population': {
+        'value': 124600000, 'unit': 'people', 'metric_type': 'population',
+        'observation_status': 'observed', 'national_scope_status': 'national',
+        'measured_period': '2023',
+        'evidence_excerpt': 'Population was 124.6 million people in 2023.',
+    }},
+}
 
 
 class Step35ManualAnalysisTests(unittest.TestCase):
@@ -39,7 +48,9 @@ class Step35ManualAnalysisTests(unittest.TestCase):
             research_services.agents, 'extract_from_page_text',
             return_value={'result': FINDING, 'validation': {'status': 'validated'}, 'storage': {'status': 'validated'}},
         ), patch.object(research_services.agents, 'research_agent') as graph_agent:
-            job = research_services.start_manual_analysis(FINDING['url'], compare=False)
+            job = research_services.start_manual_analysis(
+                FINDING['url'], compare=False, review_before_store=True
+            )
             for _ in range(100):
                 current = research_services.get_manual_analysis(job['id'])
                 if current['status'] == 'complete':
@@ -50,12 +61,34 @@ class Step35ManualAnalysisTests(unittest.TestCase):
             self.assertEqual(tools.list_webpage_findings(), [])
             graph_agent.assert_not_called()
 
+    def test_manual_analysis_invokes_structured_fetch_and_derives_country(self):
+        greece_finding = {
+            **FINDING,
+            'url': 'https://www.ekathimerini.com/in-depth/society-in-depth/1290186/data-show-further-dip-in-greek-population/',
+            'geography': 'Greece', 'geography_iso3': 'GRC',
+        }
+        fetch_tool = MagicMock()
+        fetch_tool.invoke.return_value = 'article text'
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            tools, 'DB_PATH', Path(directory) / 'db.sqlite'
+        ), patch.object(tools, 'get_page_text', fetch_tool), patch.object(
+            research_services.agents, 'extract_from_page_text',
+            return_value={'result': greece_finding, 'validation': {'status': 'validated'}, 'storage': {'status': 'validated'}},
+        ):
+            job = research_services.start_manual_analysis(greece_finding['url'], compare=False)
+            current = self._wait(job['id'])
+
+        fetch_tool.invoke.assert_called_once_with({'url': greece_finding['url']})
+        self.assertEqual(current['status'], 'complete')
+        self.assertEqual(current['country_iso3'], 'GRC')
+        self.assertEqual(current['country'], 'Greece')
+
     def test_edit_then_approve_stores_only_edited_draft(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(
             tools, 'DB_PATH', Path(directory) / 'db.sqlite'
         ):
-            draft = __import__('research_store').create_analysis_draft('job-1', finding=FINDING, validation={'status': 'validated'})
-            edited = {**FINDING, 'comments': 'Reviewed by analyst.'}
+            draft = __import__('research_store').create_analysis_draft('job-1', finding=VALID_FINDING, validation={'status': 'validated'})
+            edited = {**VALID_FINDING, 'comments': 'Reviewed by analyst.'}
             result = research_services.edit_analysis_draft(draft['id'], edited, expected_revision=1)
             self.assertEqual(result['revision'], 2)
             with patch.object(tools, 'store_webpage_finding', return_value={'id': 8, 'status': 'stored'}) as store:
@@ -63,6 +96,39 @@ class Step35ManualAnalysisTests(unittest.TestCase):
             self.assertEqual(approved['status'], 'approved')
             self.assertEqual(approved['finding']['comments'], 'Reviewed by analyst.')
             store.assert_called_once()
+
+    def test_edit_revalidates_subset_and_approval_keeps_draft_pending(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            tools, 'DB_PATH', Path(directory) / 'db.sqlite'
+        ), patch.object(tools, 'store_webpage_finding') as store:
+            draft = research_store.create_analysis_draft(
+                'job-1', finding=VALID_FINDING, validation={'status': 'validated'}
+            )
+            edited = {**VALID_FINDING, 'statistics': {'population': {
+                **VALID_FINDING['statistics']['population'], 'value': 5000000,
+                'evidence_excerpt': '5 million immigrants lived in Japan in 2023.',
+            }}}
+            updated = research_services.edit_analysis_draft(draft['id'], edited, expected_revision=1)
+            self.assertEqual(updated['validation']['status'], 'rejected')
+            with self.assertRaisesRegex(ValueError, 'deterministic validation'):
+                research_services.approve_analysis_draft(draft['id'])
+            self.assertEqual(research_services.get_analysis_draft(draft['id'])['status'], 'pending_review')
+            store.assert_not_called()
+
+    def test_non_stored_approval_outcome_does_not_mark_draft_approved(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            tools, 'DB_PATH', Path(directory) / 'db.sqlite'
+        ), patch.object(tools, 'store_webpage_finding', return_value={
+            'status': 'excluded_duplicate_url', 'existing_id': 19,
+        }):
+            draft = research_store.create_analysis_draft(
+                'job-1', finding=VALID_FINDING, validation={'status': 'validated'}
+            )
+            with self.assertRaisesRegex(ValueError, 'was not stored'):
+                research_services.approve_analysis_draft(draft['id'])
+            current = research_services.get_analysis_draft(draft['id'])
+            self.assertEqual(current['status'], 'pending_review')
+            self.assertEqual(research_store.list_analysis_draft_actions(draft['id'])[0]['action'], 'storage_failed')
 
     def test_reject_closes_draft_without_storage_and_idempotency_reuses_job(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(
@@ -118,7 +184,7 @@ class Step35ManualAnalysisTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.object(
             tools, 'DB_PATH', Path(directory) / 'db.sqlite'
         ), patch.object(tools, 'store_webpage_finding', return_value={'id': 8, 'status': 'stored'}) as store:
-            draft = research_store.create_analysis_draft('job-1', finding=FINDING, validation={'status': 'validated'})
+            draft = research_store.create_analysis_draft('job-1', finding=VALID_FINDING, validation={'status': 'validated'})
             approved = research_services.approve_analysis_draft(draft['id'])
             repeated = research_services.approve_analysis_draft(draft['id'])
             self.assertEqual(repeated['status'], 'approved')
