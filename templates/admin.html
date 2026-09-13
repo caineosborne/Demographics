@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="api-version" content="{{ api_version }}" />
+    <title>{{ app_name }} · Admin</title>
+    <link rel="stylesheet" href="/admin-assets/admin.css" />
+    <script type="module" src="/admin-assets/api-client.js"></script>
+    <script type="module" src="/admin-assets/admin.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Primary navigation">
+        <a class="brand" href="/admin/" aria-label="{{ app_name }} overview">
+          <span class="brand-mark" aria-hidden="true">D</span>
+          <span><strong>Demographics</strong><small>Research desk</small></span>
+        </a>
+        <p class="nav-label">Workspace</p>
+        <nav class="primary-nav">
+          <a href="#overview" data-view="overview" class="active">Overview</a>
+          <a href="#analyse" data-view="analyse">Analyse webpage</a>
+          <a href="#research" data-view="research">Research</a>
+          <a href="#coverage" data-view="coverage">Country coverage</a>
+          <a href="#findings" data-view="findings">Findings</a>
+          <a href="#conflicts" data-view="conflicts">Conflicts</a>
+          <a href="#submissions" data-view="submissions">Submissions</a>
+          <a href="#exports" data-view="exports">Exports</a>
+          <a href="#settings" data-view="settings">Settings</a>
+        </nav>
+        <div class="sidebar-foot">
+          <span class="status-dot" data-health-dot></span>
+          <span><small>API connection</small><strong data-health-label>Checking…</strong></span>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div>
+            <p class="kicker">Private workspace <span aria-hidden="true">/</span> {{ environment }}</p>
+            <h1 data-page-title>Overview</h1>
+          </div>
+          <div class="topbar-actions">
+            <span class="mode-badge" data-mode-badge hidden>Fixture mode</span>
+            <button class="quiet-button" type="button" data-refresh>Refresh</button>
+          </div>
+        </header>
+
+        <div class="notice" data-global-error role="alert" hidden></div>
+
+        <section id="overview" class="view active-view" data-view-panel="overview" aria-labelledby="overview-title">
+          <div class="hero-row">
+            <div>
+              <p class="kicker">Evidence, at a glance</p>
+              <h2 id="overview-title">Keep the research record moving.</h2>
+              <p class="lede">A calm control room for source review, country coverage, and durable research jobs.</p>
+            </div>
+            <div class="health-card" data-health-card data-state="loading">
+              <span class="state-pill">Loading</span>
+              <strong data-health-card-label data-state-message>Checking API health</strong>
+              <small data-health-detail>Connecting to the JSON API…</small>
+            </div>
+          </div>
+
+          <div class="stat-grid">
+            <article class="stat-card"><span>Country choices</span><strong data-country-count>—</strong><small>ISO3-ready controls</small></article>
+            <article class="stat-card"><span>Current country</span><strong data-selected-country>—</strong><small data-selected-country-label>Select a country below</small></article>
+            <article class="stat-card"><span>Frontend mode</span><strong data-mode-label>Live API</strong><small>Switch with <code>?fixtures=1</code></small></article>
+          </div>
+
+          <div class="state-legend" aria-label="Workflow state key">
+            <span class="state-key loading"><i></i>Loading</span>
+            <span class="state-key running"><i></i>Running</span>
+            <span class="state-key completed"><i></i>Completed</span>
+            <span class="state-key empty"><i></i>Empty</span>
+            <span class="state-key failed"><i></i>Failed</span>
+          </div>
+
+          <article class="card country-card">
+            <div class="card-heading"><div><p class="kicker">Read-only context</p><h3>Choose a country</h3></div><span class="route-label">GET /api/v1/countries</span></div>
+            <label class="field">Country <select data-country-control aria-describedby="country-help"><option value="">Loading countries…</option></select></label>
+            <p id="country-help" class="help">Names are for display. Country-specific API requests use the selected ISO3 code.</p>
+            <div class="inline-state" data-country-state data-state="loading"><span class="state-pill">Loading</span><span>Loading country choices…</span></div>
+          </article>
+        </section>
+
+        <section id="analyse" class="view" data-view-panel="analyse" hidden>
+          <div class="section-intro"><p class="kicker">Source review</p><h2>Analyse a webpage</h2><p>Queue a durable analysis job, then follow its status from the API.</p></div>
+          <article class="card">
+            <form data-analysis-form>
+              <label class="field">Source URL <input name="url" type="url" placeholder="https://example.org/release" required /></label>
+              <label class="field">Country context <select name="country_iso3" data-country-control><option value="">No country context</option></select></label>
+              <label class="check-field"><input name="compare" type="checkbox" checked /> Compare with WPP data</label>
+              <button class="primary-button" type="submit">Queue analysis</button>
+            </form>
+            <div class="job-state" data-analysis-state data-state="empty"><span class="state-pill">Empty</span><span data-state-message>Submit a URL to begin.</span></div>
+          </article>
+        </section>
+
+        <section id="research" class="view" data-view-panel="research" hidden>
+          <div class="section-intro"><p class="kicker">Discovery</p><h2>Research</h2><p>Start a bounded research run and watch durable progress.</p></div>
+          <article class="card">
+            <form data-research-form>
+              <label class="field">Country focus <select name="country_iso3" data-country-control><option value="">All countries</option></select></label>
+              <label class="field">Maximum articles <input name="max_articles" type="number" min="1" max="100" value="1" /></label>
+              <button class="primary-button" type="submit">Queue research</button>
+            </form>
+            <div class="job-state" data-research-state data-state="empty"><span class="state-pill">Empty</span><span data-state-message>No research run is active.</span></div>
+          </article>
+        </section>
+
+        {% for view, title, copy in [
+          ('coverage', 'Country coverage', 'See where the record has useful evidence and where it needs attention.'),
+          ('findings', 'Findings', 'Review stored observations and their source trail.'),
+          ('conflicts', 'Conflicts', 'A future review surface for competing observations.'),
+          ('submissions', 'Submissions', 'A future queue for incoming source suggestions.'),
+          ('exports', 'Exports', 'Prepare a public release when the record is ready.'),
+          ('settings', 'Settings', 'Control providers, defaults, and workspace behaviour.')
+        ] %}
+        <section id="{{ view }}" class="view" data-view-panel="{{ view }}" hidden>
+          <div class="section-intro"><p class="kicker">Admin workspace</p><h2>{{ title }}</h2><p>{{ copy }}</p></div>
+          <article class="card empty-card"><div class="empty-icon" aria-hidden="true">·</div><span class="state-pill">Empty</span><h3>This surface is ready for the next workflow.</h3><p>The shell is connected to the JSON API. Detailed {{ title|lower }} controls arrive in their dedicated implementation step.</p></article>
+        </section>
+        {% endfor %}
+
+        <footer><span>API <code>/api/{{ api_version }}</code></span><span>·</span><a href="/" data-api-desk>Open API desk</a><span class="footer-note">{{ app_name }}</span></footer>
+      </main>
+    </div>
+  </body>
+</html>

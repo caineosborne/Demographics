@@ -32,6 +32,14 @@ from temporal_context import temporal_context
 load_dotenv(override=True)
 
 
+# Extraction is an evaluated contract.  Keep these values together so a
+# finding/candidate can be compared with later prompt or rule revisions.
+EXTRACTION_PROMPT_VERSION = "3.4.0"
+EXTRACTION_RULE_VERSION = "3.4.0"
+OBSERVED_STATUS = "observed"
+PROJECTION_LABEL = "projection"
+
+
 def _coerce_number(value):
     """Parse common human-formatted numbers returned by extraction models."""
     if value is None or isinstance(value, (int, float)):
@@ -97,6 +105,15 @@ def _stored_result(existing: dict, source_url: str) -> "RelevantResult":
 
 class Statistic(BaseModel):
     value: Optional[float] = None
+    # These fields are deliberately optional at the Pydantic boundary for
+    # backwards compatibility with retained findings.  Fresh model output is
+    # checked by ``validate_extracted_result`` before it can be stored.
+    evidence_excerpt: Optional[str] = None
+    metric_type: Optional[str] = None
+    unit: Optional[str] = None
+    observation_status: Optional[str] = None
+    national_scope_status: Optional[str] = None
+    measured_period: Optional[str] = None
     source_value: Optional[float] = None
     published_date: Optional[str] = None
     period_start: Optional[str] = None
@@ -126,6 +143,177 @@ class Statistics(BaseModel):
     total_fertility_rate: Optional[Statistic] = None
 
 
+_COUNT_METRICS = {
+    "population", "births", "deaths", "natural_change", "net_overseas_migration",
+    "migration_arrivals", "migration_departures",
+}
+_METRIC_LABELS = {
+    "population": "population",
+    "births": "births",
+    "deaths": "deaths",
+    "natural_change": "natural change",
+    "net_overseas_migration": "net migration",
+    "migration_arrivals": "migration arrivals",
+    "migration_departures": "migration departures",
+    "total_fertility_rate": "total fertility rate",
+}
+_ALLOWED_METRIC_TYPES = {
+    "population": {"population", "national population", "total population", "resident population"},
+    "births": {"births", "live births", "birth count", "total births"},
+    "deaths": {"deaths", "death count", "total deaths"},
+    "natural_change": {"natural change", "natural increase", "natural population change"},
+    "net_overseas_migration": {"net migration", "net international migration", "net overseas migration"},
+    "migration_arrivals": {"migration arrivals", "arrivals", "immigration", "immigration arrivals"},
+    "migration_departures": {"migration departures", "departures", "emigration", "emigration departures"},
+    "total_fertility_rate": {"fertility rate", "total fertility rate"},
+}
+_CURRENCY_CONTEXT = re.compile(
+    r"(?:\bcurrency\b|\beur\b|\beuros?\b|\busd\b|\bdollars?\b|"
+    r"\bgbp\b|\bpounds?\b|[$€£]|\bbudget\b|\bcosts?\b|\bspen(?:d|ding|t)\b|"
+    r"\bexpenditure\b|\bfunding\b)", re.IGNORECASE,
+)
+_PERCENT_OR_RATE = re.compile(
+    r"(?:%|\bpercent(?:age)?\b|\brate\b|\bper\s+(?:1,?000|cent|woman)\b|"
+    r"\bpercentage[- ]?point\b|\bshare\b|\bproportion\b|\bgrowth\b)", re.IGNORECASE,
+)
+_FUTURE_OR_SCENARIO = re.compile(
+    r"(?:\bproject(?:ed|ion|s)?\b|\bforecast(?:s|ed)?\b|\bscenario\b|\bconditional\b|"
+    r"\bexpected\s+to\b|\bcould\b|\bwould\b|\bwill\b|\bmay\s+(?:rise|fall|grow|shrink|reach)\b|"
+    r"\bby\s+20\d{2}\b|\bfuture\b)", re.IGNORECASE,
+)
+_SUBSET_CONTEXT = re.compile(
+    r"(?:\bsubset\b|\bsubgroup\b|\bmigration\s+background\b|\bforeign[- ]born\b|"
+    r"\brefugee[s]?\b|\basylum\b|\bvisa\s+(?:holder|holders|application|applications|grant|grants)\b|\bimmigrant[s]?\s+from\b|"
+    r"\bpeople\s+from\b|\bby\s+(?:age|cause|sex|gender|religion|origin)\b|"
+    r"\bunder\s+\d+\b|\baged\s+\d+(?:\s+and\s+over)?\b|\bage\s+\d+\b|"
+    r"\b(?:muslim|christian|hindu|buddhist|jewish|religious)\s+(?:population|people|residents?)\b|"
+    r"\breligious\s+group\b|\b(?:citizenship|nationality|citizens?|non[- ]citizens?|foreign nationals?)\b|"
+    r"\bhousehold[s]?\b|\bprogramme\b|\bprogram\b|\bpolicy\b)",
+    re.IGNORECASE,
+)
+_NUMBER_TOKEN = re.compile(
+    r"(?<![\w])([+-]?\d[\d,]*(?:\.\d+)?)\s*(billion|bn|b|million|mn|m|thousand|k)?\b",
+    re.IGNORECASE,
+)
+
+
+def _evidence_numbers(text: str) -> list[float]:
+    """Parse numeric claims from an evidence excerpt, ignoring bare years."""
+    values: list[float] = []
+    for match in _NUMBER_TOKEN.finditer(text or ""):
+        try:
+            value = float(match.group(1).replace(",", ""))
+        except ValueError:
+            continue
+        if not match.group(2) and 1900 <= abs(value) <= 2100 and value.is_integer():
+            continue
+        multiplier = {
+            "b": 1_000_000_000, "bn": 1_000_000_000, "billion": 1_000_000_000,
+            "m": 1_000_000, "mn": 1_000_000, "million": 1_000_000,
+            "k": 1_000, "thousand": 1_000,
+        }.get((match.group(2) or "").casefold(), 1)
+        values.append(value * multiplier)
+    return values
+
+
+def validate_extracted_result(result: "RelevantResult") -> dict[str, object]:
+    """Apply deterministic evidence/scope checks to fresh model extraction.
+
+    Clearly unsupported claims are removed from metric fields and retained in
+    comments as review evidence. Missing/ambiguous provenance blocks storage
+    entirely with ``needs_review``. This function is intentionally called
+    before flow annualisation, so the model's number can be reconciled to the
+    number printed by the source.
+    """
+    if not isinstance(result, RelevantResult):
+        return {"status": "needs_review", "issues": ["Structured extraction was not a RelevantResult."]}
+    issues: list[dict[str, str]] = []
+    rejected: list[str] = []
+    statistics = result.statistics
+    for name, statistic in statistics.__class__.model_fields.items():
+        metric = getattr(statistics, name, None)
+        if metric is None or metric.value is None:
+            continue
+        label = _METRIC_LABELS.get(name, name)
+        evidence = (metric.evidence_excerpt or "").strip()
+        # Article-level caveats may mention projections while the excerpt is a
+        # valid observed number.  Context guards therefore operate on the
+        # metric's own evidence/provenance, not the prose summary.
+        context = " ".join((
+            evidence, metric.metric_type or "", metric.unit or "",
+            metric.observation_status or "", metric.national_scope_status or "",
+            metric.measured_period or "",
+        ))
+        reasons: list[str] = []
+        if not evidence or len(evidence) > 1_000:
+            issues.append({"metric": name, "level": "needs_review", "reason":
+                           f"{label} needs a short evidence excerpt."})
+            continue
+        if not metric.metric_type or not metric.unit or not metric.observation_status \
+                or not metric.national_scope_status or not metric.measured_period:
+            issues.append({"metric": name, "level": "needs_review", "reason":
+                           f"{label} is missing metric type, unit, status, national scope, or measured period."})
+            continue
+        canonical_metric_type = re.sub(r"\s+", " ", metric.metric_type.strip().casefold())
+        if canonical_metric_type not in _ALLOWED_METRIC_TYPES.get(name, set()):
+            reasons.append(f"metric type {metric.metric_type!r} does not match {label}")
+        if metric.observation_status.casefold() not in {
+                "observed", "reported", "actual", "historical", "estimate"}:
+            reasons.append(f"observation status is {metric.observation_status}")
+        if metric.national_scope_status.casefold() not in {
+                "national", "whole_national", "national_total", "total_national", "country_total",
+        }:
+            reasons.append(f"scope is {metric.national_scope_status}")
+        if _CURRENCY_CONTEXT.search(context):
+            reasons.append("currency/budget/cost context")
+        if _FUTURE_OR_SCENARIO.search(context) or metric.observation_status.casefold() in {
+                "projected", "projection", "forecast", "scenario", "conditional", "future",
+        }:
+            reasons.append("projection/future/scenario context")
+        measured_year = re.search(r"\b(20\d{2})\b", metric.measured_period)
+        if measured_year and int(measured_year.group(1)) > date.today().year:
+            reasons.append("measured period is future-dated")
+        if _SUBSET_CONTEXT.search(context):
+            reasons.append("population subset or administrative category")
+        if name in _COUNT_METRICS and _PERCENT_OR_RATE.search(context):
+            reasons.append("percentage/rate cannot populate an absolute count")
+        if name == "total_fertility_rate" and not re.search(
+                r"(?:births?\s+per\s+woman|live\s+births?\s+per\s+woman|fertility\s+rate)",
+                f"{metric.unit} {evidence}", re.IGNORECASE):
+            reasons.append("fertility unit is not births per woman")
+        if name in _COUNT_METRICS and not re.search(
+                r"(?:count|person|people|residents?|inhabitants?|births?|deaths?|migrat|population)",
+                metric.unit, re.IGNORECASE):
+            reasons.append("unit is not an absolute demographic count")
+        evidence_values = _evidence_numbers(evidence)
+        if not evidence_values:
+            issues.append({"metric": name, "level": "needs_review", "reason":
+                           f"{label} evidence contains no numeric claim."})
+            continue
+        numeric_value = float(metric.value)
+        if not any(abs(value - numeric_value) <= max(1e-6, abs(value) * 0.005)
+                   for value in evidence_values):
+            issues.append({"metric": name, "level": "needs_review", "reason":
+                           f"{label} value {metric.value:g} does not match its evidence excerpt."})
+            continue
+        if reasons:
+            rejected.append(name)
+            issues.extend({"metric": name, "level": "reject", "reason": reason} for reason in reasons)
+            metric.value = None
+    if issues:
+        rendered = "; ".join(f"{item['metric']}: {item['reason']}" for item in issues)
+        result.comments = ((result.comments + " ") if result.comments else "") + f"[validation] {rendered}"
+    if rejected:
+        result.comments = ((result.comments + " ") if result.comments else "") + \
+            f"[{PROJECTION_LABEL}/review] Rejected metric fields: {', '.join(rejected)}."
+    needs_review = any(item["level"] == "needs_review" for item in issues)
+    return {
+        "status": "needs_review" if needs_review else ("rejected" if rejected else "validated"),
+        "issues": issues,
+        "rejected_metrics": rejected,
+    }
+
+
 class RelevantResult(BaseModel):
     summary: Optional[str] = None
     title: str
@@ -140,6 +328,8 @@ class RelevantResult(BaseModel):
     quoted_source_url: Optional[str] = None
     statistics: Statistics
     comments: Optional[str] = None
+    extraction_prompt_version: Optional[str] = None
+    extraction_rule_version: Optional[str] = None
 
 
 class MetricComparison(BaseModel):
@@ -572,6 +762,18 @@ def research_agent(state: State):
 
     result = research_llm.invoke([
         SystemMessage(content=temporal_context() + """
+        Extraction contract version: 3.4.0. Store only observed national
+        demographic measurements in metric fields. Forecasts, projections,
+        scenarios, conditional claims, future-year statements, subsets, and
+        administrative categories belong only in the summary/comments with an
+        explicit [projection] or [review] label; leave their metric value null.
+        Every non-null metric MUST include evidence_excerpt (a short excerpt
+        containing the number), metric_type, unit, observation_status,
+        national_scope_status, and measured_period. Use observation_status
+        "observed" only for a reported measurement, and national_scope_status
+        "national" only for a whole-country total. Do not guess missing fields.
+        Evidence excerpts are checked deterministically against the numeric
+        value, so preserve the exact reported number and unit.
         Return a RelevantResult with a concise 2–4 sentence summary and only
         facts supported by the retrieved page. Use null for missing values.
         Allocate geography_iso3 as the three-letter ISO 3166-1 alpha-3 code
@@ -637,6 +839,27 @@ def research_agent(state: State):
     # Persist the URL actually fetched, rather than a URL inferred by the model.
     if fetched_urls:
         result.url = fetched_urls[-1]
+    validation = validate_extracted_result(result)
+    if isinstance(result, RelevantResult):
+        # Keep versions in both the structured audit payload and provenance so
+        # manual and automatic callers can compare later extraction runs.
+        result.extraction_prompt_version = EXTRACTION_PROMPT_VERSION
+        result.extraction_rule_version = EXTRACTION_RULE_VERSION
+        provenance.update({
+            "extraction_prompt_version": EXTRACTION_PROMPT_VERSION,
+            "extraction_rule_version": EXTRACTION_RULE_VERSION,
+        })
+        if validation["status"] == "needs_review":
+            report_activity("[Research agent] extraction needs deterministic review before storage")
+            return {
+                "messages": new_messages,
+                "result": result,
+                "storage": {
+                    "status": "needs_review",
+                    "reason": "; ".join(item["reason"] for item in validation["issues"]),
+                    "validation": validation,
+                },
+            }
     # The model must provide the code, but resolve it against the local WPP
     # reference before allowing it into comparison or storage. This also
     # turns the model's display label into the canonical WPP label.

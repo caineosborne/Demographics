@@ -1,10 +1,18 @@
 """Durable discovery audit, in the same SQLite database as the UN model."""
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import tools
 from database_maintenance import compact_candidate_details
+
+
+# A worker is considered alive for a deliberately generous period.  The
+# heartbeat is short enough to notice a dead process without allowing an API
+# restart to interrupt a valid CLI worker doing provider I/O.
+WORKER_HEARTBEAT_SECONDS = 30
+WORKER_LEASE_SECONDS = 180
+_UNSET = object()
 
 
 def candidate_audit_is_final(status):
@@ -29,7 +37,8 @@ def initialise():
             CREATE TABLE IF NOT EXISTS search_runs (
                 id TEXT PRIMARY KEY, started_at TEXT NOT NULL, finished_at TEXT,
                 status TEXT NOT NULL, settings_json TEXT NOT NULL,
-                events_json TEXT NOT NULL DEFAULT '[]'
+                events_json TEXT NOT NULL DEFAULT '[]',
+                owner_id TEXT, heartbeat_at TEXT, lease_expires_at TEXT
             );
             CREATE TABLE IF NOT EXISTS search_candidates (
                 id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, url TEXT,
@@ -42,12 +51,28 @@ def initialise():
                 payload_json TEXT NOT NULL DEFAULT '{}', result_json TEXT,
                 progress_json TEXT NOT NULL DEFAULT '{}', error TEXT,
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                attempts INTEGER NOT NULL DEFAULT 0
+                attempts INTEGER NOT NULL DEFAULT 0,
+                owner_id TEXT, heartbeat_at TEXT, lease_expires_at TEXT
             );
             CREATE TABLE IF NOT EXISTS worker_locks (
-                name TEXT PRIMARY KEY, job_id TEXT NOT NULL, acquired_at TEXT NOT NULL
+                name TEXT PRIMARY KEY, job_id TEXT NOT NULL, acquired_at TEXT NOT NULL,
+                owner_id TEXT, heartbeat_at TEXT, lease_expires_at TEXT
             );
         ''')
+        # The application database predates leases.  Keep migrations explicit
+        # and idempotent so a new API process can safely open an old database.
+        job_columns = {row[1] for row in conn.execute('PRAGMA table_info(worker_jobs)')}
+        for name in ('owner_id', 'heartbeat_at', 'lease_expires_at'):
+            if name not in job_columns:
+                conn.execute(f'ALTER TABLE worker_jobs ADD COLUMN {name} TEXT')
+        lock_columns = {row[1] for row in conn.execute('PRAGMA table_info(worker_locks)')}
+        for name in ('owner_id', 'heartbeat_at', 'lease_expires_at'):
+            if name not in lock_columns:
+                conn.execute(f'ALTER TABLE worker_locks ADD COLUMN {name} TEXT')
+        run_columns = {row[1] for row in conn.execute('PRAGMA table_info(search_runs)')}
+        for name in ('owner_id', 'heartbeat_at', 'lease_expires_at'):
+            if name not in run_columns:
+                conn.execute(f'ALTER TABLE search_runs ADD COLUMN {name} TEXT')
 
 
 def create_job(kind, payload=None, job_id=None):
@@ -78,7 +103,8 @@ def get_job(job_id):
     return result
 
 
-def update_job(job_id, *, status=None, result=None, progress=None, error=None, increment_attempts=False):
+def update_job(job_id, *, status=None, result=None, progress=None, error=None,
+               increment_attempts=False, owner_id=_UNSET):
     initialise()
     updates = ['updated_at = ?']
     values = [now()]
@@ -92,53 +118,182 @@ def update_job(job_id, *, status=None, result=None, progress=None, error=None, i
         updates.append('error = ?'); values.append(str(error))
     if increment_attempts:
         updates.append('attempts = attempts + 1')
+    if owner_id is not _UNSET:
+        updates.extend(['owner_id = ?', 'heartbeat_at = ?', 'lease_expires_at = ?'])
+        values.extend([owner_id, None, None])
     values.append(str(job_id))
     with tools.get_connection() as conn:
         conn.execute(f"UPDATE worker_jobs SET {', '.join(updates)} WHERE id = ?", values)
     return get_job(job_id)
 
 
-def recover_orphaned_worker_jobs():
-    """Make work left by a terminated local process safe to retry.
+def owner_id() -> str:
+    """Create a stable identity for one worker process/thread lease."""
+    return str(uuid4())
 
-    The Phase 2 runner is deliberately single-worker.  On startup there can
-    therefore be no live owner for a previously ``running`` local job; retain
-    its audit trail, mark it interrupted, and release its discovery lock.
+
+def _lease_expiry(seconds=WORKER_LEASE_SECONDS) -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=int(seconds))).isoformat()
+
+
+def claim_job(job_id, worker_owner=None, *, owner_id=None, retry=False):
+    """Atomically claim a queued/retryable job for a worker owner.
+
+    A second process cannot claim a running job, even when it is still within
+    its lease.  This is the durable counterpart to the in-process thread map.
+    """
+    initialise()
+    worker_owner = worker_owner or owner_id
+    if not worker_owner:
+        raise ValueError('A worker owner ID is required to claim a job.')
+    allowed = ('queued', 'failed', 'interrupted') if retry else ('queued',)
+    placeholders = ','.join('?' for _ in allowed)
+    timestamp = now()
+    with tools.get_connection() as conn:
+        retry_reset = ', result_json = NULL, progress_json = \'{}\', error = NULL' if retry else ''
+        cursor = conn.execute(
+            f'''UPDATE worker_jobs
+                SET status = 'running', owner_id = ?, heartbeat_at = ?,
+                    lease_expires_at = ?, updated_at = ?, attempts = attempts + 1{retry_reset}
+                WHERE id = ? AND status IN ({placeholders})''',
+            (str(worker_owner), timestamp, _lease_expiry(), timestamp,
+             str(job_id), *allowed),
+        )
+        if cursor.rowcount != 1:
+            row = conn.execute('SELECT status, owner_id FROM worker_jobs WHERE id = ?', (str(job_id),)).fetchone()
+            if row is None:
+                raise ValueError('Worker job not found.')
+            raise RuntimeError(f'Worker job is not claimable: {row[0]}.')
+    return get_job(job_id)
+
+
+def heartbeat_worker(job_id, worker_owner=None, *, owner_id=None,
+                     lease_seconds=WORKER_LEASE_SECONDS):
+    """Renew a job lease and its matching discovery lock."""
+    initialise()
+    worker_owner = worker_owner or owner_id
+    if not worker_owner:
+        return False
+    timestamp = now()
+    expiry = _lease_expiry(lease_seconds)
+    with tools.get_connection() as conn:
+        cursor = conn.execute(
+            '''UPDATE worker_jobs SET heartbeat_at = ?, lease_expires_at = ?, updated_at = ?
+               WHERE id = ? AND owner_id = ? AND status IN ('running', 'stopping')''',
+            (timestamp, expiry, timestamp, str(job_id), str(worker_owner)),
+        )
+        conn.execute(
+            '''UPDATE worker_locks SET heartbeat_at = ?, lease_expires_at = ?
+               WHERE job_id = ? AND owner_id = ?''',
+            (timestamp, expiry, str(job_id), str(worker_owner)),
+        )
+        conn.execute(
+            '''UPDATE search_runs SET heartbeat_at = ?, lease_expires_at = ?
+               WHERE owner_id = ? AND status IN ('running', 'stopping')''',
+            (timestamp, expiry, str(worker_owner)),
+        )
+        # The search run is created by BossAgent after the durable job is
+        # claimed, so renew it through the run id recorded in job progress.
+        row = conn.execute(
+            'SELECT progress_json, result_json FROM worker_jobs WHERE id = ? AND owner_id = ?',
+            (str(job_id), str(worker_owner)),
+        ).fetchone()
+        if row:
+            for raw in row:
+                try:
+                    payload = json.loads(raw) if raw else {}
+                except json.JSONDecodeError:
+                    payload = {}
+                run_id = payload.get('run_id') if isinstance(payload, dict) else None
+                if run_id:
+                    conn.execute(
+                        '''UPDATE search_runs SET owner_id = ?, heartbeat_at = ?, lease_expires_at = ?
+                           WHERE id = ? AND status IN ('running', 'stopping')''',
+                        (str(worker_owner), timestamp, expiry, str(run_id)),
+                    )
+    return cursor.rowcount == 1
+
+
+def recover_orphaned_worker_jobs():
+    """Make work left by a terminated process safe to retry.
+
+    Recovery is lease-aware: only jobs whose persisted owner has become stale
+    are interrupted. A live CLI/API worker retains both its job and discovery
+    lock across API startup/reload.
     """
     initialise()
     timestamp = now()
     with tools.get_connection() as conn:
-        rows = conn.execute("SELECT id FROM worker_jobs WHERE status = 'running'").fetchall()
+        rows = conn.execute(
+            "SELECT id, owner_id FROM worker_jobs "
+            "WHERE status IN ('running', 'stopping') "
+            "AND (lease_expires_at IS NULL OR lease_expires_at < ?)",
+            (timestamp,),
+        ).fetchall()
         ids = [row[0] for row in rows]
         if ids:
             placeholders = ', '.join('?' for _ in ids)
             conn.execute(
                 f"UPDATE worker_jobs SET status = 'interrupted', updated_at = ?, "
-                f"error = COALESCE(error, ?) WHERE id IN ({placeholders})",
+                f"error = COALESCE(error, ?), owner_id = NULL, heartbeat_at = NULL, "
+                f"lease_expires_at = NULL WHERE id IN ({placeholders})",
                 (timestamp, 'Worker process ended before the job completed.', *ids),
             )
             conn.execute(f"DELETE FROM worker_locks WHERE job_id IN ({placeholders})", ids)
-        # A lock without a running job is necessarily orphaned as well.
-        conn.execute("DELETE FROM worker_locks WHERE job_id NOT IN "
-                     "(SELECT id FROM worker_jobs WHERE status = 'running')")
+        # Only expired locks may be reclaimed.  A lock belonging to a
+        # completed job but still leased is left alone until its owner expires.
+        conn.execute(
+            "DELETE FROM worker_locks WHERE lease_expires_at IS NULL OR lease_expires_at < ?",
+            (timestamp,),
+        )
     return len(ids)
 
 
-def acquire_worker_lock(name, job_id):
+def acquire_worker_lock(name, job_id, worker_owner=None, *, owner_id=None,
+                        lease_seconds=WORKER_LEASE_SECONDS):
+    """Acquire a named lock, reclaiming only an expired prior owner.
+
+    ``worker_owner`` is required by all production callers.  The optional
+    legacy form is retained for old local scripts and is immediately stale;
+    this prevents that compatibility path from masquerading as a live lease.
+    """
     initialise()
+    worker_owner = worker_owner or owner_id
+    owner = str(worker_owner) if worker_owner else None
+    timestamp = now()
     try:
         with tools.get_connection() as conn:
-            conn.execute('INSERT INTO worker_locks(name, job_id, acquired_at) VALUES (?, ?, ?)',
-                         (name, str(job_id), now()))
+            existing = conn.execute(
+                'SELECT job_id, lease_expires_at FROM worker_locks WHERE name = ?', (name,)
+            ).fetchone()
+            if existing:
+                expires = existing[1]
+                if expires and expires >= timestamp:
+                    raise RuntimeError(f'Worker lock is already held: {name}.')
+                conn.execute('DELETE FROM worker_locks WHERE name = ?', (name,))
+            expiry = _lease_expiry(lease_seconds) if owner else timestamp
+            conn.execute(
+                '''INSERT INTO worker_locks
+                   (name, job_id, acquired_at, owner_id, heartbeat_at, lease_expires_at)
+                   VALUES (?, ?, ?, ?, ?, ?)''',
+                (name, str(job_id), timestamp, owner, timestamp, expiry),
+            )
     except tools.sqlite3.IntegrityError as exc:
         raise RuntimeError(f'Worker lock is already held: {name}.') from exc
 
 
-def release_worker_lock(name, job_id):
+def release_worker_lock(name, job_id, worker_owner=None, *, owner_id=None):
     initialise()
+    worker_owner = worker_owner or owner_id
     with tools.get_connection() as conn:
-        conn.execute('DELETE FROM worker_locks WHERE name = ? AND job_id = ?',
-                     (name, str(job_id)))
+        if worker_owner is None:
+            conn.execute('DELETE FROM worker_locks WHERE name = ? AND job_id = ?',
+                         (name, str(job_id)))
+        else:
+            conn.execute(
+                'DELETE FROM worker_locks WHERE name = ? AND job_id = ? AND owner_id = ?',
+                (name, str(job_id), str(worker_owner)),
+            )
 
 
 def save_settings(settings):
@@ -160,31 +315,72 @@ def load_settings(default):
     return {**default, **saved}
 
 
-def start_run(settings):
+def start_run(settings, owner_id=None):
     initialise()
     run_id = str(uuid4())
     with tools.get_connection() as conn:
-        conn.execute('INSERT INTO search_runs(id, started_at, status, settings_json) VALUES (?, ?, ?, ?)',
-                     (run_id, now(), 'running', json.dumps(settings)))
+        timestamp = now()
+        conn.execute(
+            '''INSERT INTO search_runs
+               (id, started_at, status, settings_json, owner_id, heartbeat_at, lease_expires_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)''',
+            (run_id, timestamp, 'running', json.dumps(settings), owner_id,
+             timestamp if owner_id else None, _lease_expiry() if owner_id else None),
+        )
     return run_id
 
 
 def finish_run(run_id, status):
     with tools.get_connection() as conn:
-        conn.execute('UPDATE search_runs SET status = ?, finished_at = ? WHERE id = ?', (status, now(), run_id))
+        conn.execute(
+            'UPDATE search_runs SET status = ?, finished_at = ?, '
+            'owner_id = NULL, heartbeat_at = NULL, lease_expires_at = NULL WHERE id = ?',
+            (status, now(), run_id),
+        )
+
+
+def request_run_stop(run_id):
+    """Persist a cooperative stop request without pretending work finished."""
+    initialise()
+    timestamp = now()
+    with tools.get_connection() as conn:
+        row = conn.execute('SELECT status, events_json FROM search_runs WHERE id = ?', (str(run_id),)).fetchone()
+        if row is None:
+            raise ValueError('Research run not found.')
+        if row[0] != 'running':
+            return row[0]
+        events = json.loads(row[1] or '[]')
+        events.append({'at': timestamp, 'event': 'stop_requested', 'source': 'api'})
+        conn.execute(
+            "UPDATE search_runs SET status = 'stopping', finished_at = NULL, events_json = ? WHERE id = ?",
+            (json.dumps(events), str(run_id)),
+        )
+    return 'stopping'
+
+
+def run_stop_requested(run_id):
+    initialise()
+    with tools.get_connection() as conn:
+        row = conn.execute('SELECT status FROM search_runs WHERE id = ?', (str(run_id),)).fetchone()
+    return row is not None and row[0] == 'stopping'
 
 
 def recover_orphaned_runs():
-    """Close runs left as running when the previous app process disappeared."""
+    """Close runs left as running after their owner lease expired."""
     initialise()
     with tools.get_connection() as conn:
-        rows = conn.execute("SELECT id, events_json FROM search_runs WHERE status IN ('running', 'stopping')").fetchall()
+        timestamp = now()
+        rows = conn.execute(
+            "SELECT id, events_json FROM search_runs WHERE status IN ('running', 'stopping') "
+            "AND (lease_expires_at IS NULL OR lease_expires_at < ?)", (timestamp,)
+        ).fetchall()
         for run_id, events_json in rows:
             events = json.loads(events_json or '[]')
             events.append({'at': now(), 'event': 'recovered_orphan',
                            'message': 'Marked interrupted when the application started.'})
             conn.execute(
-                'UPDATE search_runs SET status = ?, finished_at = ?, events_json = ? WHERE id = ?',
+                'UPDATE search_runs SET status = ?, finished_at = ?, events_json = ?, '
+                'owner_id = NULL, heartbeat_at = NULL, lease_expires_at = NULL WHERE id = ?',
                 ('interrupted', now(), json.dumps(events), run_id),
             )
     return len(rows)
@@ -299,11 +495,19 @@ def list_historical_candidate_urls(exclude_run_id):
 
 
 def get_candidate(candidate_id):
+    initialise()
     with tools.get_connection() as conn:
         conn.row_factory = tools.sqlite3.Row
         row = conn.execute('SELECT * FROM search_candidates WHERE id = ?', (candidate_id,)).fetchone()
     if row is None:
         raise ValueError('Candidate not found.')
     result = dict(row)
-    result['details'] = json.loads(result.pop('details_json'))
+    details = json.loads(result.pop('details_json'))
+    # Candidate detail is a browser contract, not a page-content archive.
+    # Keep extraction/review outcomes while excluding retrieved bodies and
+    # provider payloads that can contain unbounded or sensitive content.
+    details = compact_candidate_details(details)
+    for field in ('full_text', 'page_text', 'raw', 'provider_response'):
+        details.pop(field, None)
+    result['details'] = details
     return result

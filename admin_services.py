@@ -72,7 +72,10 @@ def upsert_source_rule(*, match_type: str, match_value: str, action: str,
                        classification: str | None = None, enabled: bool = True,
                        note: str | None = None) -> dict[str, Any]:
     rule_id = tools.add_source_rule(match_type, match_value, action, classification, enabled, note)
-    return next(rule for rule in tools.list_source_rules() if rule["id"] == rule_id)
+    result = next((rule for rule in tools.list_source_rules() if rule["id"] == rule_id), None)
+    if result is None:
+        raise ValueError(f"No source rule exists with ID {rule_id}.")
+    return result
 
 
 def list_fallback_providers() -> list[dict[str, Any]]:
@@ -81,8 +84,12 @@ def list_fallback_providers() -> list[dict[str, Any]]:
 
 def update_fallback_provider(domain: str, **values: Any) -> dict[str, Any]:
     tools.update_fallback_provider(domain, **values)
-    return next(provider for provider in tools.list_fallback_providers()
-                if provider["domain"] == domain.strip().lower().removeprefix('www.'))
+    normalized = domain.strip().lower().removeprefix('www.')
+    result = next((provider for provider in tools.list_fallback_providers()
+                   if provider["domain"] == normalized), None)
+    if result is None:
+        raise ValueError(f"No fallback provider is configured for {normalized}.")
+    return result
 
 
 def _validated_id(finding_id: int) -> int:

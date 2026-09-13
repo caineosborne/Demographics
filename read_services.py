@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import research_store
@@ -55,7 +56,11 @@ def list_country_choices() -> list[dict[str, str]]:
 def list_findings(iso3: str | None = None) -> list[dict[str, Any]]:
     """Return stored findings, optionally filtered by ISO3 identity."""
 
-    findings = list_webpage_findings()
+    internal_fields = {'Extracted JSON', 'Search run ID', 'Search candidate ID', 'Extracted at (UTC)'}
+    findings = [
+        {key: value for key, value in finding.items() if key not in internal_fields}
+        for finding in list_webpage_findings()
+    ]
     if iso3 is None:
         return findings
     resolved = _strict_iso3(iso3)
@@ -127,7 +132,11 @@ def _release_series(iso3: str, revisions: list[int] | None) -> dict[str, list[di
 
 def _finding_graph_rows(iso3: str) -> list[dict[str, Any]]:
     rows = []
-    for finding in list_findings(iso3):
+    # Graph assembly is an internal service operation and needs the stored
+    # extraction payload; the public findings list intentionally redacts it.
+    for finding in list_webpage_findings():
+        if str(finding.get('ISO3') or '').upper() != iso3.upper():
+            continue
         extracted = finding.get("Extracted JSON")
         try:
             payload = json.loads(extracted) if isinstance(extracted, str) else extracted
@@ -167,10 +176,91 @@ def graph_series(iso3: str, metrics: list[str] | None = None, revisions: list[in
 def list_run_history() -> list[dict[str, Any]]:
     """Return persisted research runs in newest-first order."""
 
-    return research_store.list_runs()
+    displayed = []
+    for run in research_store.list_runs():
+        # JSON blobs and lease ownership are storage/audit details. The list
+        # contract exposes stable run state; detail requests expose parsed
+        # settings/events separately.
+        displayed.append({
+            key: value for key, value in run.items()
+            if key not in {'settings_json', 'events_json', 'owner_id', 'heartbeat_at', 'lease_expires_at'}
+        })
+    return displayed
 
 
 def list_candidate_history(run_id: str | None = None) -> list[dict[str, Any]]:
     """Return persisted candidate audit rows, optionally scoped to a run."""
 
     return research_store.list_candidates(run_id)
+
+
+def get_candidate(candidate_id: int) -> dict[str, Any]:
+    """Return one structured candidate audit row without raw storage columns."""
+    return research_store.get_candidate(int(candidate_id))
+
+
+def country_gap_preview(prefix: str, days: int = 31, country_count: int = 5,
+                        start_at: int = 1, scope_iso3s: list[str] | None = None) -> dict[str, Any]:
+    """Return a deterministic ISO3 gap preview for the admin batch picker.
+
+    Freshness is based on extraction time, matching the retained Gradio
+    workflow.  ``excluded`` is explicit when a caller supplies a narrower
+    ISO3 scope, so the UI cannot mistake scope filtering for missing data.
+    """
+    prefix = str(prefix or '').strip()
+    if not prefix or not prefix.isalpha():
+        raise ValueError('prefix must contain one or more letters.')
+    try:
+        days = int(days); country_count = int(country_count); start_at = int(start_at)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('days, country_count, and start_at must be whole numbers.') from exc
+    if days < 1:
+        raise ValueError('days must be at least 1.')
+    if country_count < 1 or country_count > 100:
+        raise ValueError('country_count must be between 1 and 100.')
+    if start_at < 1:
+        raise ValueError('start_at must be at least 1.')
+    scope = None
+    if scope_iso3s is not None:
+        scope = {_strict_iso3(value) for value in scope_iso3s}
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    recent: set[str] = set()
+    for finding in list_webpage_findings():
+        iso3 = str(finding.get('ISO3') or '').strip().upper()
+        if not iso3:
+            continue
+        stamp = str(finding.get('Extracted at (UTC)') or '')
+        try:
+            extracted_at = datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+            if extracted_at.tzinfo is None:
+                extracted_at = extracted_at.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if extracted_at >= cutoff:
+            recent.add(iso3)
+    choices = list_country_choices()
+    matching = [choice for choice in choices if choice['name'].casefold().startswith(prefix.casefold())]
+    excluded = []
+    eligible = []
+    for choice in matching:
+        if scope is not None and choice['iso3'].upper() not in scope:
+            excluded.append({**choice, 'reason': 'outside_requested_scope'})
+        elif choice['iso3'].upper() not in recent:
+            eligible.append({**choice, 'reason': 'missing_recent_finding'})
+    if eligible and start_at > len(eligible):
+        raise ValueError(f'start_at is beyond the {len(eligible)} matching country gaps.')
+    if start_at > len(eligible):
+        selected = []
+    else:
+        selected = eligible[start_at - 1:start_at - 1 + country_count]
+    return {
+        'prefix': prefix,
+        'days': days,
+        'total_matches': len(matching),
+        'total_gaps': len(eligible),
+        'start_at': start_at,
+        'country_count': country_count,
+        'selected': selected,
+        'excluded': excluded,
+        'remaining': max(0, len(eligible) - (start_at - 1 + len(selected))),
+    }

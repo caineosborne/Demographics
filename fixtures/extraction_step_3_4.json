@@ -1,0 +1,90 @@
+{
+  "version": "3.4.0",
+  "examples": [
+    {
+      "name": "germany_conditional_population_projection",
+      "expected": "reject",
+      "finding": {
+        "title": "Germany population outlook",
+        "url": "https://example.test/germany-outlook",
+        "source": "Example",
+        "site_seen": "example.test",
+        "geography": "Germany",
+        "statistics": {
+          "population": {
+            "value": 80000000,
+            "evidence_excerpt": "In a conditional scenario, Germany's population could shrink to 80 million by 2030.",
+            "metric_type": "population",
+            "unit": "people",
+            "observation_status": "projected",
+            "national_scope_status": "national",
+            "measured_period": "2030"
+          }
+        }
+      }
+    },
+    {
+      "name": "germany_migration_background_subset",
+      "expected": "reject",
+      "finding": {
+        "title": "Germany migration background",
+        "url": "https://example.test/germany-migration-background",
+        "source": "Example",
+        "site_seen": "example.test",
+        "geography": "Germany",
+        "statistics": {
+          "population": {
+            "value": 24000000,
+            "evidence_excerpt": "Around 24 million people in Germany have a migration background.",
+            "metric_type": "population",
+            "unit": "people",
+            "observation_status": "observed",
+            "national_scope_status": "national",
+            "measured_period": "2023"
+          }
+        }
+      }
+    },
+    {
+      "name": "germany_migration_spending",
+      "expected": "reject",
+      "finding": {
+        "title": "Germany migration spending",
+        "url": "https://example.test/germany-spending",
+        "source": "Example",
+        "site_seen": "example.test",
+        "geography": "Germany",
+        "statistics": {
+          "population": {
+            "value": 24800000000,
+            "evidence_excerpt": "Migration-related spending was 24.8 billion euros, down 3.2 billion euros.",
+            "metric_type": "population",
+            "unit": "euros",
+            "observation_status": "observed",
+            "national_scope_status": "national",
+            "measured_period": "2023"
+          }
+        }
+      }
+    },
+    {
+      "name": "valid_national_observations",
+      "expected": "accept",
+      "finding": {
+        "title": "National vital statistics",
+        "url": "https://example.test/national-vital-statistics",
+        "source": "Example",
+        "site_seen": "example.test",
+        "geography": "Japan",
+        "statistics": {
+          "population": {"value": 124600000, "evidence_excerpt": "Japan's national population was 124.6 million in 2023.", "metric_type": "population", "unit": "people", "observation_status": "observed", "national_scope_status": "national", "measured_period": "2023"},
+          "births": {"value": 727000, "evidence_excerpt": "There were 727,000 births nationwide in 2023.", "metric_type": "births", "unit": "births", "observation_status": "observed", "national_scope_status": "national", "measured_period": "2023"},
+          "deaths": {"value": 1576000, "evidence_excerpt": "The national number of deaths was 1,576,000 in 2023.", "metric_type": "deaths", "unit": "deaths", "observation_status": "observed", "national_scope_status": "national", "measured_period": "2023"},
+          "natural_change": {"value": -849000, "evidence_excerpt": "Natural change was -849,000 people in 2023.", "metric_type": "natural change", "unit": "people", "observation_status": "observed", "national_scope_status": "national", "measured_period": "2023"},
+          "net_overseas_migration": {"value": 250000, "evidence_excerpt": "Net international migration was 250,000 people in 2023.", "metric_type": "net migration", "unit": "people", "observation_status": "observed", "national_scope_status": "national", "measured_period": "2023"},
+          "total_fertility_rate": {"value": 1.26, "evidence_excerpt": "The total fertility rate was 1.26 live births per woman in 2023.", "metric_type": "total fertility rate", "unit": "live births per woman", "observation_status": "observed", "national_scope_status": "national", "measured_period": "2023"}
+        }
+      }
+    }
+  ]
+}

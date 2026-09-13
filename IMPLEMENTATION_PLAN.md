@@ -21,10 +21,10 @@
   - [x] **Step 2.7 — Add versioned JSON endpoints and fixtures**
   - [x] **Step 2.8 — Build a basic API testing frontend**
 - [ ] **Phase 3 — Build the admin interface and retire Gradio**
-  - [ ] **Step 3.1 — Build the admin application shell**
-  - [ ] **Step 3.2 — Prove service-level parity against Gradio**
-  - [ ] **Step 3.3 — Complete backend durability and frontend contracts**
-  - [ ] **Step 3.4 — Tighten extraction scope and validation**
+  - [x] **Step 3.1 — Build the admin application shell**
+  - [x] **Step 3.2 — Benchmark service functionality against Gradio**
+  - [x] **Step 3.3 — Complete backend durability and frontend contracts**
+  - [x] **Step 3.4 — Tighten extraction scope and validation**
   - [ ] **Step 3.5 — Rebuild manual webpage analysis**
   - [ ] **Step 3.6 — Rebuild research and country-hunt controls**
   - [ ] **Step 3.7 — Rebuild findings and administration**
@@ -855,16 +855,34 @@ frontend accidentally decide them through implementation details.
 
 **Complete when:** the application shell runs locally and can use either the live API or fixtures.
 
-### Step 3.2 — Prove service-level parity against Gradio
+**Completed 2026-09-13:** a responsive FastAPI/Jinja admin shell is available
+at `/admin/` with the planned navigation, shared JSON client, durable-job
+polling, explicit workflow states, API-populated ISO3 country controls, and a
+fixture mode for local frontend development. The Phase 2.8 API desk remains at
+the root route as a temporary testing surface.
 
-Use the retained Gradio workflow as UAT/reference behavior. Run regression
+### Step 3.2 — Benchmark service functionality against Gradio
+
+Use the retained Gradio workflow as the reference baseline. Run comparable
 cases through the extracted services and API for manual analysis, automatic
 search, country hunts, edits, deletion, blocking, rerun behaviour, and graph
-values. Do not make Gradio a permanent HTTP client; use narrowly scoped,
-disposable adapters only where a treatment test requires one.
+values. Record every material difference, classifying it as an equivalent
+implementation, an intentional improvement, or a regression to investigate.
+The goal is functional comparison and an explicit record of changed behaviour,
+not exact output parity. Do not make Gradio a permanent HTTP client; use
+narrowly scoped, disposable adapters only where a treatment test requires one.
 
-**Complete when:** the new UI and API preserve the current business outcomes,
-with Gradio retained only as a fallback/reference until cutover.
+**Complete when:** comparable workflows have been evaluated, their material
+differences are documented and dispositioned, and no unexplained regressions
+remain. Gradio is retained only as a temporary fallback/reference until
+cutover.
+
+**Completed 2026-09-13:** comparable treatments for manual analysis,
+automatic search, single/bulk country hunts, edits, metric deletion, removal,
+blocking, unblocking, rerun state, and graph values are recorded in
+`STEP_3_2_PARITY.md` and covered by `tests/test_step_3_2_parity.py`. All
+material differences are classified as equivalent implementation or
+intentional improvement; no unexplained regression remains.
 
 ### Step 3.3 — Complete backend durability and frontend contracts
 
@@ -903,6 +921,18 @@ step is considered complete.
 
 **Complete when:** the Phase 3 UI can rely solely on stable, durable API
 contracts and fixtures.
+
+**Completed 2026-09-13:** worker ownership uses persisted owner IDs with a
+30-second heartbeat and conservative 180-second lease expiry. Startup and
+recovery reclaim only demonstrably stale leases, so a live CLI or other API
+process is not interrupted. Stop requests preserve terminal run status and
+are idempotent. The Phase 2 placeholder export command is disabled until
+Phase 7. Public route families now use versioned response models with
+redacted list payloads, structured run/candidate details, consistent missing
+resource errors, and server-side ISO3 gap previews with bounded batches and
+explicit scope exclusions. Durable jobs, progress, attempts, retries, and
+temporary-database HTTP integration coverage are included for the Phase 3
+frontend contract.
 
 ### Step 3.4 — Tighten extraction scope and validation
 
@@ -950,6 +980,14 @@ in a metric field.
 **Complete when:** the negative regression set cannot populate demographic
 metrics, valid national observations still extract correctly, and ambiguous
 claims are reviewable without being silently stored.
+
+**Completed 2026-09-13:** the current finding model accepts observed national
+measurements only. Projections and subset/category claims remain summary/audit
+material, deterministic evidence and context guards prevent unsupported metric
+storage, and ambiguous evidence is retained as `needs_review`. Extraction
+prompt/rule version 3.4.0 is recorded with findings, candidates, runs, and
+manual jobs. The versioned regression set includes the permanent Germany
+negative cases and valid coverage for all supported demographic metrics.
 
 ### Step 3.5 — Rebuild manual webpage analysis
 

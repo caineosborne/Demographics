@@ -1,0 +1,15 @@
+{
+  "prefix": "Ja",
+  "days": 31,
+  "total_matches": 2,
+  "total_gaps": 1,
+  "start_at": 1,
+  "country_count": 5,
+  "selected": [
+    {"name": "Japan", "iso3": "JPN", "reason": "missing_recent_finding"}
+  ],
+  "excluded": [
+    {"name": "Jamaica", "iso3": "JAM", "reason": "outside_requested_scope"}
+  ],
+  "remaining": 0
+}

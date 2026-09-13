@@ -10,6 +10,45 @@ from read_services import graph_series
 
 
 class ApiBoundaryTests(unittest.TestCase):
+    def test_admin_shell_is_jinja_rendered_and_exposes_required_navigation(self):
+        client = TestClient(create_app(Settings(environment="test")))
+
+        response = client.get("/admin/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('<meta name="api-version" content="v1"', response.text)
+        for label in (
+            "Overview", "Analyse webpage", "Research", "Country coverage",
+            "Findings", "Conflicts", "Submissions", "Exports", "Settings",
+        ):
+            self.assertIn(f'>{label}</a>', response.text)
+        self.assertIn("data-state=\"loading\"", response.text)
+        self.assertIn("data-state=\"empty\"", response.text)
+
+    def test_admin_shell_assets_and_fixtures_are_served(self):
+        client = TestClient(create_app())
+
+        script = client.get("/admin-assets/api-client.js")
+        styles = client.get("/admin-assets/admin.css")
+        countries = client.get("/fixtures/api/countries.json")
+        health_fixture = client.get("/fixtures/api/health.json")
+
+        self.assertEqual(script.status_code, 200)
+        self.assertIn("createApiClient", script.text)
+        self.assertIn("pollJob", script.text)
+        self.assertEqual(styles.status_code, 200)
+        self.assertIn("data-state=", styles.text)
+        self.assertEqual(countries.status_code, 200)
+        self.assertEqual(countries.json()["items"][0]["iso3"], "JPN")
+        self.assertEqual(health_fixture.json()["environment"], "fixture")
+
+    def test_admin_fixture_client_routes_analysis_and_research_job_polls(self):
+        script = TestClient(create_app()).get("/admin-assets/admin.js").text
+
+        self.assertIn("analysis\\/jobs|research\\/jobs", script)
+        self.assertIn("/fixtures/api/worker-job.json", script)
+        self.assertIn("No fixture registered for", script)
+
     def test_local_frontend_is_served_without_an_authentication_flow(self):
         client = TestClient(create_app())
 

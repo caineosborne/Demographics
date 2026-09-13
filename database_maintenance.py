@@ -40,6 +40,7 @@ CANDIDATE_DETAIL_FIELDS = {
     "page_loaded", "fetch_seconds", "model_text_characters", "original_text_characters",
     "content_transport", "tavily_extract_seconds", "tavily_extract_error",
     "automatic_recheck", "automatic_recheck_requested_at",
+    "extraction_prompt_version", "extraction_rule_version",
 }
 ALTERNATIVE_ATTEMPT_FIELDS = {
     "url", "canonical_url", "title", "snippet", "published_date", "status", "error", "reason",

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -28,9 +29,21 @@ def run_job(job_id: str) -> dict[str, Any]:
     job = research_store.get_job(job_id)
     if not job:
         raise ValueError(f"Unknown worker job: {job_id}.")
-    if job['status'] == 'complete':
-        return job
-    research_store.update_job(job_id, status='running', increment_attempts=True)
+    if job['status'] in {'complete', 'failed', 'interrupted'}:
+        # A retry is explicit through a second `run` invocation; terminal
+        # statuses are not silently rewritten by a duplicate command.
+        if job['status'] != 'failed' and job['status'] != 'interrupted':
+            return job
+    worker_owner = research_store.owner_id()
+    research_store.claim_job(job_id, worker_owner, retry=job['status'] in {'failed', 'interrupted'})
+    job = research_store.get_job(job_id)
+    heartbeat_stop = None
+    if job['kind'] != 'manual_analysis':
+        heartbeat_stop = threading.Event()
+        heartbeat = threading.Thread(
+            target=_heartbeat_loop, args=(job_id, worker_owner, heartbeat_stop), daemon=True
+        )
+        heartbeat.start()
     try:
         if job['kind'] == 'manual_analysis':
             payload = job['payload']
@@ -46,7 +59,9 @@ def run_job(job_id: str) -> dict[str, Any]:
             }
             context = (research_services._country_context(payload['country_iso3'])
                        if payload.get('country_iso3') else None)
-            research_services._run_manual(job_id, payload['url'], context, payload.get('compare', True))
+            research_services._run_manual(
+                job_id, payload['url'], context, payload.get('compare', True), worker_owner
+            )
         elif job['kind'] in {'news_search', 'country_search'}:
             if job['kind'] == 'country_search':
                 context = research_services._country_context(job['payload']['country_iso3'])
@@ -55,29 +70,35 @@ def run_job(job_id: str) -> dict[str, Any]:
                 ).model_dump()
             else:
                 settings = SearchSettings.model_validate(job['payload']['settings']).model_dump()
-            research_store.acquire_worker_lock('discovery', job_id)
+            research_store.acquire_worker_lock('discovery', job_id, worker_owner)
             try:
-                messages = list(BossAgent().run(settings))
+                messages = list(BossAgent().run(settings, owner_id=worker_owner))
                 research_store.update_job(job_id, status='complete', result={
                     'run_id': messages[-1][0] if messages else None,
                     'message': messages[-1][1] if messages else None,
                 })
             finally:
-                research_store.release_worker_lock('discovery', job_id)
+                research_store.release_worker_lock('discovery', job_id, worker_owner)
         elif job['kind'] == 'maintenance':
             result = database_maintenance.inventory_database()
             research_store.update_job(job_id, status='complete', result=result)
         elif job['kind'] == 'export':
-            output = Path(job['payload']['output']).expanduser().resolve()
-            output.write_text(json.dumps({
-                'findings': research_services.research_store.list_runs(),
-            }, indent=2, default=str) + '\n', encoding='utf-8')
-            research_store.update_job(job_id, status='complete', result={'output': str(output)})
+            raise ValueError('The export worker is disabled until Phase 7.')
         else:
             raise ValueError(f"Unsupported worker job kind: {job['kind']}.")
     except Exception as exc:
         research_store.update_job(job_id, status='failed', error=str(exc))
+    finally:
+        if heartbeat_stop is not None:
+            heartbeat_stop.set()
+        research_store.update_job(job_id, owner_id=None)
     return research_store.get_job(job_id)
+
+
+def _heartbeat_loop(job_id: str, worker_owner: str, stop_event) -> None:
+    while not stop_event.wait(research_store.WORKER_HEARTBEAT_SECONDS):
+        if not research_store.heartbeat_worker(job_id, worker_owner):
+            return
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -94,8 +115,6 @@ def _parser() -> argparse.ArgumentParser:
     country.add_argument('--max-results', type=int, default=12)
     sub.add_parser('maintenance')
     sub.add_parser('recover')
-    export = sub.add_parser('export')
-    export.add_argument('output', type=Path)
     run = sub.add_parser('run')
     run.add_argument('job_id')
     return parser
@@ -129,8 +148,7 @@ def main(argv=None) -> None:
         job = research_store.create_job('maintenance')
         job = run_job(job['id'])
     else:
-        job = research_store.create_job('export', {'output': str(args.output)})
-        job = run_job(job['id'])
+        raise ValueError('The export command is disabled until Phase 7.')
     print(json.dumps(job, indent=2, default=str))
     if job['status'] in {'failed', 'interrupted'}:
         raise SystemExit(1)

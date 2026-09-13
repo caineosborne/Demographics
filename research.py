@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 import requests
 import tldextract
 
+import agents
 import research_store as store
 import tools
 from temporal_context import temporal_context
@@ -469,10 +470,15 @@ class BossAgent:
         self.skills = skills or ResearchSkills()
         self.providers = providers if providers is not None else {'tavily': tavily_links, 'reddit': reddit_links}
 
-    def run(self, settings, stop_event=None):
+    def run(self, settings, stop_event=None, owner_id=None):
         settings = SearchSettings.model_validate(settings)
         store.save_settings(settings.model_dump())
-        run_id = store.start_run(settings.model_dump())
+        run_settings = {
+            **settings.model_dump(),
+            "extraction_prompt_version": agents.EXTRACTION_PROMPT_VERSION,
+            "extraction_rule_version": agents.EXTRACTION_RULE_VERSION,
+        }
+        run_id = store.start_run(run_settings, owner_id=owner_id)
         errors = 0
         finished = False
         outcomes: dict[str, int] = {}
@@ -483,7 +489,8 @@ class BossAgent:
 
         def check_stopped() -> None:
             nonlocal stop_logged
-            if stop_event is not None and stop_event.is_set():
+            if ((stop_event is not None and stop_event.is_set())
+                    or store.run_stop_requested(run_id)):
                 if not stop_logged:
                     store.log_event(run_id, {'event': 'stop_requested'})
                     stop_logged = True
@@ -850,21 +857,39 @@ class BossAgent:
                         })
                         check_stopped()
                         storage = state.get('storage') or {}
+                        extraction_payload = state['result'].model_dump(mode='json')
+                        extraction_versions = {
+                            'extraction_prompt_version': extraction_payload.get(
+                                'extraction_prompt_version', agents.EXTRACTION_PROMPT_VERSION),
+                            'extraction_rule_version': extraction_payload.get(
+                                'extraction_rule_version', agents.EXTRACTION_RULE_VERSION),
+                        }
                         finding_id = storage.get('id') or storage.get('existing_id')
                         if storage.get('status') == 'excluded_no_data':
                             store.update_candidate(
                                 candidate_id, status='excluded_no_data', storage=storage,
-                                extraction=state['result'].model_dump(mode='json'),
+                                extraction=extraction_payload, **extraction_versions,
                                 extraction_seconds=round(perf_counter() - started, 2),
                                 full_reason='No extractable demographic data points; finding was not saved.',
                             )
                             record_outcome('excluded_no_data')
                             yield run_id, f'Excluded after extraction — no demographic data points: {retrieval_url}'
                             continue
+                        if storage.get('status') == 'needs_review':
+                            store.update_candidate(
+                                candidate_id, status='needs_review_extraction', storage=storage,
+                                extraction=extraction_payload, **extraction_versions,
+                                extraction_seconds=round(perf_counter() - started, 2),
+                                full_reason=storage.get('reason') or
+                                'Extraction evidence or scope requires manual review before storage.',
+                            )
+                            record_outcome('needs_review_extraction')
+                            yield run_id, f'Extraction needs review before storage: {retrieval_url}'
+                            continue
                         if storage.get('status') in {'excluded_subnational', 'excluded_country_mismatch'}:
                             store.update_candidate(
                                 candidate_id, status=storage.get('status'), storage=storage,
-                                extraction=state['result'].model_dump(mode='json'),
+                                extraction=extraction_payload, **extraction_versions,
                                 extraction_seconds=round(perf_counter() - started, 2),
                                 full_reason=storage.get('reason') or 'Geography is not a unique UN country.',
                             )
@@ -874,7 +899,7 @@ class BossAgent:
                         if storage.get('status') == 'excluded_source_rule':
                             store.update_candidate(
                                 candidate_id, status='excluded_source_rule', storage=storage,
-                                extraction=state['result'].model_dump(mode='json'),
+                                extraction=extraction_payload, **extraction_versions,
                                 extraction_seconds=round(perf_counter() - started, 2),
                                 full_reason=storage.get('reason') or 'Excluded by configured source rule.',
                             )
@@ -884,7 +909,7 @@ class BossAgent:
                         if storage.get('status') == 'excluded_fallback_not_needed':
                             store.update_candidate(
                                 candidate_id, status='excluded_fallback_not_needed', storage=storage,
-                                extraction=state['result'].model_dump(mode='json'),
+                                extraction=extraction_payload, **extraction_versions,
                                 extraction_seconds=round(perf_counter() - started, 2),
                                 full_reason=storage.get('reason') or 'Fallback provider was not needed for this country.',
                             )
@@ -903,7 +928,7 @@ class BossAgent:
                                 finding_id=finding_id,
                                 duplicate_of=duplicate_of,
                                 duplicate_kind=storage['status'],
-                                extraction=state['result'].model_dump(mode='json'),
+                                extraction=extraction_payload, **extraction_versions,
                                 storage=storage,
                                 extraction_seconds=round(perf_counter() - started, 2),
                                 full_reason=f'Duplicate of {duplicate_of}: {duplicate_kind}.',
@@ -914,7 +939,7 @@ class BossAgent:
                         store.update_candidate(
                             candidate_id, status='complete',
                             finding_id=finding_id,
-                            extraction=state['result'].model_dump(mode='json'), storage=storage,
+                            extraction=extraction_payload, **extraction_versions, storage=storage,
                             source_classification=storage.get('source_classification'),
                             extraction_seconds=round(perf_counter() - started, 2),
                         )

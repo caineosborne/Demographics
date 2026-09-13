@@ -1,0 +1,15 @@
+{
+  "id": 41,
+  "run_id": "run-example",
+  "url": "https://example.test/release",
+  "source": "tavily",
+  "category": "Population",
+  "status": "complete",
+  "updated_at": "2026-09-13T00:00:00+00:00",
+  "details": {
+    "title": "Japan population release",
+    "canonical_url": "https://example.test/release",
+    "page_loaded": true,
+    "finding_id": 7
+  }
+}

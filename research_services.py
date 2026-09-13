@@ -8,6 +8,7 @@ validates and serializes their plain-data results.
 from __future__ import annotations
 
 import threading
+import json
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -25,7 +26,7 @@ HUNT_QUERY = ('"{country}" (population OR births OR deaths OR fertility OR migra
 
 _jobs: dict[str, dict[str, Any]] = {}
 _jobs_lock = threading.RLock()
-_research_workers: dict[str, tuple[threading.Thread, threading.Event]] = {}
+_research_workers: dict[str, tuple[threading.Thread, threading.Event, str, str]] = {}
 _research_lock = threading.RLock()
 
 
@@ -41,15 +42,23 @@ def start_manual_analysis(url: str, *, country_iso3: str | None = None,
         'url': url, 'country_iso3': context['iso3'] if context else None,
         'country': context['label'] if context else None,
         'compare': bool(compare), 'logs': [], 'fetch_status': None,
+        'extraction_prompt_version': agents.EXTRACTION_PROMPT_VERSION,
+        'extraction_rule_version': agents.EXTRACTION_RULE_VERSION,
         'created_at': _now(), 'updated_at': _now(),
     }
     with _jobs_lock:
         _jobs[job_id] = job
     research_store.create_job('manual_analysis', {
-        'url': url, 'country_iso3': job['country_iso3'], 'compare': bool(compare)
+        'url': url, 'country_iso3': job['country_iso3'], 'compare': bool(compare),
+        'extraction_prompt_version': agents.EXTRACTION_PROMPT_VERSION,
+        'extraction_rule_version': agents.EXTRACTION_RULE_VERSION,
     }, job_id=job_id)
-    research_store.update_job(job_id, status='running', increment_attempts=True)
-    worker = threading.Thread(target=_run_manual, args=(job_id, url, context, bool(compare)),
+    worker_owner = research_store.owner_id()
+    research_store.claim_job(job_id, worker_owner)
+    job['owner_id'] = worker_owner
+    stop_event = threading.Event()
+    worker = threading.Thread(target=_run_manual,
+                              args=(job_id, url, context, bool(compare), worker_owner, stop_event),
                               name=f'manual-analysis-{job_id}', daemon=True)
     worker.start()
     return _public_job(job)
@@ -153,8 +162,18 @@ def get_research_run(run_id: str) -> dict[str, Any]:
     run = research_store.get_run(str(run_id))
     if not run:
         raise ValueError('Research run not found.')
+    try:
+        settings = json.loads(run.get('settings_json') or '{}')
+    except (TypeError, ValueError):
+        settings = {}
+    try:
+        events = json.loads(run.get('events_json') or '[]')
+    except (TypeError, ValueError):
+        events = []
     return {
-        **run,
+        'id': run['id'], 'started_at': run['started_at'],
+        'finished_at': run.get('finished_at'), 'status': run['status'],
+        'settings': settings, 'events': events,
         'candidates': research_store.list_candidates(str(run_id)),
     }
 
@@ -163,35 +182,42 @@ def stop_research(run_id: str) -> dict[str, Any]:
     run_id = str(run_id)
     with _research_lock:
         task = _research_workers.get(run_id)
-    if task is not None:
-        task[1].set()
-        try:
-            research_store.log_event(run_id, {'event': 'stop_requested', 'source': 'api'})
-        except Exception:
-            pass
-        return {'run_id': run_id, 'status': 'stopping'}
     run = research_store.get_run(run_id)
     if not run:
         raise ValueError('Research run not found.')
-    if run['status'] in {'running', 'stopping'}:
-        research_store.finish_run(run_id, 'interrupted')
-    return {'run_id': run_id, 'status': 'interrupted'}
+    status = run['status']
+    if status in {'running', 'stopping'}:
+        status = research_store.request_run_stop(run_id)
+        if task is not None and task[0].is_alive():
+            task[1].set()
+    # A completed/failed/interrupted run is terminal and must not be reported
+    # as newly stopped when the same request is retried.
+    return {'run_id': run_id, 'status': status}
 
 
 def _start_research(settings: dict[str, Any]) -> dict[str, Any]:
     ready = threading.Event()
     holder: dict[str, Any] = {}
     stop_event = threading.Event()
-    lock_id = str(uuid4())
-    research_store.acquire_worker_lock('discovery', lock_id)
-    worker_job = research_store.create_job('news_search', {'settings': settings}, job_id=lock_id)
-    research_store.update_job(lock_id, status='running', increment_attempts=True)
+    worker_job = research_store.create_job('news_search', {'settings': settings})
+    lock_id = worker_job['id']
+    worker_owner = research_store.owner_id()
+    research_store.acquire_worker_lock('discovery', lock_id, worker_owner)
+    research_store.claim_job(lock_id, worker_owner)
 
     def worker() -> None:
+        heartbeat_stop = threading.Event()
+        heartbeat = threading.Thread(
+            target=_heartbeat_loop,
+            args=(lock_id, worker_owner, heartbeat_stop),
+            name=f'discovery-heartbeat-{lock_id}', daemon=True,
+        )
+        heartbeat.start()
         try:
-            iterator = BossAgent().run(settings, stop_event=stop_event)
+            iterator = BossAgent().run(settings, stop_event=stop_event, owner_id=worker_owner)
             first = next(iterator)
             holder['run_id'] = first[0]
+            research_store.update_job(lock_id, progress={'run_id': first[0], 'message': first[1]})
             ready.set()
             for _run_id, message in iterator:
                 research_store.log_event(_run_id, {'event': 'progress', 'message': message})
@@ -207,7 +233,9 @@ def _start_research(settings: dict[str, Any]) -> dict[str, Any]:
             ready.set()
             research_store.update_job(lock_id, status='failed', error=str(exc))
         finally:
-            research_store.release_worker_lock('discovery', lock_id)
+            heartbeat_stop.set()
+            research_store.release_worker_lock('discovery', lock_id, worker_owner)
+            research_store.update_job(lock_id, owner_id=None)
             run_id = holder.get('run_id')
             if run_id:
                 with _research_lock:
@@ -226,11 +254,20 @@ def _start_research(settings: dict[str, Any]) -> dict[str, Any]:
     if not run_id:
         raise RuntimeError('Research job did not return a run identifier.')
     with _research_lock:
-        _research_workers[run_id] = (thread, stop_event)
+        _research_workers[run_id] = (thread, stop_event, worker_owner, lock_id)
     return {'run_id': run_id, 'job_id': worker_job['id'], 'status': 'running'}
 
 
-def _run_manual(job_id: str, url: str, context: dict[str, str] | None, compare: bool) -> None:
+def _run_manual(job_id: str, url: str, context: dict[str, str] | None, compare: bool,
+                worker_owner: str | None = None, stop_event: threading.Event | None = None) -> None:
+    worker_owner = worker_owner or research_store.owner_id()
+    heartbeat_stop = threading.Event()
+    heartbeat = threading.Thread(
+        target=_heartbeat_loop,
+        args=(job_id, worker_owner, heartbeat_stop),
+        name=f'analysis-heartbeat-{job_id}', daemon=True,
+    )
+    heartbeat.start()
     _set_job(job_id, status='running', stage='fetching')
     progress_token = tools.set_progress_callback(
         lambda event: _record_job_progress(job_id, event)
@@ -267,6 +304,10 @@ def _run_manual(job_id: str, url: str, context: dict[str, str] | None, compare: 
         _set_job(job_id, status='failed', stage='failed', error=str(exc))
     finally:
         tools.reset_progress_callback(progress_token)
+        heartbeat_stop.set()
+        # Clearing ownership is best-effort; terminal state remains durable
+        # even if the process exits during cleanup.
+        research_store.update_job(job_id, owner_id=None)
 
 
 def _country_context(iso3: str) -> dict[str, str]:
@@ -309,6 +350,13 @@ def _set_job(job_id: str, **updates: Any) -> None:
         research_store.update_job(job_id, **durable_updates)
 
 
+def _heartbeat_loop(job_id: str, worker_owner: str, stop_event: threading.Event) -> None:
+    """Renew ownership while provider/model work is in progress."""
+    while not stop_event.wait(research_store.WORKER_HEARTBEAT_SECONDS):
+        if not research_store.heartbeat_worker(job_id, worker_owner):
+            return
+
+
 def _record_job_progress(job_id: str, event: dict[str, Any]) -> None:
     with _jobs_lock:
         job = _jobs.get(job_id)
@@ -335,12 +383,14 @@ def _durable_manual_public_job(job: dict[str, Any]) -> dict[str, Any]:
         'compare': payload.get('compare', True), 'created_at': job['created_at'],
         'updated_at': job['updated_at'], 'stage': progress.get('stage'),
         'fetch_status': progress.get('fetch_status'), 'logs': progress.get('logs', []),
+        'extraction_prompt_version': payload.get('extraction_prompt_version'),
+        'extraction_rule_version': payload.get('extraction_rule_version'),
         'result': job.get('result'), 'error': job.get('error'),
     }
 
 
 def _public_job(job: dict[str, Any]) -> dict[str, Any]:
-    return dict(job)
+    return {key: value for key, value in job.items() if key not in {'owner_id'}}
 
 
 def _jsonable(value: Any) -> Any:
