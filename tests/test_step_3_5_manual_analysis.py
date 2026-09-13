@@ -83,6 +83,26 @@ class Step35ManualAnalysisTests(unittest.TestCase):
         self.assertEqual(current['country_iso3'], 'GRC')
         self.assertEqual(current['country'], 'Greece')
 
+    def test_automatic_storage_accepts_a_structured_extraction_result(self):
+        structured_finding = research_services.agents.RelevantResult.model_validate(VALID_FINDING)
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            tools, 'DB_PATH', Path(directory) / 'db.sqlite'
+        ), patch.object(tools, 'get_page_text', return_value='article text'), patch.object(
+            research_services.agents, 'extract_from_page_text', return_value={
+                'result': structured_finding, 'validation': {'status': 'validated'},
+                'storage': {'status': 'validated'},
+            }):
+            job = research_services.start_manual_analysis(
+                VALID_FINDING['url'], compare=False, review_before_store=False
+            )
+            current = self._wait(job['id'])
+            self.assertEqual(current['draft']['status'], 'approved')
+            self.assertIsNotNone(current['draft']['finding_id'])
+            self.assertEqual(
+                tools.get_webpage_finding(current['draft']['finding_id'])['url'],
+                VALID_FINDING['url'],
+            )
+
     def test_edit_then_approve_stores_only_edited_draft(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(
             tools, 'DB_PATH', Path(directory) / 'db.sqlite'

@@ -119,7 +119,13 @@ def get_analysis_draft_actions(draft_id: str) -> list[dict[str, Any]]:
 
 
 def _validate_manual_finding(finding: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Run the same schema and deterministic Step 3.4 guards as extraction."""
+    """Normalize a persisted finding before applying deterministic guards.
+
+    Drafts may come from an older/provider response that contains the number
+    and evidence but omits metadata which can be recovered unambiguously from
+    that evidence.  Approval must validate the normalized representation, not
+    the raw provider JSON.
+    """
     try:
         model = agents.RelevantResult.model_validate(finding)
     except Exception as exc:
@@ -127,6 +133,9 @@ def _validate_manual_finding(finding: dict[str, Any]) -> tuple[dict[str, Any], d
             'status': 'needs_review',
             'issues': [{'level': 'needs_review', 'reason': f'Finding schema validation failed: {exc}'}],
         }
+    agents.normalize_extracted_result(model, provenance={
+        'country_iso3': model.geography_iso3,
+    })
     validation = agents.validate_extracted_result(model)
     if validation.get('status') == 'validated' and not any(
             isinstance(metric, agents.Statistic) and metric.value is not None
@@ -609,8 +618,9 @@ def _run_manual(job_id: str, url: str, context: dict[str, str] | None, compare: 
         else:
             result.update({'comparison': None, 'un_data': []})
         finding_id = None
-        if not review_before_store and isinstance(result.get('result'), dict):
-            stored = tools.store_webpage_finding(result['result'], provenance={
+        finding_for_storage = _jsonable(result.get('result') or {})
+        if not review_before_store and isinstance(finding_for_storage, dict):
+            stored = tools.store_webpage_finding(finding_for_storage, provenance={
                 'submission_type': 'manual', 'discovery_source': 'api',
             })
             result['storage'] = stored

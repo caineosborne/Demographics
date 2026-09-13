@@ -126,7 +126,7 @@ function selectedGraphRevisions() {
 }
 
 function reviewGraphFinding(findingId) {
-  selectView("findings");
+  selectView("graphs");
   loadRecord(findingId);
 }
 
@@ -511,7 +511,9 @@ async function submitJob(form, kind) {
     setState(state, "running", `Job ${job.id || job.run_id || "queued"} is running.`);
     const id = job.id || job.run_id;
     const statusPath = kind === "analysis" ? `/api/v1/analysis/jobs/${id}` : `/api/v1/research/jobs/${id}`;
-    await api.pollJob(statusPath, { onUpdate: (current) => {
+    // Poll every five seconds for up to three minutes. This leaves room for
+    // the 20-second Requests attempt and 40-second Playwright fallback.
+    await api.pollJob(statusPath, { intervalMs: 5000, maxAttempts: 36, onUpdate: (current) => {
       const currentState = current.status === "failed" ? "failed" : (current.status === "complete" || current.status === "completed" ? "completed" : "running");
       const statusMessage = current.status === "failed" ? (current.error || "Analysis failed.") : current.progress?.stage ? `Analysis stage: ${current.progress.stage}.` : `Job status: ${current.status}.`;
       setState(state, currentState, statusMessage);
@@ -597,7 +599,9 @@ function renderDraft(draft) {
   $(`[data-review-summary]`, review).textContent = referenceNote + (finding.summary || finding.comments || "Review the evidence trail before choosing an action.");
   const attribution = $(`[data-attribution]`, review);
   attribution.replaceChildren();
-  [["Source", finding.source || finding.site_seen || "—"], ["URL", finding.url || "—"], ["Published / effective", finding.effective_date || "Not stated"], ["Quoted source", finding.quoted_source || "None"], ["Comments", finding.comments || "None"]].forEach(([label, value]) => { const dt = document.createElement("dt"); dt.textContent = label; const dd = document.createElement("dd"); dd.textContent = value; attribution.append(dt, dd); });
+  [["Source", finding.source || finding.site_seen || "—"], ["URL", finding.url || "—"], ["Published / effective", finding.effective_date || "Not stated"], ["Quoted source", finding.quoted_source || "None"]].forEach(([label, value]) => { const dt = document.createElement("dt"); dt.textContent = label; const dd = document.createElement("dd"); dd.textContent = value; attribution.append(dt, dd); });
+  const extractionComment = $(`[data-extraction-comment]`, review);
+  extractionComment.textContent = finding.comments || "None";
   const comparison = $(`[data-comparison]`, review);
   comparison.replaceChildren();
   const comparisonValues = draft.comparison || {};
@@ -642,7 +646,7 @@ async function draftAction(action, body) {
     if (action === "rerun") {
       const rerunId = payload.id || payload.job_id;
       if (!rerunId) throw new Error("Rerun did not return a job identifier.");
-      await api.pollJob(`/api/v1/analysis/jobs/${rerunId}`, { onUpdate: (current) => {
+      await api.pollJob(`/api/v1/analysis/jobs/${rerunId}`, { intervalMs: 5000, maxAttempts: 36, onUpdate: (current) => {
         updateAnalysisProgress(current.progress?.stage, current.progress?.fetch_status);
         updateAnalysisLog(current.progress, current.error);
         setState(state, current.status === "failed" ? "failed" : current.status === "complete" ? "completed" : "running", current.status === "failed" ? (current.error || "Analysis failed.") : current.progress?.stage ? `Analysis stage: ${current.progress.stage}.` : `Job status: ${current.status}.`);
@@ -718,8 +722,8 @@ function renderFindingRows(body, items) {
     row.innerHTML = `<td></td><th>${escapeHtml(item.Country || item.ISO3 || "—")} <small>${escapeHtml(item.ISO3 || "")}</small></th><td>${escapeHtml(item["Effective date"] || "—")}</td><td>${escapeHtml(findingMetricValues(item))}</td><td>${escapeHtml(item["Source classification"] || "—")}</td><td>${escapeHtml(item.Source || item["Quoted source"] || "—")}</td><td class="source-cell"></td>`;
     appendFindingIdLink(row.firstElementChild, item);
     row.lastElementChild.append(safeSourceLink(item["Webpage URL"] || item["Canonical URL"] || item.url || item.canonical_url));
-    row.addEventListener("click", () => loadRecord(item.ID ?? item.id));
-    row.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); loadRecord(item.ID ?? item.id); } });
+    row.addEventListener("click", () => { selectView("graphs"); reviewGraphFinding(item.ID ?? item.id); });
+    row.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectView("graphs"); reviewGraphFinding(item.ID ?? item.id); } });
     body.append(row);
   });
   if (!body.children.length) body.innerHTML = '<tr><td colspan="7" class="empty-cell">No findings match the current filters.</td></tr>';

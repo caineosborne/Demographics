@@ -157,9 +157,9 @@ class Step34ExtractionTests(unittest.TestCase):
                 "provenance": {"submission_type": "manual"},
             })
         self.assertEqual(response["storage"]["status"], "stored")
-        self.assertEqual(response["result"].extraction_prompt_version, "3.4.0")
+        self.assertEqual(response["result"].extraction_prompt_version, "3.4.1")
         stored_finding = store.call_args.args[0]
-        self.assertEqual(stored_finding["extraction_rule_version"], "3.4.0")
+        self.assertEqual(stored_finding["extraction_rule_version"], "3.4.1")
         self.assertEqual(stored_finding["statistics"]["population"]["value"], 124600000)
 
 

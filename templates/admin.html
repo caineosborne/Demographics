@@ -100,13 +100,24 @@
             <div class="inline-state" data-graph-state data-state="empty" role="status" aria-live="polite"><span class="state-pill">Empty</span><span data-state-message>Choose a country to load the reporting series.</span></div>
           </article>
           <article class="card graph-report-card">
-            <div class="graph-report-summary" data-graph-summary>WPP 2024 historical estimates are solid blue; forecasts are dashed orange. WPP 2017 is a dotted alternate series. Article marker shapes are the source-class key.</div>
             <div class="graph-grid" data-graph-grid></div>
+            <div class="graph-report-summary" data-graph-summary>WPP 2024 historical estimates are solid blue; forecasts are dashed orange. WPP 2017 is a dotted alternate series. Article marker shapes are the source-class key.</div>
           </article>
           <article class="card graph-findings-card">
-            <div class="card-heading"><div><p class="kicker">Filtered evidence</p><h3 data-graph-findings-title>Country findings</h3></div><span class="help">Finding IDs open the source URL. Select a row to inspect the stored record.</span></div>
+            <div class="card-heading"><div><p class="kicker">Filtered evidence</p><h3 data-graph-findings-title>Country findings</h3></div><span class="help">Select a point or row to edit the evidence on this page.</span></div>
             <div class="table-wrap"><table class="audit-table findings-table"><thead><tr><th>ID</th><th>Country</th><th>Effective</th><th>Metrics &amp; values</th><th>Source class</th><th>Source</th><th>URL</th></tr></thead><tbody data-graph-findings-body><tr><td colspan="7">Load a series to see findings for this country.</td></tr></tbody></table></div>
             <div class="coverage-note" data-graph-findings-status role="status">Load a series to see findings for this country.</div>
+          </article>
+          <article class="card record-editor graph-record-editor" data-record-editor hidden>
+            <div class="card-heading"><div><p class="kicker">Evidence workspace</p><h3 data-record-title>Finding</h3></div><span class="route-label">GET / PUT /api/v1/admin/findings/{id}</span></div>
+            <div class="safe-source" data-record-source></div>
+            <div class="record-metrics" data-record-metrics></div>
+            <div class="comparison-list" data-record-comparison></div>
+            <label class="field">Editable evidence JSON <textarea data-record-json rows="18" spellcheck="false"></textarea></label>
+            <div class="review-actions"><button class="primary-button" type="button" data-record-save>Save evidence</button><button class="quiet-button" type="button" data-record-rerun data-record-action>Remove and allow rerun</button><button class="quiet-button danger-button" type="button" data-record-delete data-record-action>Delete evidence</button><button class="quiet-button danger-button" type="button" data-record-block data-record-action>Delete and block source</button></div>
+            <div class="metric-actions"><label class="field">Metric to delete <select data-record-metric><option value="">Choose metric</option><option value="population">Population</option><option value="births">Births</option><option value="deaths">Deaths</option><option value="natural_change">Natural change</option><option value="net_migration">Net migration</option><option value="total_fertility_rate">Total fertility rate</option></select></label><button class="quiet-button danger-button" type="button" data-record-delete-metric data-record-action>Delete metric</button></div>
+            <div class="timeline" data-record-actions aria-live="polite"><p class="help">No record selected.</p></div>
+            <div class="inline-state" data-record-state data-state="empty"><span class="state-pill">Empty</span><span data-state-message>No record action taken.</span></div>
           </article>
         </section>
 
@@ -133,7 +144,7 @@
             <div class="card-heading"><div><p class="kicker">Evidence trail</p><h3>Review this draft</h3></div><span class="route-label" data-draft-status>pending review</span></div>
             <div class="review-summary" data-review-summary></div>
             <div class="evidence-table-wrap"><table class="evidence-table"><caption>Structured metrics</caption><thead><tr><th>Metric</th><th>Reported</th><th>Unit / period</th><th>Evidence</th></tr></thead><tbody data-metrics-body></tbody></table></div>
-            <div class="review-columns"><section><h4>Attribution and period</h4><dl class="evidence-meta" data-attribution></dl></section><section><h4>UN comparison</h4><div class="comparison-list" data-comparison></div></section></div>
+            <div class="review-columns"><section><h4>Attribution and period</h4><dl class="evidence-meta" data-attribution></dl><h4>Extraction comment</h4><div class="comparison-list" data-extraction-comment></div></section><section><h4>UN comparison</h4><div class="comparison-list" data-comparison></div></section></div>
             <label class="field">Edit finding JSON before approval <textarea data-draft-editor rows="12" spellcheck="false"></textarea></label>
             <p class="help">Edits are versioned. Approval stores the edited draft; reject closes it without storing a finding.</p>
             <div class="review-actions"><button class="primary-button" type="button" data-draft-approve>Approve and store</button><button class="quiet-button" type="button" data-draft-save>Save edits</button><button class="quiet-button" type="button" data-draft-rerun>Rerun</button><button class="quiet-button danger-button" type="button" data-draft-reject>Reject</button><button class="quiet-button danger-button" type="button" data-draft-remove>Remove</button><button class="quiet-button danger-button" type="button" data-draft-suppress>Suppress source</button></div>
@@ -187,17 +198,7 @@
             <div class="table-wrap"><table class="audit-table findings-table"><thead><tr><th>ID</th><th>Country</th><th>Effective</th><th>Metrics &amp; values</th><th>Source class</th><th>Source</th><th>URL</th></tr></thead><tbody data-findings-body><tr><td colspan="7">Loading findings…</td></tr></tbody></table></div>
             <div class="coverage-note" data-findings-status role="status">Choose a row to load its complete record.</div>
           </article>
-          <article class="card record-editor" data-record-editor hidden>
-            <div class="card-heading"><div><p class="kicker">Record picker</p><h3 data-record-title>Finding</h3></div><span class="route-label">GET / PUT /api/v1/admin/findings/{id}</span></div>
-            <div class="safe-source" data-record-source></div>
-            <div class="record-metrics" data-record-metrics></div>
-            <div class="comparison-list" data-record-comparison></div>
-            <label class="field">Editable finding JSON <textarea data-record-json rows="18" spellcheck="false"></textarea></label>
-            <div class="review-actions"><button class="primary-button" type="button" data-record-save>Save record</button><button class="quiet-button" type="button" data-record-rerun data-record-action>Remove and allow rerun</button><button class="quiet-button danger-button" type="button" data-record-delete data-record-action>Delete record</button><button class="quiet-button danger-button" type="button" data-record-block data-record-action>Delete and block source</button></div>
-            <div class="metric-actions"><label class="field">Metric to delete <select data-record-metric><option value="">Choose metric</option><option value="population">Population</option><option value="births">Births</option><option value="deaths">Deaths</option><option value="natural_change">Natural change</option><option value="net_migration">Net migration</option><option value="total_fertility_rate">Total fertility rate</option></select></label><button class="quiet-button danger-button" type="button" data-record-delete-metric data-record-action>Delete metric</button></div>
-            <div class="timeline" data-record-actions aria-live="polite"><p class="help">No record selected.</p></div>
-            <div class="inline-state" data-record-state data-state="empty"><span class="state-pill">Empty</span><span data-state-message>No record action taken.</span></div>
-          </article>
+          <p class="coverage-note">Findings is the QA register. Edit and delete evidence from the Graphs workspace.</p>
           <article class="card source-rules-card">
             <div class="card-heading"><div><p class="kicker">Source policy</p><h3>Source rules</h3></div><button class="quiet-button" type="button" data-refresh-source-rules>Refresh</button></div>
             <p class="help">Exact canonical URL rules take precedence over domain rules. Classification overrides are explicit; exclude rules prevent storage. Disabled rules remain auditable and can be undone.</p>

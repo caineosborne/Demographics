@@ -278,7 +278,15 @@ export function renderMetricGraph(container, payload, metric, { hiddenFindingIds
   const heading = document.createElement("div"); heading.className = "graph-panel-heading";
   const title = document.createElement("h3"); title.textContent = `${config.label} · ${payload.country || payload.iso3 || "Selected country"}`;
   const unit = document.createElement("span"); unit.className = "graph-unit"; unit.textContent = config.unit;
-  heading.append(title, unit); chart.append(heading);
+  const actions = document.createElement("div"); actions.className = "graph-panel-actions";
+  const fullscreen = document.createElement("button"); fullscreen.type = "button"; fullscreen.className = "quiet-button graph-fullscreen"; fullscreen.textContent = "Full screen"; fullscreen.title = "Open this graph full screen";
+  fullscreen.addEventListener("click", async () => {
+    try {
+      if (document.fullscreenElement === chart) await document.exitFullscreen();
+      else if (chart.requestFullscreen) await chart.requestFullscreen();
+    } catch (error) { fullscreen.title = `Full screen unavailable: ${error.message}`; }
+  });
+  actions.append(unit, fullscreen); heading.append(title, actions); chart.append(heading);
 
   const historic = rowPoints(payload.historic, metric);
   const forecast = rowPoints(payload.forecast, metric);

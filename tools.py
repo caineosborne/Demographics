@@ -124,6 +124,9 @@ def report_fetch_status(status: str) -> None:
 
 def extract_page_text(html: str | bytes) -> str:
     soup = BeautifulSoup(html, "html.parser")
+    declared_article = soup.find(
+        "meta", attrs={"property": "og:type", "content": re.compile(r"article", re.IGNORECASE)}
+    ) is not None
     for tag in soup(["script", "style", "nav", "footer", "noscript"]):
         tag.decompose()
     # Some publishers put the article body in sibling sections rather than
@@ -132,6 +135,13 @@ def extract_page_text(html: str | bytes) -> str:
     # unconventional.
     containers = [node for node in (soup.find("main"), soup.find("article"), soup.body, soup) if node]
     text = max((node.get_text(" ", strip=True) for node in containers), key=len, default="")
+    # A server response can contain an article title/metadata while the body
+    # is only a client-side shell. Do not treat that shell as usable article
+    # text; let the rendered-browser fallback inspect the populated page.
+    semantic_containers = [node for node in (soup.find("main"), soup.find("article")) if node]
+    semantic_text = max((node.get_text(" ", strip=True) for node in semantic_containers), key=len, default="")
+    if declared_article and len(semantic_text) < 200 and len(text) < 500:
+        raise ValueError("The response contains article metadata but no server-rendered article body.")
     # Common successful HTTP responses that contain a challenge or JS shell.
     placeholders = (
         "enable javascript", "javascript is required", "just a moment",
@@ -170,7 +180,7 @@ def extract_pdf_text(pdf_bytes: bytes) -> str:
 
 def _fetch_pdf(url: str) -> str:
     report_fetch_status("Trying Requests")
-    with requests.get(url, timeout=30) as response:
+    with requests.get(url, timeout=20) as response:
         response.raise_for_status()
         if not response_is_pdf(url, response):
             raise ValueError("The URL did not return a PDF document.")
@@ -188,19 +198,32 @@ def fetch_with_playwright(url: str) -> str:
         browser = playwright.chromium.launch(headless=True)
         try:
             page = browser.new_page()
-            response = page.goto(url, wait_until="load", timeout=30_000)
+            # The browser fallback gets one 40-second budget in total: this
+            # includes navigation and any wait for a client-rendered article.
+            deadline = time.monotonic() + 40
+            response = page.goto(url, wait_until="load", timeout=40_000)
             if response is None or not response.ok:
                 status = response.status if response else "no response"
                 raise ValueError(f"Browser navigation failed: {status}")
-            # Give asynchronously rendered content time to replace an empty shell.
-            deadline = time.monotonic() + 10
+            # Give asynchronously rendered content the remainder of the same
+            # budget to replace an empty shell.
             while True:
+                texts = []
+                for frame in page.frames:
+                    try:
+                        texts.append(extract_page_text(frame.content()))
+                    except Exception:
+                        continue
+                text = max(texts, key=len, default="")
+                if len(text) >= 200:
+                    return text
+                if time.monotonic() >= deadline:
+                    raise ValueError("The rendered page contained no usable article text.")
                 try:
-                    return extract_page_text(page.content())
-                except ValueError:
+                    page.wait_for_timeout(250)
+                except Exception:
                     if time.monotonic() >= deadline:
                         raise
-                    page.wait_for_timeout(250)
         finally:
             browser.close()
 
@@ -209,14 +232,16 @@ def fetch_with_playwright(url: str) -> str:
 def get_page_text(url: str) -> str:
     """Retrieve HTML or PDF text using Requests, falling back to a rendered browser for HTML."""
     report_fetch_status("Trying Requests")
+    raw_response_text = ""
     try:
-        with requests.get(url, timeout=30) as response:
+        with requests.get(url, timeout=20) as response:
             response.raise_for_status()
             if response_is_pdf(url, response):
                 report_fetch_status("Reading PDF")
                 text = extract_pdf_text(response.content)
                 report_fetch_status("PDF loaded via Requests — summarising")
                 return text
+            raw_response_text = response.text if isinstance(response.text, str) else response.content.decode("utf-8", errors="replace")
             text = extract_page_text(response.content)
     except (requests.RequestException, ValueError) as exc:
         requests_error = str(exc)
@@ -228,6 +253,14 @@ def get_page_text(url: str) -> str:
     try:
         text = fetch_with_playwright(url)
     except Exception as exc:
+        # Preserve the original document for the extractor when Requests
+        # received a substantial HTML document but its article body was
+        # encoded in a shell/script structure that BeautifulSoup could not
+        # expose as ordinary text. The extraction prompt treats this as
+        # untrusted page content and is bounded before the model sees it.
+        if len(raw_response_text) >= 1_000:
+            report_fetch_status("Using raw HTML response — article body was not parsed")
+            return raw_response_text
         report_fetch_status("Failed — Requests and Playwright could not access the page")
         raise PageAccessError(
             f"Unable to access the page using Requests or Playwright. "
