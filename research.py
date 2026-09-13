@@ -77,6 +77,11 @@ class SearchSettings(BaseModel):
     max_per_domain: int = Field(default=2, ge=1, le=10)
     domain_limit_scope: Literal['run', 'category'] = 'run'
     review_criteria: str = Field(default=CRITERIA, min_length=1)
+    # These flags make country-hunt semantics explicit in durable run state.
+    # Automatic news discovery keeps the normal recency/eligibility gates;
+    # direct and bulk country hunts intentionally do not.
+    country_hunt_mode: Literal['automatic', 'direct', 'bulk'] = 'automatic'
+    country_hunt_iso3s: list[str] = Field(default_factory=list, max_length=100)
 
 
 def recommended_categories(year: int | None = None) -> list[SearchCategory]:
@@ -611,6 +616,13 @@ class BossAgent:
                         yield run_id, f'Recorded Reddit discussion only: {candidate.get("title") or url}'
                         continue
                     issue = discovery_issue(candidate)
+                    if (issue and settings.country_hunt_mode in {'direct', 'bulk'}
+                            and candidate.get('country_iso3')
+                            and issue.startswith('Excluded stale search result')):
+                        # A direct hunt is an operator-requested exception to
+                        # recency gating, while low-value domains and
+                        # subnational pages remain ineligible.
+                        issue = None
                     if issue:
                         store.update_candidate(candidate_id, status='excluded_discovery', full_reason=issue)
                         record_outcome('excluded_discovery')

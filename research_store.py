@@ -58,6 +58,28 @@ def initialise():
                 name TEXT PRIMARY KEY, job_id TEXT NOT NULL, acquired_at TEXT NOT NULL,
                 owner_id TEXT, heartbeat_at TEXT, lease_expires_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS analysis_drafts (
+                id TEXT PRIMARY KEY, job_id TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL DEFAULT 'pending_review',
+                finding_json TEXT NOT NULL DEFAULT '{}', comparison_json TEXT,
+                un_data_json TEXT NOT NULL DEFAULT '[]', validation_json TEXT NOT NULL DEFAULT '{}',
+                revision INTEGER NOT NULL DEFAULT 1, finding_id INTEGER, reference_finding_id INTEGER,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS analysis_draft_actions (
+                id INTEGER PRIMARY KEY, draft_id TEXT NOT NULL,
+                action TEXT NOT NULL, revision INTEGER NOT NULL,
+                acted_at TEXT NOT NULL, note TEXT
+            );
+            CREATE TABLE IF NOT EXISTS analysis_idempotency (
+                key TEXT PRIMARY KEY, job_id TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS country_hunt_queue (
+                iso3 TEXT PRIMARY KEY, country TEXT NOT NULL,
+                last_attempt_at TEXT, last_successful_finding_at TEXT,
+                next_eligible_at TEXT, outcome TEXT NOT NULL DEFAULT 'never_run',
+                last_run_id TEXT, last_job_id TEXT, updated_at TEXT NOT NULL
+            );
         ''')
         # The application database predates leases.  Keep migrations explicit
         # and idempotent so a new API process can safely open an old database.
@@ -73,6 +95,9 @@ def initialise():
         for name in ('owner_id', 'heartbeat_at', 'lease_expires_at'):
             if name not in run_columns:
                 conn.execute(f'ALTER TABLE search_runs ADD COLUMN {name} TEXT')
+        draft_columns = {row[1] for row in conn.execute('PRAGMA table_info(analysis_drafts)')}
+        if 'reference_finding_id' not in draft_columns:
+            conn.execute('ALTER TABLE analysis_drafts ADD COLUMN reference_finding_id INTEGER')
 
 
 def create_job(kind, payload=None, job_id=None):
@@ -87,6 +112,138 @@ def create_job(kind, payload=None, job_id=None):
             (job_id, kind, json.dumps(payload or {}), timestamp, timestamp),
         )
     return get_job(job_id)
+
+
+def get_idempotent_job(key):
+    initialise()
+    with tools.get_connection() as conn:
+        row = conn.execute('SELECT job_id FROM analysis_idempotency WHERE key = ?', (str(key),)).fetchone()
+    return get_job(row[0]) if row else None
+
+
+def register_idempotency(key, job_id):
+    initialise()
+    with tools.get_connection() as conn:
+        conn.execute('INSERT OR IGNORE INTO analysis_idempotency(key, job_id, created_at) VALUES (?, ?, ?)',
+                     (str(key), str(job_id), now()))
+    return get_idempotent_job(key)
+
+
+def reserve_analysis_job(key, job_id, payload):
+    """Atomically reserve an analysis key and create its queued job.
+
+    The job row is created in the same transaction as the unique-key insert,
+    so a losing concurrent request can always read the winner immediately.
+    Returns ``(winning_job_id, inserted_by_this_caller)``.
+    """
+    initialise()
+    timestamp = now()
+    with tools.get_connection() as conn:
+        cursor = conn.execute(
+            'INSERT OR IGNORE INTO analysis_idempotency(key, job_id, created_at) VALUES (?, ?, ?)',
+            (str(key), str(job_id), timestamp),
+        )
+        row = conn.execute(
+            'SELECT job_id FROM analysis_idempotency WHERE key = ?', (str(key),)
+        ).fetchone()
+        winning_job_id = row[0]
+        inserted = cursor.rowcount == 1
+        if inserted:
+            conn.execute(
+                '''INSERT INTO worker_jobs
+                   (id, kind, status, payload_json, created_at, updated_at)
+                   VALUES (?, 'manual_analysis', 'queued', ?, ?, ?)''',
+                (str(job_id), json.dumps(payload or {}), timestamp, timestamp),
+            )
+    return winning_job_id, inserted
+
+
+def create_analysis_draft(job_id, *, finding=None, comparison=None, un_data=None,
+                          validation=None, draft_id=None, status='pending_review',
+                          reference_finding_id=None):
+    """Persist a manual result for review; approval is a separate transition."""
+    initialise()
+    draft_id = draft_id or str(uuid4())
+    timestamp = now()
+    with tools.get_connection() as conn:
+        conn.execute(
+            '''INSERT INTO analysis_drafts
+               (id, job_id, status, finding_json, comparison_json, un_data_json,
+                validation_json, revision, reference_finding_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)''',
+            (draft_id, str(job_id), str(status), json.dumps(finding or {}, default=str),
+             json.dumps(comparison, default=str) if comparison is not None else None,
+             json.dumps(un_data or [], default=str), json.dumps(validation or {}, default=str),
+             reference_finding_id, timestamp, timestamp),
+        )
+        conn.execute(
+            '''INSERT INTO analysis_draft_actions
+               (draft_id, action, revision, acted_at) VALUES (?, 'created', 1, ?)''',
+            (draft_id, timestamp),
+        )
+    return get_analysis_draft(draft_id)
+
+
+def get_analysis_draft(draft_id):
+    initialise()
+    with tools.get_connection() as conn:
+        conn.row_factory = tools.sqlite3.Row
+        row = conn.execute('SELECT * FROM analysis_drafts WHERE id = ?', (str(draft_id),)).fetchone()
+    if row is None:
+        return None
+    result = dict(row)
+    for field in ('finding_json', 'comparison_json', 'un_data_json', 'validation_json'):
+        raw = result.pop(field)
+        result[field.removesuffix('_json')] = json.loads(raw) if raw else None
+    return result
+
+
+def get_analysis_draft_for_job(job_id):
+    initialise()
+    with tools.get_connection() as conn:
+        row = conn.execute('SELECT id FROM analysis_drafts WHERE job_id = ?', (str(job_id),)).fetchone()
+    return get_analysis_draft(row[0]) if row else None
+
+
+def update_analysis_draft(draft_id, *, finding=None, expected_revision=None,
+                          status=None, finding_id=None, action='edited', note=None):
+    """Apply an optimistic and auditable draft edit or state transition."""
+    initialise()
+    timestamp = now()
+    updates = ['updated_at = ?', 'revision = revision + 1']
+    values = [timestamp]
+    if finding is not None:
+        updates.append('finding_json = ?'); values.append(json.dumps(finding, default=str))
+    if status is not None:
+        updates.append('status = ?'); values.append(str(status))
+    if finding_id is not None:
+        updates.append('finding_id = ?'); values.append(int(finding_id))
+    values.append(str(draft_id))
+    where = 'id = ?'
+    if expected_revision is not None:
+        where += ' AND revision = ?'; values.append(int(expected_revision))
+    with tools.get_connection() as conn:
+        cursor = conn.execute(f'UPDATE analysis_drafts SET {", ".join(updates)} WHERE {where}', values)
+        if cursor.rowcount != 1:
+            if get_analysis_draft(draft_id) is None:
+                raise ValueError('Analysis draft not found.')
+            raise RuntimeError('Analysis draft changed; reload it before saving.')
+        revision = conn.execute('SELECT revision FROM analysis_drafts WHERE id = ?', (str(draft_id),)).fetchone()[0]
+        conn.execute(
+            '''INSERT INTO analysis_draft_actions
+               (draft_id, action, revision, acted_at, note) VALUES (?, ?, ?, ?, ?)''',
+            (str(draft_id), action, revision, timestamp, note),
+        )
+    return get_analysis_draft(draft_id)
+
+
+def list_analysis_draft_actions(draft_id):
+    initialise()
+    with tools.get_connection() as conn:
+        conn.row_factory = tools.sqlite3.Row
+        return [dict(row) for row in conn.execute(
+            'SELECT * FROM analysis_draft_actions WHERE draft_id = ? ORDER BY id DESC', (str(draft_id),)
+        ).fetchall()]
 
 
 def get_job(job_id):
@@ -315,6 +472,84 @@ def load_settings(default):
     return {**default, **saved}
 
 
+def upsert_country_hunt_queue(items, *, job_id=None):
+    """Record the durable state of direct and bulk country hunts."""
+    initialise()
+    timestamp = now()
+    with tools.get_connection() as conn:
+        for item in items:
+            iso3 = str(item['iso3']).upper()
+            conn.execute(
+                '''INSERT INTO country_hunt_queue
+                   (iso3, country, last_attempt_at, outcome, last_job_id, updated_at)
+                   VALUES (?, ?, ?, 'queued', ?, ?)
+                   ON CONFLICT(iso3) DO UPDATE SET
+                     country=excluded.country, last_attempt_at=excluded.last_attempt_at,
+                     outcome='queued', last_job_id=excluded.last_job_id, updated_at=excluded.updated_at''',
+                (iso3, item.get('country') or item.get('label') or iso3, timestamp, job_id, timestamp),
+            )
+
+
+def finish_country_hunt_queue(run_id, *, outcome='complete', outcomes_by_iso3=None,
+                              successful_iso3s=None, next_eligible_at=None):
+    """Close queue rows after a run, retaining the last successful finding."""
+    initialise()
+    successes = {str(value).upper() for value in (successful_iso3s or [])}
+    timestamp = now()
+    with tools.get_connection() as conn:
+        rows = conn.execute('SELECT iso3 FROM country_hunt_queue WHERE last_run_id = ?',
+                            (str(run_id),)).fetchall()
+        for (iso3,) in rows:
+            row_outcome = (outcomes_by_iso3 or {}).get(iso3, outcome)
+            conn.execute(
+                '''UPDATE country_hunt_queue SET outcome=?, last_successful_finding_at=CASE
+                   WHEN ? THEN ? ELSE last_successful_finding_at END,
+                   next_eligible_at=?, last_run_id=?, updated_at=? WHERE iso3=?''',
+                (row_outcome, iso3 in successes, timestamp, next_eligible_at, str(run_id), timestamp, iso3),
+            )
+
+
+def attach_country_hunt_job(iso3s, job_id):
+    """Associate queue rows with the durable worker job before it starts."""
+    initialise()
+    with tools.get_connection() as conn:
+        for iso3 in iso3s:
+            conn.execute('UPDATE country_hunt_queue SET last_job_id=?, updated_at=? WHERE iso3=?',
+                         (str(job_id), now(), str(iso3).upper()))
+
+
+def finish_country_hunt_queue_for_job(job_id, *, outcome='error', next_eligible_at=None):
+    """Close queue rows when a run fails before a search run can be linked."""
+    initialise()
+    timestamp = now()
+    with tools.get_connection() as conn:
+        conn.execute(
+            '''UPDATE country_hunt_queue SET outcome=?, next_eligible_at=?, updated_at=?
+               WHERE last_job_id=? AND outcome='queued' ''',
+            (outcome, next_eligible_at, timestamp, str(job_id)),
+        )
+
+
+def mark_country_hunt_run(run_id, iso3s):
+    """Associate a newly-created discovery run with its country queue rows."""
+    initialise()
+    with tools.get_connection() as conn:
+        for iso3 in iso3s:
+            conn.execute('UPDATE country_hunt_queue SET last_run_id=?, updated_at=? WHERE iso3=?',
+                         (str(run_id), now(), str(iso3).upper()))
+
+
+def list_country_hunt_queue():
+    initialise()
+    with tools.get_connection() as conn:
+        conn.row_factory = tools.sqlite3.Row
+        return [dict(row) for row in conn.execute(
+            'SELECT iso3, country, last_attempt_at, last_successful_finding_at, '
+            'next_eligible_at, outcome, last_run_id, last_job_id, updated_at '
+            'FROM country_hunt_queue ORDER BY country'
+        ).fetchall()]
+
+
 def start_run(settings, owner_id=None):
     initialise()
     run_id = str(uuid4())
@@ -440,6 +675,7 @@ def list_candidates(run_id=None):
         'title', 'snippet', 'summary_decision', 'summary_reason', 'full_decision',
         'full_reason', 'error', 'finding_id', 'duplicate_candidate_id',
         'duplicate_of', 'duplicate_kind', 'canonical_url', 'source_classification',
+        'country_iso3', 'scope_country_iso3', 'scope_country', 'scope_mismatch',
     }
     for row in rows:
         details = json.loads(row['details_json'])
@@ -456,6 +692,13 @@ def list_candidates(run_id=None):
             result['extracted_country'] = ''
             result['extracted_iso3'] = ''
             result['extracted_summary'] = ''
+        scoped_iso3 = str(details.get('country_iso3') or '').upper()
+        if scoped_iso3:
+            result['scope_country_iso3'] = scoped_iso3
+            result['scope_country'] = tools.normalise_country_name(scoped_iso3) or scoped_iso3
+            result['scope_mismatch'] = (
+                bool(result['extracted_iso3']) and result['extracted_iso3'].upper() != scoped_iso3
+            )
         displayed.append(result)
     return displayed
 
@@ -509,5 +752,12 @@ def get_candidate(candidate_id):
     details = compact_candidate_details(details)
     for field in ('full_text', 'page_text', 'raw', 'provider_response'):
         details.pop(field, None)
+    scoped_iso3 = str(details.get('country_iso3') or '').upper()
+    extraction = details.get('extraction') if isinstance(details.get('extraction'), dict) else {}
+    extracted_iso3 = str(extraction.get('geography_iso3') or '').upper()
+    if scoped_iso3:
+        details['scope_country_iso3'] = scoped_iso3
+        details['scope_country'] = tools.normalise_country_name(scoped_iso3) or scoped_iso3
+        details['scope_mismatch'] = bool(extracted_iso3 and extracted_iso3 != scoped_iso3)
     result['details'] = details
     return result

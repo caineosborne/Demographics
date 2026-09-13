@@ -6,7 +6,9 @@
     <meta name="api-version" content="{{ api_version }}" />
     <title>{{ app_name }} · Admin</title>
     <link rel="stylesheet" href="/admin-assets/admin.css" />
+    <link rel="stylesheet" href="/admin-assets/research.css" />
     <script type="module" src="/admin-assets/api-client.js"></script>
+    <script type="module" src="/admin-assets/graph-renderer.js"></script>
     <script type="module" src="/admin-assets/admin.js"></script>
   </head>
   <body>
@@ -23,6 +25,7 @@
           <a href="#research" data-view="research">Research</a>
           <a href="#coverage" data-view="coverage">Country coverage</a>
           <a href="#findings" data-view="findings">Findings</a>
+          <a href="#graphs" data-view="graphs">Graphs &amp; reporting</a>
           <a href="#conflicts" data-view="conflicts">Conflicts</a>
           <a href="#submissions" data-view="submissions">Submissions</a>
           <a href="#exports" data-view="exports">Exports</a>
@@ -84,34 +87,118 @@
           </article>
         </section>
 
+        <section id="graphs" class="view" data-view-panel="graphs" hidden aria-labelledby="graphs-title">
+          <div class="section-intro"><p class="kicker">Reporting</p><h2 id="graphs-title">Graphs that keep the evidence attached.</h2><p>Compare the current WPP series with stored national observations. Every plotted article keeps its source class, date, and durable finding ID.</p></div>
+          <article class="card graph-controls-card">
+            <div class="card-heading"><div><p class="kicker">Versioned series</p><h3>Choose a country and metric</h3></div><span class="route-label">GET /api/v1/graph-series/{iso3}</span></div>
+            <div class="graph-control-grid">
+              <label class="field">Country <select data-graph-country name="graph_iso3" data-country-control><option value="">Loading countries…</option></select></label>
+              <fieldset class="graph-metric-options"><legend>Metrics</legend><label><input type="checkbox" data-graph-metric="population" checked> Population</label><label><input type="checkbox" data-graph-metric="births" checked> Births</label><label><input type="checkbox" data-graph-metric="deaths" checked> Deaths</label><label><input type="checkbox" data-graph-metric="natural_change"> Natural change</label><label><input type="checkbox" data-graph-metric="net_migration"> Net migration</label><label><input type="checkbox" data-graph-metric="total_fertility_rate"> Total fertility rate</label></fieldset>
+            </div>
+            <fieldset class="graph-release-options"><legend>Optional WPP alternate releases</legend><label><input type="checkbox" data-graph-revision="2022"> WPP 2022</label><label><input type="checkbox" data-graph-revision="2017"> WPP 2017</label><label><input type="checkbox" data-graph-revision="2012"> WPP 2012</label></fieldset>
+            <div class="review-actions"><button class="primary-button" type="button" data-load-graphs>Draw graphs</button><button class="quiet-button" type="button" data-refresh-graphs>Refresh series</button></div>
+            <div class="inline-state" data-graph-state data-state="empty" role="status" aria-live="polite"><span class="state-pill">Empty</span><span data-state-message>Choose a country to load the reporting series.</span></div>
+          </article>
+          <article class="card graph-report-card">
+            <div class="graph-report-summary" data-graph-summary>WPP historical estimates are solid blue; forecasts are dashed orange. Article marker shapes are the source-class key.</div>
+            <div class="graph-grid" data-graph-grid></div>
+          </article>
+          <article class="card graph-findings-card">
+            <div class="card-heading"><div><p class="kicker">Per-view browser state</p><h3>Article points</h3></div><span class="help">Hide a point for this browser view; it remains in the record.</span></div>
+            <div class="graph-finding-choices" data-graph-findings><p class="help">Load a series to see stored finding IDs.</p></div>
+          </article>
+        </section>
+
         <section id="analyse" class="view" data-view-panel="analyse" hidden>
-          <div class="section-intro"><p class="kicker">Source review</p><h2>Analyse a webpage</h2><p>Queue a durable analysis job, then follow its status from the API.</p></div>
-          <article class="card">
+          <div class="section-intro"><p class="kicker">Source review</p><h2>Analyse a webpage</h2><p>Bring one source into the evidence desk. Review the extraction before it enters the record.</p></div>
+          <article class="card analysis-intake">
             <form data-analysis-form>
-              <label class="field">Source URL <input name="url" type="url" placeholder="https://example.org/release" required /></label>
+              <label class="field">Source URL <input name="url" type="url" inputmode="url" placeholder="https://example.org/release" pattern="https?://.+" required aria-describedby="analysis-url-help" /></label>
+              <p id="analysis-url-help" class="help">Enter exactly one complete HTTP(S) URL. The page is fetched as-is; the system will not infer a link from notes or prose.</p>
               <label class="field">Country context <select name="country_iso3" data-country-control><option value="">No country context</option></select></label>
               <label class="check-field"><input name="compare" type="checkbox" checked /> Compare with WPP data</label>
-              <button class="primary-button" type="submit">Queue analysis</button>
+              <button class="primary-button" type="submit" data-analysis-submit>Fetch and analyse</button>
             </form>
-            <div class="job-state" data-analysis-state data-state="empty"><span class="state-pill">Empty</span><span data-state-message>Submit a URL to begin.</span></div>
+            <div class="job-state" data-analysis-state data-state="empty" role="status" aria-live="polite"><span class="state-pill">Empty</span><span data-state-message>Submit a URL to begin.</span></div>
+            <ol class="analysis-progress" data-analysis-progress aria-label="Analysis progress">
+              <li data-stage="fetching">Fetch source</li><li data-stage="extracting">Extract evidence</li><li data-stage="comparing">Compare with WPP</li><li data-stage="complete">Ready for review</li>
+            </ol>
+          </article>
+          <article class="card analysis-review" data-analysis-review hidden>
+            <div class="card-heading"><div><p class="kicker">Evidence trail</p><h3>Review this draft</h3></div><span class="route-label" data-draft-status>pending review</span></div>
+            <div class="review-summary" data-review-summary></div>
+            <div class="evidence-table-wrap"><table class="evidence-table"><caption>Structured metrics</caption><thead><tr><th>Metric</th><th>Reported</th><th>Unit / period</th><th>Evidence</th></tr></thead><tbody data-metrics-body></tbody></table></div>
+            <div class="review-columns"><section><h4>Attribution and period</h4><dl class="evidence-meta" data-attribution></dl></section><section><h4>UN comparison</h4><div class="comparison-list" data-comparison></div></section></div>
+            <label class="field">Edit finding JSON before approval <textarea data-draft-editor rows="12" spellcheck="false"></textarea></label>
+            <p class="help">Edits are versioned. Approval stores the edited draft; reject closes it without storing a finding.</p>
+            <div class="review-actions"><button class="primary-button" type="button" data-draft-approve>Approve and store</button><button class="quiet-button" type="button" data-draft-save>Save edits</button><button class="quiet-button" type="button" data-draft-rerun>Rerun</button><button class="quiet-button danger-button" type="button" data-draft-reject>Reject</button><button class="quiet-button danger-button" type="button" data-draft-remove>Remove</button><button class="quiet-button danger-button" type="button" data-draft-suppress>Suppress source</button></div>
+            <div class="inline-state" data-draft-action-state data-state="empty"><span class="state-pill">Empty</span><span data-state-message>No review action taken.</span></div>
           </article>
         </section>
 
         <section id="research" class="view" data-view-panel="research" hidden>
-          <div class="section-intro"><p class="kicker">Discovery</p><h2>Research</h2><p>Start a bounded research run and watch durable progress.</p></div>
-          <article class="card">
-            <form data-research-form>
-              <label class="field">Country focus <select name="country_iso3" data-country-control><option value="">All countries</option></select></label>
-              <label class="field">Maximum articles <input name="max_articles" type="number" min="1" max="100" value="1" /></label>
-              <button class="primary-button" type="submit">Queue research</button>
+          <div class="section-intro"><p class="kicker">Discovery</p><h2>Research controls</h2><p>Keep discovery bounded, run a direct country hunt, and inspect durable evidence trails.</p></div>
+          <article class="card research-controls">
+            <div class="card-heading"><div><p class="kicker">Saved controls</p><h3>News discovery settings</h3></div><span class="route-label">GET / PUT /api/v1/research/settings</span></div>
+            <form data-research-settings-form>
+              <div class="category-list" data-category-list></div>
+              <button class="quiet-button" type="button" data-add-category>+ Add news category</button>
+              <div class="control-grid"><label class="field">Candidate limit <input name="max_candidates" type="number" min="1" max="500" value="20" /></label><label class="field">Per-domain limit <input name="max_per_domain" type="number" min="1" max="10" value="2" /></label><label class="field">Reddit limit <input name="reddit_limit" type="number" min="1" max="100" value="30" /></label><label class="check-field"><input name="reddit_enabled" type="checkbox" checked /> Include Reddit discovery</label></div>
+              <div class="review-actions"><button class="primary-button" type="submit">Save discovery settings</button><button class="quiet-button" type="button" data-run-discovery>Run discovery with these settings</button></div>
             </form>
-            <div class="job-state" data-research-state data-state="empty"><span class="state-pill">Empty</span><span data-state-message>No research run is active.</span></div>
+            <div class="inline-state" data-settings-state data-state="empty"><span class="state-pill">Empty</span><span data-state-message>Load settings to begin.</span></div>
+          </article>
+          <article class="card country-hunt-card">
+            <div class="card-heading"><div><p class="kicker">Direct country search</p><h3>Search one country now</h3></div><span class="route-label">POST /api/v1/research/country-hunts</span></div>
+            <p class="help">Direct hunts always bypass automatic recency and eligibility gates. They use deterministic UN lookup only; no LLM comparison agent is run.</p>
+            <form data-country-hunt-form><label class="field">Country <select name="country_iso3" data-country-control><option value="">Choose a country</option></select></label><label class="field">Candidate limit <input name="max_results" type="number" min="1" max="20" value="12" /></label><button class="primary-button" type="submit">Search country</button></form>
+            <div class="job-state" data-country-hunt-state data-state="empty"><span class="state-pill">Empty</span><span data-state-message>No country hunt is active.</span></div>
+          </article>
+          <article class="card bulk-hunt-card">
+            <div class="card-heading"><div><p class="kicker">Coverage gaps</p><h3>Preview and queue a country batch</h3></div><span class="route-label">POST /api/v1/research/country-gap-preview</span></div>
+            <form data-gap-form><div class="control-grid"><label class="field">Name starts with <input name="prefix" value="Ja" maxlength="20" required /></label><label class="field">Freshness window (days) <input name="days" type="number" min="1" value="31" /></label><label class="field">Batch size <input name="country_count" type="number" min="1" max="100" value="5" /></label><label class="field">Start at <input name="start_at" type="number" min="1" value="1" /></label></div><button class="quiet-button" type="submit">Preview eligible gaps</button></form>
+            <div class="gap-preview" data-gap-preview hidden><p data-gap-summary></p><div class="selection-list" data-gap-selection></div><button class="primary-button" type="button" data-queue-batch disabled>Queue selected countries</button></div>
+            <div class="job-state" data-gap-state data-state="empty"><span class="state-pill">Empty</span><span data-state-message>Preview the next eligible countries.</span></div>
+          </article>
+          <article class="card queue-card"><div class="card-heading"><div><p class="kicker">Durable state</p><h3>Country hunt queue</h3></div><button class="quiet-button" type="button" data-refresh-queue>Refresh</button></div><div class="table-wrap"><table class="audit-table"><thead><tr><th>Country</th><th>Last attempt</th><th>Last finding</th><th>Next eligible</th><th>Outcome</th></tr></thead><tbody data-country-queue-body><tr><td colspan="5">Loading queue…</td></tr></tbody></table></div></article>
+          <article class="card run-history-card"><div class="card-heading"><div><p class="kicker">Audit trail</p><h3>Research runs</h3></div><button class="quiet-button" type="button" data-refresh-runs>Refresh</button></div><div class="run-history" data-run-history><p class="help">Loading run history…</p></div><div class="run-detail" data-run-detail hidden><h4 data-run-detail-title></h4><p class="help" data-run-detail-summary></p><div class="event-list" data-run-events></div><div class="candidate-list" data-run-candidates></div><div class="candidate-detail" data-candidate-detail hidden><h4 data-candidate-detail-title></h4><dl class="evidence-meta" data-candidate-detail-fields></dl></div></div></article>
+        </section>
+
+        <section id="coverage" class="view" data-view-panel="coverage" hidden>
+          <div class="section-intro"><p class="kicker">Record health</p><h2>Country coverage</h2><p>Counts show stored findings containing a non-zero value. Every row comes from the API, with the selected country filter applied server-side.</p></div>
+          <article class="card findings-card">
+            <div class="card-heading"><div><p class="kicker">Coverage summary</p><h3>Countries and metrics</h3></div><button class="quiet-button" type="button" data-refresh-coverage>Refresh</button></div>
+            <div class="table-wrap"><table class="audit-table"><thead><tr><th>Country</th><th>Findings</th><th>Population</th><th>Births</th><th>Deaths</th><th>Natural change</th><th>Migration</th><th>TFR</th></tr></thead><tbody data-coverage-body><tr><td colspan="8">Loading coverage…</td></tr></tbody></table></div>
           </article>
         </section>
 
+        <section id="findings" class="view" data-view-panel="findings" hidden>
+          <div class="section-intro"><p class="kicker">Evidence register</p><h2>Findings</h2><p>Inspect the stored observation, preserve its source classification, and make durable edits through the API.</p></div>
+          <article class="card findings-card">
+            <div class="card-heading"><div><p class="kicker">Stored record</p><h3>Finding table</h3></div><button class="quiet-button" type="button" data-refresh-findings>Refresh</button></div>
+            <div class="filter-grid"><label class="field">Country <select data-findings-country data-country-control><option value="">All countries</option></select></label><label class="field">Metric <select data-findings-metric><option value="">Any metric</option><option value="population">Population</option><option value="births">Births</option><option value="deaths">Deaths</option><option value="natural_change">Natural change</option><option value="net_migration">Net migration</option><option value="total_fertility_rate">Total fertility rate</option></select></label></div>
+            <div class="table-wrap"><table class="audit-table findings-table"><thead><tr><th>ID</th><th>Country</th><th>Effective</th><th>Metrics</th><th>Source class</th><th>Source</th><th>URL</th></tr></thead><tbody data-findings-body><tr><td colspan="7">Loading findings…</td></tr></tbody></table></div>
+            <div class="coverage-note" data-findings-status role="status">Choose a row to load its complete record.</div>
+          </article>
+          <article class="card record-editor" data-record-editor hidden>
+            <div class="card-heading"><div><p class="kicker">Record picker</p><h3 data-record-title>Finding</h3></div><span class="route-label">GET / PUT /api/v1/admin/findings/{id}</span></div>
+            <div class="safe-source" data-record-source></div>
+            <label class="field">Editable finding JSON <textarea data-record-json rows="18" spellcheck="false"></textarea></label>
+            <div class="review-actions"><button class="primary-button" type="button" data-record-save>Save record</button><button class="quiet-button" type="button" data-record-rerun>Remove and allow rerun</button><button class="quiet-button danger-button" type="button" data-record-delete>Delete record</button><button class="quiet-button danger-button" type="button" data-record-block>Delete and block source</button></div>
+            <div class="metric-actions"><label class="field">Metric to delete <select data-record-metric><option value="">Choose metric</option><option value="population">Population</option><option value="births">Births</option><option value="deaths">Deaths</option><option value="natural_change">Natural change</option><option value="net_migration">Net migration</option><option value="total_fertility_rate">Total fertility rate</option></select></label><button class="quiet-button danger-button" type="button" data-record-delete-metric>Delete metric</button></div>
+            <div class="inline-state" data-record-state data-state="empty"><span class="state-pill">Empty</span><span data-state-message>No record action taken.</span></div>
+          </article>
+          <article class="card source-rules-card">
+            <div class="card-heading"><div><p class="kicker">Source policy</p><h3>Source rules</h3></div><button class="quiet-button" type="button" data-refresh-source-rules>Refresh</button></div>
+            <p class="help">Exact canonical URL rules take precedence over domain rules. Classification overrides are explicit; exclude rules prevent storage. Disabled rules remain auditable and can be undone.</p>
+            <form data-source-rule-form><div class="control-grid"><label class="field">Match type <select name="match_type"><option value="canonical_url">Exact canonical URL</option><option value="domain">Domain</option></select></label><label class="field">Match value <input name="match_value" placeholder="https://example.org/release or example.org" required></label><label class="field">Action <select name="action"><option value="classify">Classify</option><option value="exclude">Exclude</option></select></label><label class="field">Classification <select name="classification"><option value="official_publisher">Official publisher</option><option value="secondary_attributed">Secondary · named source</option><option value="secondary_unattributed">Secondary · no named source</option></select></label></div><label class="field">Note <input name="note" placeholder="Why this policy exists"></label><button class="primary-button" type="submit">Save source rule</button></form>
+            <div class="table-wrap"><table class="audit-table"><thead><tr><th>Match</th><th>Action</th><th>Classification</th><th>State</th><th>Audit</th><th></th></tr></thead><tbody data-source-rules-body><tr><td colspan="6">Loading source rules…</td></tr></tbody></table></div>
+            <div class="rule-history" data-source-rule-history></div>
+          </article>
+          <article class="card blocked-sources-card"><div class="card-heading"><div><p class="kicker">Suppression list</p><h3>Blocked source URLs</h3></div><button class="quiet-button" type="button" data-refresh-blocked>Refresh</button></div><div class="table-wrap"><table class="audit-table"><thead><tr><th>Canonical URL</th><th>Blocked at</th><th></th></tr></thead><tbody data-blocked-body><tr><td colspan="3">Loading blocked sources…</td></tr></tbody></table></div></article>
+        </section>
+
         {% for view, title, copy in [
-          ('coverage', 'Country coverage', 'See where the record has useful evidence and where it needs attention.'),
-          ('findings', 'Findings', 'Review stored observations and their source trail.'),
           ('conflicts', 'Conflicts', 'A future review surface for competing observations.'),
           ('submissions', 'Submissions', 'A future queue for incoming source suggestions.'),
           ('exports', 'Exports', 'Prepare a public release when the record is ready.'),

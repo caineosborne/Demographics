@@ -14,7 +14,7 @@ export class ApiError extends Error {
   }
 }
 
-const TERMINAL_JOB_STATES = new Set(["completed", "complete", "failed", "stopped", "cancelled", "interrupted"]);
+const TERMINAL_JOB_STATES = new Set(["completed", "completed_with_errors", "complete", "failed", "stopped", "cancelled", "interrupted"]);
 
 const readJson = async (response) => {
   const contentType = response.headers.get("content-type") || "";

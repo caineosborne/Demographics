@@ -332,6 +332,17 @@ def initialise_findings_table() -> None:
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS source_rule_actions (
+                id INTEGER PRIMARY KEY,
+                rule_id INTEGER,
+                action TEXT NOT NULL,
+                before_json TEXT,
+                after_json TEXT,
+                acted_at TEXT NOT NULL,
+                note TEXT
+            )
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS fallback_providers (
                 domain TEXT PRIMARY KEY,
                 enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
@@ -602,6 +613,19 @@ def blocked_source_urls() -> set[str]:
         return {row[0] for row in conn.execute("SELECT canonical_url FROM blocked_sources")}
 
 
+def block_source_url(url: str) -> str:
+    """Suppress a URL before it has a stored finding, with an audit entry."""
+    canonical_url = canonicalise_source_url(url)
+    initialise_findings_table()
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO blocked_sources (canonical_url, original_url, blocked_at) VALUES (?, ?, ?)",
+            (canonical_url, str(url), datetime.now(timezone.utc).isoformat()),
+        )
+        _record_finding_action(conn, None, canonical_url, "source_suppressed")
+    return canonical_url
+
+
 def list_blocked_sources() -> list[dict[str, Any]]:
     """Return suppressed URLs for the small local reviewer control."""
     initialise_findings_table()
@@ -623,6 +647,39 @@ def list_source_rules() -> list[dict[str, Any]]:
             "SELECT * FROM source_rules ORDER BY match_type, match_value"
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def list_source_rule_actions(rule_id: int | None = None) -> list[dict[str, Any]]:
+    """Return the source-rule audit trail, newest changes first."""
+    initialise_findings_table()
+    sql = "SELECT * FROM source_rule_actions"
+    params: tuple[Any, ...] = ()
+    if rule_id is not None:
+        sql += " WHERE rule_id = ?"
+        params = (int(rule_id),)
+    sql += " ORDER BY acted_at DESC, id DESC"
+    with get_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+
+def _source_rule_snapshot(conn: sqlite3.Connection, rule_id: int) -> dict[str, Any] | None:
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM source_rules WHERE id = ?", (int(rule_id),)).fetchone()
+    return dict(row) if row is not None else None
+
+
+def _record_source_rule_action(conn: sqlite3.Connection, rule_id: int | None,
+                               action: str, before: dict[str, Any] | None,
+                               after: dict[str, Any] | None, note: str | None = None) -> None:
+    conn.execute(
+        """INSERT INTO source_rule_actions
+           (rule_id, action, before_json, after_json, acted_at, note)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (rule_id, action, json.dumps(before, default=str) if before is not None else None,
+         json.dumps(after, default=str) if after is not None else None,
+         datetime.now(timezone.utc).isoformat(), note),
+    )
 
 
 def list_fallback_providers() -> list[dict[str, Any]]:
@@ -787,6 +844,11 @@ def add_source_rule(match_type: str, match_value: str, action: str,
     initialise_findings_table()
     timestamp = datetime.now(timezone.utc).isoformat()
     with get_connection() as conn:
+        existing_row = conn.execute(
+            "SELECT id FROM source_rules WHERE match_type = ? AND match_value = ?",
+            (match_type, match_value),
+        ).fetchone()
+        before = _source_rule_snapshot(conn, existing_row[0]) if existing_row else None
         conn.execute("""INSERT INTO source_rules
             (match_type, match_value, action, classification, enabled, note, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -794,8 +856,57 @@ def add_source_rule(match_type: str, match_value: str, action: str,
               classification = excluded.classification, enabled = excluded.enabled,
               note = excluded.note, updated_at = excluded.updated_at""",
             (match_type, match_value, action, classification, int(enabled), note, timestamp, timestamp))
-        return conn.execute("SELECT id FROM source_rules WHERE match_type = ? AND match_value = ?",
-                            (match_type, match_value)).fetchone()[0]
+        rule_id = conn.execute("SELECT id FROM source_rules WHERE match_type = ? AND match_value = ?",
+                               (match_type, match_value)).fetchone()[0]
+        after = _source_rule_snapshot(conn, rule_id)
+        _record_source_rule_action(conn, rule_id, 'updated' if before else 'created', before, after, note)
+        return rule_id
+
+
+def disable_source_rule(rule_id: int) -> dict[str, Any]:
+    """Disable a rule while retaining its row and audit history for undo."""
+    initialise_findings_table()
+    with get_connection() as conn:
+        before = _source_rule_snapshot(conn, rule_id)
+        if before is None:
+            raise ValueError(f"No source rule exists with ID {rule_id}.")
+        if not before['enabled']:
+            return before
+        conn.execute("UPDATE source_rules SET enabled = 0, updated_at = ? WHERE id = ?",
+                     (datetime.now(timezone.utc).isoformat(), int(rule_id)))
+        after = _source_rule_snapshot(conn, rule_id)
+        _record_source_rule_action(conn, rule_id, 'disabled', before, after)
+        return after
+
+
+def undo_source_rule(rule_id: int) -> dict[str, Any]:
+    """Undo the latest source-rule mutation, preserving an audit entry."""
+    initialise_findings_table()
+    with get_connection() as conn:
+        latest = conn.execute(
+            "SELECT * FROM source_rule_actions WHERE rule_id = ? ORDER BY id DESC LIMIT 1",
+            (int(rule_id),),
+        ).fetchone()
+        if latest is None:
+            raise ValueError(f"No auditable change exists for source rule {rule_id}.")
+        before = json.loads(latest[3]) if latest[3] else None
+        current = _source_rule_snapshot(conn, rule_id)
+        if current is None:
+            raise ValueError(f"No source rule exists with ID {rule_id}.")
+        if before is None:
+            conn.execute("DELETE FROM source_rules WHERE id = ?", (int(rule_id),))
+            after = None
+        else:
+            conn.execute(
+                """UPDATE source_rules SET match_type=?, match_value=?, action=?, classification=?,
+                   enabled=?, note=?, updated_at=? WHERE id=?""",
+                (before['match_type'], before['match_value'], before['action'], before['classification'],
+                 before['enabled'], before['note'], datetime.now(timezone.utc).isoformat(), int(rule_id)),
+            )
+            after = _source_rule_snapshot(conn, rule_id)
+        _record_source_rule_action(conn, rule_id, 'undone', current, after,
+                                   f"Undid source-rule action {latest[0]}.")
+        return after or {'id': int(rule_id), 'status': 'deleted'}
 
 
 def source_classification(finding: dict[str, Any]) -> str:
@@ -972,6 +1083,8 @@ def store_webpage_finding(finding: dict[str, Any], provenance: dict | None = Non
 
         classification = source_classification(finding)
         finding = {**finding, 'source_classification': classification}
+        if classification == 'official_publisher':
+            finding['official_source'] = True
         cursor = conn.execute(
             """INSERT INTO webpage_findings (
                    source_url, canonical_url, effective_date, population_value, official_source,
@@ -1094,6 +1207,9 @@ def _finding_storage_fields(finding: dict[str, Any]) -> tuple:
     if resolved_iso3:
         finding["geography_iso3"] = resolved_iso3.upper()
     population = ((finding.get("statistics") or {}).get("population") or {})
+    classification = source_classification(finding)
+    if classification == 'official_publisher':
+        finding['official_source'] = True
     return (
         finding["url"],
         canonicalise_source_url(finding["url"]),
@@ -1103,7 +1219,7 @@ def _finding_storage_fields(finding: dict[str, Any]) -> tuple:
         finding.get("quoted_source"),
         finding.get("quoted_source_url"),
         json.dumps(finding, sort_keys=True),
-        source_classification(finding),
+        classification,
     )
 
 

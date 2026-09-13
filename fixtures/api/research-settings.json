@@ -1,0 +1,13 @@
+{
+  "settings": {
+    "categories": [
+      {"name":"Population","query":"2026 national population estimate","topic":"news","max_results":10,"time_range":"day","search_depth":"advanced","include_domains":[],"exclude_domains":[],"enabled":true},
+      {"name":"Births and fertility","query":"2026 annual births fertility national statistics","topic":"news","max_results":10,"time_range":"week","search_depth":"advanced","include_domains":[],"exclude_domains":[],"enabled":true}
+    ],
+    "reddit_enabled": false,
+    "reddit_limit": 30,
+    "max_candidates": 20,
+    "max_per_domain": 2,
+    "domain_limit_scope": "run"
+  }
+}

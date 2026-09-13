@@ -31,6 +31,16 @@ def delete_finding(finding_id: int) -> dict[str, Any]:
     return {"finding_id": validated, "status": "deleted"}
 
 
+def rerun_finding(finding_id: int) -> dict[str, Any]:
+    """Remove a finding and explicitly make its canonical source eligible again."""
+    validated = _validated_id(finding_id)
+    tools.delete_webpage_finding(validated)
+    recheck = next((item for item in tools.list_automatic_rechecks()
+                    if item.get('requested_finding_id') == validated), None)
+    return {"finding_id": validated, "status": "rerun_requested",
+            "canonical_url": recheck.get('canonical_url') if recheck else None}
+
+
 def delete_metric(finding_id: int, metric: str) -> dict[str, Any]:
     validated = _validated_id(finding_id)
     tools.delete_finding_metric(validated, metric)
@@ -68,6 +78,10 @@ def list_source_rules() -> list[dict[str, Any]]:
     return tools.list_source_rules()
 
 
+def list_source_rule_actions(rule_id: int | None = None) -> list[dict[str, Any]]:
+    return tools.list_source_rule_actions(rule_id)
+
+
 def upsert_source_rule(*, match_type: str, match_value: str, action: str,
                        classification: str | None = None, enabled: bool = True,
                        note: str | None = None) -> dict[str, Any]:
@@ -76,6 +90,14 @@ def upsert_source_rule(*, match_type: str, match_value: str, action: str,
     if result is None:
         raise ValueError(f"No source rule exists with ID {rule_id}.")
     return result
+
+
+def disable_source_rule(rule_id: int) -> dict[str, Any]:
+    return tools.disable_source_rule(_validated_id(rule_id))
+
+
+def undo_source_rule(rule_id: int) -> dict[str, Any]:
+    return tools.undo_source_rule(_validated_id(rule_id))
 
 
 def list_fallback_providers() -> list[dict[str, Any]]:

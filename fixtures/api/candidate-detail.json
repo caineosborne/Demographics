@@ -10,6 +10,26 @@
     "title": "Japan population release",
     "canonical_url": "https://example.test/release",
     "page_loaded": true,
-    "finding_id": 7
+    "finding_id": 7,
+    "country_iso3": "JPN",
+    "scope_country_iso3": "JPN",
+    "scope_country": "Japan",
+    "scope_mismatch": false,
+    "summary_decision": "relevant",
+    "summary_reason": "The result reports a national population release.",
+    "full_decision": "relevant",
+    "full_reason": "The article attributes a national figure to the statistics office.",
+    "alternative_sources": [
+      {
+        "url": "https://mirror.example.test/release",
+        "status": "accessed"
+      }
+    ],
+    "alternative_search_error": null,
+    "extraction": {
+      "geography": "Japan",
+      "geography_iso3": "JPN"
+    },
+    "error": null
   }
 }

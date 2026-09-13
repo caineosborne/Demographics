@@ -9,11 +9,12 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from urllib.parse import urlsplit
 
 import read_services
 import admin_services
@@ -164,6 +165,22 @@ class JobStartResponse(JsonObjectResponse):
     error: str | None = None
 
 
+class AnalysisDraftResponse(BaseModel):
+    id: str
+    job_id: str
+    status: str
+    finding: dict[str, Any] = Field(default_factory=dict)
+    comparison: dict[str, Any] | None = None
+    un_data: list[dict[str, Any]] = Field(default_factory=list)
+    validation: dict[str, Any] = Field(default_factory=dict)
+    revision: int
+    finding_id: int | None = None
+    reference_finding_id: int | None = None
+    created_at: str
+    updated_at: str
+    model_config = ConfigDict(extra="allow")
+
+
 class RunDetailResponse(JsonObjectResponse):
     id: str
     status: str
@@ -218,6 +235,10 @@ class SourceRuleRequest(BaseModel):
     note: str | None = None
 
 
+class SourceRuleActionResponse(ResearchHistoryResponse):
+    pass
+
+
 class FallbackProviderRequest(BaseModel):
     enabled: bool
     max_age_days: int
@@ -230,6 +251,26 @@ class ManualAnalysisRequest(BaseModel):
     url: str
     country_iso3: str | None = None
     compare: bool = True
+
+    @field_validator('url')
+    @classmethod
+    def validate_single_url(cls, value: str) -> str:
+        value = str(value or '').strip()
+        parsed = urlsplit(value)
+        if (any(character.isspace() for character in value) or value.count('://') != 1
+                or parsed.scheme not in {'http', 'https'} or not parsed.hostname
+                or parsed.username or parsed.password):
+            raise ValueError('url must contain exactly one absolute HTTP or HTTPS URL.')
+        return value
+
+
+class AnalysisDraftEditRequest(BaseModel):
+    finding: dict[str, Any]
+    expected_revision: int | None = None
+
+
+class AnalysisDraftRejectRequest(BaseModel):
+    note: str | None = None
 
 
 class ResearchStartRequest(BaseModel):
@@ -333,9 +374,17 @@ def create_app(
     @app.get("/api/v1/findings", response_model=FindingsResponse, tags=["read"])
     def findings(
         iso3: str | None = None,
+        metric: str | None = None,
         _auth: AuthContext = Depends(auth_dependency),
     ) -> FindingsResponse:
-        return FindingsResponse(items=_read_call(read_services.list_findings, iso3))
+        return FindingsResponse(items=_read_call(read_services.list_findings, iso3, metric))
+
+    @app.get("/api/v1/admin/findings/coverage", response_model=ResearchHistoryResponse, tags=["administration"])
+    def finding_coverage(
+        iso3: str | None = None,
+        _auth: AuthContext = Depends(auth_dependency),
+    ) -> ResearchHistoryResponse:
+        return ResearchHistoryResponse(items=_read_call(read_services.finding_coverage, iso3))
 
     @app.get("/api/v1/graph-series/{iso3}", response_model=GraphSeriesResponse, tags=["read"])
     def graph_series(
@@ -377,6 +426,10 @@ def create_app(
     def remove_finding(finding_id: int, _auth: AuthContext = Depends(auth_dependency)) -> MutationResponse:
         return MutationResponse(**_admin_call(admin_services.delete_finding, finding_id))
 
+    @app.post("/api/v1/admin/findings/{finding_id}/rerun", response_model_exclude_none=True, tags=["administration"])
+    def rerun_finding(finding_id: int, _auth: AuthContext = Depends(auth_dependency)) -> MutationResponse:
+        return MutationResponse(**_admin_call(admin_services.rerun_finding, finding_id))
+
     @app.post("/api/v1/admin/findings/{finding_id}/delete-metric", response_model_exclude_none=True, tags=["administration"])
     def remove_metric(finding_id: int, request: MetricDeleteRequest,
                       _auth: AuthContext = Depends(auth_dependency)) -> MutationResponse:
@@ -410,10 +463,25 @@ def create_app(
     def source_rules(_auth: AuthContext = Depends(auth_dependency)) -> ResearchHistoryResponse:
         return ResearchHistoryResponse(items=admin_services.list_source_rules())
 
+    @app.get("/api/v1/admin/source-rule-actions", response_model=ResearchHistoryResponse, tags=["administration"])
+    def source_rule_actions(
+        rule_id: int | None = None,
+        _auth: AuthContext = Depends(auth_dependency),
+    ) -> ResearchHistoryResponse:
+        return ResearchHistoryResponse(items=_admin_call(admin_services.list_source_rule_actions, rule_id))
+
     @app.post("/api/v1/admin/source-rules", response_model_exclude_none=True, tags=["administration"])
     def save_source_rule(request: SourceRuleRequest,
                          _auth: AuthContext = Depends(auth_dependency)) -> MutationResponse:
         return MutationResponse(**_admin_call(admin_services.upsert_source_rule, **request.model_dump()))
+
+    @app.delete("/api/v1/admin/source-rules/{rule_id}", response_model_exclude_none=True, tags=["administration"])
+    def disable_source_rule(rule_id: int, _auth: AuthContext = Depends(auth_dependency)) -> MutationResponse:
+        return MutationResponse(**_admin_call(admin_services.disable_source_rule, rule_id))
+
+    @app.post("/api/v1/admin/source-rules/{rule_id}/undo", response_model_exclude_none=True, tags=["administration"])
+    def undo_source_rule(rule_id: int, _auth: AuthContext = Depends(auth_dependency)) -> MutationResponse:
+        return MutationResponse(**_admin_call(admin_services.undo_source_rule, rule_id))
 
     @app.get("/api/v1/admin/fallback-providers", tags=["administration"])
     def fallback_providers(_auth: AuthContext = Depends(auth_dependency)) -> ResearchHistoryResponse:
@@ -426,17 +494,60 @@ def create_app(
 
     @app.post("/api/v1/analysis/jobs", status_code=202, response_model_exclude_none=True, tags=["analysis"])
     def start_analysis(request: ManualAnalysisRequest,
+                       idempotency_key: str | None = Header(default=None, alias='Idempotency-Key'),
                        _auth: AuthContext = Depends(auth_dependency)) -> JobStartResponse:
-        return JobStartResponse(**_admin_call(
-            research_services.start_manual_analysis,
-            request.url,
-            country_iso3=request.country_iso3,
-            compare=request.compare,
-        ))
+        kwargs = {'country_iso3': request.country_iso3, 'compare': request.compare}
+        if idempotency_key:
+            kwargs['idempotency_key'] = idempotency_key
+        return JobStartResponse(**_admin_call(research_services.start_manual_analysis, request.url, **kwargs))
 
     @app.get("/api/v1/analysis/jobs/{job_id}", response_model_exclude_none=True, tags=["analysis"])
     def analysis_status(job_id: str, _auth: AuthContext = Depends(auth_dependency)) -> JobStartResponse:
         return JobStartResponse(**_admin_call(research_services.get_manual_analysis, job_id))
+
+    @app.get("/api/v1/analysis/drafts/{draft_id}", response_model_exclude_none=True, tags=["analysis"])
+    def analysis_draft(draft_id: str, _auth: AuthContext = Depends(auth_dependency)) -> AnalysisDraftResponse:
+        return AnalysisDraftResponse(**_admin_call(research_services.get_analysis_draft, draft_id))
+
+    @app.get("/api/v1/analysis/drafts/{draft_id}/actions", response_model=ResearchHistoryResponse, tags=["analysis"])
+    def analysis_draft_actions(draft_id: str, _auth: AuthContext = Depends(auth_dependency)) -> ResearchHistoryResponse:
+        return ResearchHistoryResponse(items=_admin_call(research_services.get_analysis_draft_actions, draft_id))
+
+    @app.patch("/api/v1/analysis/drafts/{draft_id}", response_model_exclude_none=True, tags=["analysis"])
+    def edit_analysis_draft(draft_id: str, request: AnalysisDraftEditRequest,
+                            _auth: AuthContext = Depends(auth_dependency)) -> AnalysisDraftResponse:
+        return AnalysisDraftResponse(**_admin_call(
+            research_services.edit_analysis_draft, draft_id, request.finding,
+            expected_revision=request.expected_revision,
+        ))
+
+    @app.post("/api/v1/analysis/drafts/{draft_id}/approve", response_model_exclude_none=True, tags=["analysis"])
+    def approve_analysis_draft(draft_id: str, _auth: AuthContext = Depends(auth_dependency)) -> AnalysisDraftResponse:
+        return AnalysisDraftResponse(**_admin_call(research_services.approve_analysis_draft, draft_id))
+
+    @app.post("/api/v1/analysis/drafts/{draft_id}/reject", response_model_exclude_none=True, tags=["analysis"])
+    def reject_analysis_draft(draft_id: str, request: AnalysisDraftRejectRequest | None = None,
+                              _auth: AuthContext = Depends(auth_dependency)) -> AnalysisDraftResponse:
+        return AnalysisDraftResponse(**_admin_call(
+            research_services.reject_analysis_draft, draft_id, request.note if request else None,
+        ))
+
+    @app.post("/api/v1/analysis/drafts/{draft_id}/rerun", status_code=202,
+              response_model_exclude_none=True, tags=["analysis"])
+    def rerun_analysis_draft(draft_id: str,
+                             idempotency_key: str | None = Header(default=None, alias='Idempotency-Key'),
+                             _auth: AuthContext = Depends(auth_dependency)) -> JobStartResponse:
+        return JobStartResponse(**_admin_call(
+            research_services.rerun_analysis_draft, draft_id, idempotency_key=idempotency_key,
+        ))
+
+    @app.post("/api/v1/analysis/drafts/{draft_id}/remove", response_model_exclude_none=True, tags=["analysis"])
+    def remove_analysis_draft(draft_id: str, _auth: AuthContext = Depends(auth_dependency)) -> AnalysisDraftResponse:
+        return AnalysisDraftResponse(**_admin_call(research_services.remove_analysis_draft, draft_id))
+
+    @app.post("/api/v1/analysis/drafts/{draft_id}/suppress", response_model_exclude_none=True, tags=["analysis"])
+    def suppress_analysis_draft(draft_id: str, _auth: AuthContext = Depends(auth_dependency)) -> AnalysisDraftResponse:
+        return AnalysisDraftResponse(**_admin_call(research_services.remove_analysis_draft, draft_id, suppress=True))
 
     @app.post("/api/v1/research/jobs", status_code=202, response_model_exclude_none=True, tags=["research"])
     def start_research(request: ResearchStartRequest,
@@ -446,6 +557,10 @@ def create_app(
     @app.get("/api/v1/research/settings", tags=["research"])
     def research_settings(_auth: AuthContext = Depends(auth_dependency)) -> SettingsResponse:
         return SettingsResponse(settings=research_services.get_research_settings())
+
+    @app.get("/api/v1/research/country-queue", response_model=ResearchHistoryResponse, tags=["research"])
+    def country_hunt_queue(_auth: AuthContext = Depends(auth_dependency)) -> ResearchHistoryResponse:
+        return ResearchHistoryResponse(items=research_services.get_country_hunt_queue())
 
     @app.get("/api/v1/worker/jobs/{job_id}", response_model=WorkerJobResponse, tags=["worker"])
     def worker_job(job_id: str, _auth: AuthContext = Depends(auth_dependency)) -> WorkerJobResponse:
@@ -472,6 +587,10 @@ def create_app(
             request.country_iso3,
             max_results=request.max_results,
         ))
+
+    @app.get("/api/v1/research/country-hunts", response_model=ResearchHistoryResponse, tags=["research"])
+    def country_hunt_queue_alias(_auth: AuthContext = Depends(auth_dependency)) -> ResearchHistoryResponse:
+        return ResearchHistoryResponse(items=research_services.get_country_hunt_queue())
 
     @app.post("/api/v1/research/bulk-country-hunts", status_code=202, response_model_exclude_none=True, tags=["research"])
     def bulk_country_hunt(request: BulkCountryHuntRequest,
@@ -521,6 +640,7 @@ def _admin_call(function, *args, **kwargs):
             or message in {
                 "Analysis job not found.", "Research run not found.",
                 "Worker job not found.", "Candidate not found.",
+                "Analysis draft not found.",
             }
         ) else 400
         raise HTTPException(status_code=status, detail=message) from exc

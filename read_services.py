@@ -53,18 +53,80 @@ def list_country_choices() -> list[dict[str, str]]:
     return [{"name": row["Country"], "iso3": row["iso3"]} for row in rows]
 
 
-def list_findings(iso3: str | None = None) -> list[dict[str, Any]]:
-    """Return stored findings, optionally filtered by ISO3 identity."""
+def list_findings(iso3: str | None = None, metric: str | None = None) -> list[dict[str, Any]]:
+    """Return stored findings, optionally filtered by ISO3 and metric.
+
+    The API deliberately returns the same flattened display fields as the
+    existing database table. Metric filtering happens before private JSON is
+    redacted so the browser never needs to open SQLite or receive its raw
+    storage columns.
+    """
+
+    metric_keys = {
+        'population': 'population', 'births': 'births', 'deaths': 'deaths',
+        'natural_change': 'natural_change', 'net_migration': 'net_overseas_migration',
+        'total_fertility_rate': 'total_fertility_rate',
+    }
+    metric_key = None
+    if metric:
+        metric_key = metric_keys.get(str(metric).strip())
+        if metric_key is None:
+            raise ValueError(f"Unknown finding metric: {metric}.")
 
     internal_fields = {'Extracted JSON', 'Search run ID', 'Search candidate ID', 'Extracted at (UTC)'}
-    findings = [
-        {key: value for key, value in finding.items() if key not in internal_fields}
-        for finding in list_webpage_findings()
-    ]
+    findings = []
+    for finding in list_webpage_findings():
+        if metric_key:
+            try:
+                payload = json.loads(finding.get('Extracted JSON') or '{}')
+            except (TypeError, json.JSONDecodeError):
+                payload = {}
+            value = ((payload.get('statistics') or {}).get(metric_key) or {}).get('value')
+            if value is None:
+                continue
+        display = {key: value for key, value in finding.items() if key not in internal_fields}
+        try:
+            payload = json.loads(finding.get('Extracted JSON') or '{}')
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        if isinstance(payload.get('statistics'), dict):
+            display['Metrics'] = [key for key, metric_value in payload['statistics'].items()
+                                  if isinstance(metric_value, dict) and metric_value.get('value') is not None]
+        findings.append(display)
     if iso3 is None:
         return findings
     resolved = _strict_iso3(iso3)
     return [finding for finding in findings if str(finding.get("ISO3") or "").upper() == resolved]
+
+
+def finding_coverage(iso3: str | None = None) -> list[dict[str, Any]]:
+    """Pivot stored findings into the country/metric coverage table."""
+    raw_findings = list_webpage_findings()
+    if iso3 is not None:
+        resolved = _strict_iso3(iso3)
+        raw_findings = [row for row in raw_findings if str(row.get('ISO3') or '').upper() == resolved]
+    metric_names = ('population', 'births', 'deaths', 'natural_change',
+                    'net_migration', 'total_fertility_rate')
+    coverage: dict[tuple[str, str], dict[str, Any]] = {}
+    for finding in raw_findings:
+        country = str(finding.get('Country') or 'Unknown')
+        iso = str(finding.get('ISO3') or '')
+        key = (country, iso)
+        row = coverage.setdefault(key, {'country': country, 'iso3': iso, 'findings': 0})
+        row['findings'] += 1
+        try:
+            payload = json.loads(finding.get('Extracted JSON') or '{}')
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        statistics = payload.get('statistics') or {}
+        for name in metric_names:
+            source_key = 'net_overseas_migration' if name == 'net_migration' else name
+            value = (statistics.get(source_key) or {}).get('value')
+            if value is not None:
+                row[name] = int(row.get(name, 0)) + 1
+            else:
+                row.setdefault(name, 0)
+    return sorted(coverage.values(), key=lambda row: (row['country'], row['iso3']))
 
 
 def _strict_iso3(value: str) -> str:

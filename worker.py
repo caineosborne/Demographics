@@ -60,11 +60,13 @@ def run_job(job_id: str) -> dict[str, Any]:
             context = (research_services._country_context(payload['country_iso3'])
                        if payload.get('country_iso3') else None)
             research_services._run_manual(
-                job_id, payload['url'], context, payload.get('compare', True), worker_owner
+                job_id, payload['url'], context, payload.get('compare', True), worker_owner,
+                direct_service=True,
             )
         elif job['kind'] in {'news_search', 'country_search'}:
             if job['kind'] == 'country_search':
                 context = research_services._country_context(job['payload']['country_iso3'])
+                research_store.upsert_country_hunt_queue([context], job_id=job_id)
                 settings = research_services.country_hunt_settings(
                     context, job['payload'].get('max_results', 12)
                 ).model_dump()
@@ -73,6 +75,15 @@ def run_job(job_id: str) -> dict[str, Any]:
             research_store.acquire_worker_lock('discovery', job_id, worker_owner)
             try:
                 messages = list(BossAgent().run(settings, owner_id=worker_owner))
+                if job['kind'] == 'country_search' and messages:
+                    run_id = messages[-1][0]
+                    research_store.mark_country_hunt_run(run_id, [context['iso3']])
+                    candidates = research_store.list_candidates(run_id)
+                    successes = {candidate.get('extracted_iso3') for candidate in candidates if candidate.get('status') == 'complete'}
+                    research_store.finish_country_hunt_queue(
+                        run_id, successful_iso3s=successes,
+                        outcomes_by_iso3={context['iso3']: 'finding_ready' if context['iso3'] in successes else (candidates[0].get('status') if candidates else 'no_candidate')},
+                    )
                 research_store.update_job(job_id, status='complete', result={
                     'run_id': messages[-1][0] if messages else None,
                     'message': messages[-1][1] if messages else None,
@@ -87,6 +98,11 @@ def run_job(job_id: str) -> dict[str, Any]:
         else:
             raise ValueError(f"Unsupported worker job kind: {job['kind']}.")
     except Exception as exc:
+        if job['kind'] == 'country_search':
+            research_store.finish_country_hunt_queue_for_job(
+                job_id, outcome='error',
+                next_eligible_at=(research_services._now_datetime() + research_services.timedelta(days=31)).isoformat(),
+            )
         research_store.update_job(job_id, status='failed', error=str(exc))
     finally:
         if heartbeat_stop is not None:

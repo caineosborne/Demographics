@@ -25,10 +25,10 @@
   - [x] **Step 3.2 — Benchmark service functionality against Gradio**
   - [x] **Step 3.3 — Complete backend durability and frontend contracts**
   - [x] **Step 3.4 — Tighten extraction scope and validation**
-  - [ ] **Step 3.5 — Rebuild manual webpage analysis**
-  - [ ] **Step 3.6 — Rebuild research and country-hunt controls**
-  - [ ] **Step 3.7 — Rebuild findings and administration**
-  - [ ] **Step 3.8 — Rebuild the graphs and reporting**
+  - [x] **Step 3.5 — Rebuild manual webpage analysis**
+  - [x] **Step 3.6 — Rebuild research and country-hunt controls**
+  - [x] **Step 3.7 — Rebuild findings and administration**
+  - [x] **Step 3.8 — Rebuild the graphs and reporting**
   - [ ] **Step 3.9 — Cut over and retire Gradio**
   - [ ] **Step 3.10 — Simplify the post-Gradio codebase**
 - [ ] **Phase 4 — Add the claims and conflict framework**
@@ -1003,6 +1003,15 @@ model and orchestration boundary before this screen is implemented.
 
 **Complete when:** the current Add Webpage workflow is fully available without Gradio.
 
+**Completed 2026-09-13:** manual analysis now uses a direct FastAPI service
+pipeline: one deterministic HTTP(S) URL is fetched, extracted, and optionally
+compared with WPP, with durable progress and a reviewable analysis draft. A
+finding is stored only after explicit approval; edits use optimistic revisions,
+and reject/remove/suppress/rerun actions are durable and audited. The Jinja
+review desk renders evidence, attribution, period, comments, and comparison
+details in fixture or live API mode. The supported FastAPI path does not call
+the LangGraph manual workflow.
+
 ### Step 3.6 — Rebuild research and country-hunt controls
 
 - Preserve editable news categories, search depth, search window, candidate limits, and domain limits.
@@ -1017,6 +1026,12 @@ model and orchestration boundary before this screen is implemented.
   including progress events, decisions, recovery attempts, and errors.
 
 **Complete when:** the current research controls and the new country scheduling state are operable locally.
+
+**Completed 2026-09-13:** the FastAPI/Jinja research desk now saves and runs
+editable discovery controls, supports direct and bounded bulk country hunts,
+persists queue eligibility/outcomes, polls durable run state, and exposes gap,
+run, and candidate audit details including scope mismatches and recovery errors.
+Scheduled and bulk hunts retain the deterministic UN-only comparison behavior.
 
 ### Step 3.7 — Rebuild findings and administration
 
@@ -1033,6 +1048,11 @@ model and orchestration boundary before this screen is implemented.
 
 **Complete when:** every current finding and its administration controls work
 through the new UI without Gradio.
+
+**Completed 2026-09-13:** the API-backed findings workspace now provides
+country/metric filtering, coverage counts, safe source links, editable record
+JSON, metric and record removal, source blocking/unblocking, rerun eligibility,
+and reversible source-rule administration with a durable audit trail.
 
 ### Step 3.8 — Rebuild the graphs and reporting
 
@@ -1055,6 +1075,11 @@ Graph behaviour:
 
 **Complete when:** the new graphs reproduce current values and provenance
 without relying on Gradio.
+
+**Completed 2026-09-13:** browser-side responsive SVG graphs now consume the
+versioned graph-series endpoint, preserve WPP historic/forecast and alternate
+release values, expose the three required source markers, retain stable finding
+IDs, and support browser-only per-country hiding with durable-change reloads.
 
 ### Step 3.9 — Cut over and retire Gradio
 

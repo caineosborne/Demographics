@@ -1,0 +1,6 @@
+{
+  "items": [
+    {"iso3":"JPN","country":"Japan","last_attempt_at":"2026-09-13T01:00:00+00:00","last_successful_finding_at":"2026-09-12T01:00:00+00:00","next_eligible_at":"2026-10-14T01:00:00+00:00","outcome":"finding_ready","last_run_id":"run-example","last_job_id":"job-example","updated_at":"2026-09-13T01:00:00+00:00"},
+    {"iso3":"AUS","country":"Australia","last_attempt_at":"2026-09-10T01:00:00+00:00","last_successful_finding_at":null,"next_eligible_at":"2026-10-11T01:00:00+00:00","outcome":"no_candidate","last_run_id":"run-old","last_job_id":"job-old","updated_at":"2026-09-10T01:00:00+00:00"}
+  ]
+}

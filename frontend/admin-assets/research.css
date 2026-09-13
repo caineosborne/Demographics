@@ -1,0 +1,25 @@
+.research-controls,.country-hunt-card,.bulk-hunt-card,.queue-card,.run-history-card { max-width:1000px; margin-bottom:18px; }
+.control-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+.category-list { display:grid; gap:13px; }
+.category-row { padding:15px; border:1px solid var(--line); background:#f8fbf6; display:grid; gap:12px; }
+.category-heading { display:flex; justify-content:space-between; align-items:center; color:var(--teal); font-size:.78rem; }
+.category-row .field { font-size:.7rem; }
+.category-row .field input,.category-row .field select { padding:8px; }
+.table-wrap { overflow-x:auto; }
+.audit-table { width:100%; border-collapse:collapse; font-size:.72rem; }
+.audit-table th,.audit-table td { text-align:left; vertical-align:top; padding:10px 8px; border-top:1px solid var(--line); white-space:nowrap; }
+.audit-table th { color:var(--teal); }
+.audit-table small { display:block; color:var(--muted); font-weight:400; margin-top:3px; }
+.gap-preview { margin-top:16px; padding:14px; border-left:3px solid var(--coral); background:#fff7f1; }
+.gap-preview p { margin:0 0 10px; color:var(--muted); font-size:.75rem; }
+.selection-list { display:grid; gap:8px; margin-bottom:13px; }
+.excluded-scope { color:#a64e35 !important; }
+.run-history { display:grid; gap:7px; }
+.run-row { display:flex; justify-content:space-between; gap:12px; text-align:left; border:1px solid var(--line); background:#f8fbf6; color:var(--ink); padding:10px; cursor:pointer; font-size:.72rem; }
+.run-row span { color:var(--muted); }
+.run-row strong { color:var(--teal); }
+.run-detail { border-top:1px solid var(--line); margin-top:18px; padding-top:16px; }
+.run-detail h4 { margin:0; color:var(--teal); }
+.event-list,.candidate-list { max-height:240px; overflow:auto; margin-top:12px; padding:10px; background:#f4f7f1; font:.68rem/1.5 ui-monospace,monospace; color:#566761; }
+.event-list p,.candidate-list p { margin:0 0 6px; }
+@media (max-width:760px) { .control-grid { grid-template-columns:1fr; } .run-row { display:grid; } }
