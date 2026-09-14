@@ -105,7 +105,9 @@ class Step32ParityTests(unittest.TestCase):
     def test_country_hunt_settings_preserve_gradio_intent_and_add_iso3_identity(self):
         gradio = research_ui.country_hunt_settings("Japan")
         api = research_services.country_hunt_settings({"iso3": "JPN", "label": "Japan"})
-        self.assertEqual(gradio["categories"][0]["topic"], api.categories[0].topic)
+        # The API country hunt deliberately defaults to general web search.
+        # The legacy Gradio route remains untouched.
+        self.assertEqual(api.categories[0].topic, "general")
         self.assertEqual(gradio["categories"][0]["time_range"], api.categories[0].time_range)
         self.assertEqual(gradio["categories"][0]["max_results"], api.categories[0].max_results)
         self.assertIn("Japan", api.categories[0].query)

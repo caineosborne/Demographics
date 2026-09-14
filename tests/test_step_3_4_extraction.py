@@ -1,4 +1,5 @@
 import json
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -6,7 +7,10 @@ from unittest.mock import patch
 from agents import (
     EXTRACTION_PROMPT_VERSION,
     EXTRACTION_RULE_VERSION,
+    LLMInvocationTimeout,
     RelevantResult,
+    invoke_llm_with_timeout,
+    normalize_extracted_result,
     validate_extracted_result,
 )
 
@@ -34,6 +38,19 @@ class Step34ExtractionTests(unittest.TestCase):
                 else:
                     self.assertNotEqual(validation["status"], "validated")
 
+    def test_application_timeout_detaches_a_provider_call(self):
+        class SlowRunnable:
+            def invoke(self, _messages):
+                time.sleep(0.2)
+                return "too late"
+
+        with patch("agents._llm_timeout_seconds", return_value=0.01):
+            started = time.perf_counter()
+            with self.assertRaises(LLMInvocationTimeout):
+                invoke_llm_with_timeout("extraction_low_effort", SlowRunnable(), [])
+
+        self.assertLess(time.perf_counter() - started, 0.1)
+
     def test_ambiguous_missing_evidence_is_reviewable(self):
         finding = self.examples[-1]["finding"].copy()
         finding["statistics"] = {"population": {"value": 124600000}}
@@ -55,6 +72,49 @@ class Step34ExtractionTests(unittest.TestCase):
         validation = validate_extracted_result(result)
         self.assertEqual(validation["status"], "validated")
         self.assertEqual(result.statistics.population.value, 5324700)
+
+    def test_space_grouped_evidence_numbers_validate_without_a_retry(self):
+        finding = self.examples[-1]["finding"].copy()
+        finding["statistics"] = {"population": {
+            "value": 11424031, "source_value": 11424031,
+            "evidence_excerpt": "11 424 031 No. Resident population in 2025.",
+            "metric_type": "population", "unit": "people",
+            "observation_status": "estimated", "national_scope_status": "national",
+            "measured_period": "2025",
+        }}
+        result = RelevantResult.model_validate(finding)
+        self.assertEqual(validate_extracted_result(result)["status"], "validated")
+
+    def test_explicit_million_unit_is_normalized_before_un_comparison(self):
+        finding = self.examples[-1]["finding"].copy()
+        finding["statistics"] = {"population": {
+            "value": 58.943, "source_value": 58.943,
+            "evidence_excerpt": "Italy's population was steady at 58.943 at the start of 2026.",
+            "metric_type": "population", "unit": "million people",
+            "observation_status": "reported", "national_scope_status": "national",
+            "measured_period": "start of 2026",
+        }}
+        result = RelevantResult.model_validate(finding)
+        normalize_extracted_result(result)
+        population = result.statistics.population
+        self.assertEqual(population.value, 58_943_000)
+        self.assertEqual(population.source_value, 58.943)
+        self.assertIn("Normalized", population.normalization_note)
+        self.assertEqual(validate_extracted_result(result)["status"], "validated")
+
+    def test_normalized_million_value_is_not_scaled_twice(self):
+        finding = self.examples[-1]["finding"].copy()
+        finding["statistics"] = {"population": {
+            "value": 58_943_000, "source_value": 58.943,
+            "evidence_excerpt": "Italy's population was steady at 58.943 at the start of 2026.",
+            "metric_type": "population", "unit": "million people",
+            "observation_status": "reported", "national_scope_status": "national",
+            "measured_period": "start of 2026",
+        }}
+        result = RelevantResult.model_validate(finding)
+        normalize_extracted_result(result)
+        self.assertEqual(result.statistics.population.value, 58_943_000)
+        self.assertEqual(validate_extracted_result(result)["status"], "validated")
 
     def test_metric_type_must_match_the_statistics_field(self):
         finding = self.examples[-1]["finding"].copy()
@@ -218,9 +278,9 @@ class Step34ExtractionTests(unittest.TestCase):
                 "provenance": {"submission_type": "manual"},
             })
         self.assertEqual(response["storage"]["status"], "stored")
-        self.assertEqual(response["result"].extraction_prompt_version, "3.4.1")
+        self.assertEqual(response["result"].extraction_prompt_version, EXTRACTION_PROMPT_VERSION)
         stored_finding = store.call_args.args[0]
-        self.assertEqual(stored_finding["extraction_rule_version"], "3.4.1")
+        self.assertEqual(stored_finding["extraction_rule_version"], EXTRACTION_RULE_VERSION)
         self.assertEqual(stored_finding["statistics"]["population"]["value"], 124600000)
 
 

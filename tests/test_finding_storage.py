@@ -251,16 +251,19 @@ class FindingStorageTests(unittest.TestCase):
         self.assertEqual(stored['status'], 'stored')
 
     def test_fallback_provider_is_admitted_when_country_has_recent_article_data(self):
-        tools.store_webpage_finding({**self.finding, 'url': 'https://official.test/japan', 'geography': 'Japan'})
+        tools.store_webpage_finding({
+            **self.finding, 'url': 'https://official.test/japan', 'geography': 'Japan', 'geography_iso3': 'JPN',
+        })
         stored = tools.store_webpage_finding({
-            **self.finding, 'url': 'https://ourworldindata.org/grapher/japan-population', 'geography': 'Japan',
+            **self.finding, 'url': 'https://ourworldindata.org/grapher/japan-population',
+            'geography': 'Japan', 'geography_iso3': 'JPN',
         }, {
             'submission_type': 'automatic',
             'published_date': datetime.now(timezone.utc).isoformat(),
         })
-        self.assertEqual(stored['status'], 'stored')
+        self.assertEqual(stored['status'], 'excluded_fallback_not_needed')
 
-    def test_stale_or_undated_fallback_provider_is_admitted(self):
+    def test_stale_or_undated_fallback_provider_is_excluded(self):
         for index, published_date in enumerate((None, (datetime.now(timezone.utc) - timedelta(days=91)).isoformat())):
             with self.subTest(published_date=published_date):
                 stored = tools.store_webpage_finding({
@@ -270,7 +273,17 @@ class FindingStorageTests(unittest.TestCase):
                 }, {
                     'submission_type': 'automatic', 'published_date': published_date,
                 })
-                self.assertEqual(stored['status'], 'stored')
+                self.assertEqual(stored['status'], 'excluded_fallback_not_needed')
+
+    def test_automatic_owid_wpp_page_is_excluded_as_un_derived(self):
+        stored = tools.store_webpage_finding({
+            **self.finding,
+            'url': 'https://ourworldindata.org/profile/population-demography/japan',
+            'geography': 'Japan', 'geography_iso3': 'JPN',
+            'quoted_source': 'United Nations, World Population Prospects',
+            'quoted_source_url': 'https://population.un.org/wpp/',
+        }, {'submission_type': 'automatic', 'published_date': None})
+        self.assertEqual(stored['status'], 'excluded_un_derived_source')
 
     def test_disabling_fallback_provider_takes_effect_without_code_change(self):
         tools.initialise_findings_table()

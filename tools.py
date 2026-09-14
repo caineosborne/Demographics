@@ -1066,12 +1066,26 @@ def _fallback_exclusion(finding: dict[str, Any], provenance: dict[str, Any], con
     provider = fallback_provider_for_url(finding['url'])
     if provider is None:
         return None
+    source_provenance = " ".join(str(finding.get(field) or "") for field in (
+        "quoted_source", "quoted_source_url",
+    )).casefold()
+    if (str(provider["domain"]).casefold() == "ourworldindata.org"
+            and re.search(r"\b(?:united nations|world population prospects|wpp|un population division)\b",
+                          source_provenance)):
+        return {
+            "status": "excluded_un_derived_source",
+            "reason": (
+                "Our World in Data page is attributed to United Nations / World Population "
+                "Prospects data and is not independent evidence."
+            ),
+        }
     country_iso3 = finding.get('geography_iso3') or ''
     country_label = finding.get('geography') or country_iso3
     if country_iso3 and _has_recent_article_datapoint(
         conn, country_iso3, int(provider['only_when_country_blank_days'])
     ):
         return {
+            "status": "excluded_fallback_not_needed",
             'reason': (f"{country_label} already has an article-derived datapoint acquired in the preceding "
                        f"{provider['only_when_country_blank_days']} days."),
         }
@@ -1084,6 +1098,7 @@ def _fallback_exclusion(finding: dict[str, Any], provenance: dict[str, Any], con
         )
         if not provider.get('allow_undated_seed') or not is_undated_profile:
             return {
+                "status": "excluded_fallback_not_needed",
                 'reason': (
                     f"Fallback provider {provider['domain']} requires a parseable publication date "
                     "unless it is an enabled undated country profile."
@@ -1096,6 +1111,7 @@ def _fallback_exclusion(finding: dict[str, Any], provenance: dict[str, Any], con
     age = datetime.now(timezone.utc) - published
     if age > timedelta(days=int(provider['max_age_days'])):
         return {
+            "status": "excluded_fallback_not_needed",
             'reason': (f"Fallback provider {provider['domain']} article is older than "
                        f"{provider['max_age_days']} days."),
         }
@@ -1139,6 +1155,14 @@ def store_webpage_finding(finding: dict[str, Any], provenance: dict | None = Non
         ).fetchone()
         if duplicate_url:
             return {"status": "excluded_duplicate_url", "existing_id": duplicate_url[0]}
+
+        fallback_exclusion = _fallback_exclusion(finding, provenance, conn)
+        if fallback_exclusion:
+            return {
+                "status": fallback_exclusion["status"],
+                "canonical_url": canonical_url,
+                "reason": fallback_exclusion["reason"],
+            }
 
         classification = source_classification(finding)
         finding = {**finding, 'source_classification': classification}

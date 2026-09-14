@@ -198,8 +198,8 @@ class ApiBoundaryTests(unittest.TestCase):
             "https://example.test", country_iso3=None, compare=True, review_before_store=False
         )
         research.assert_called_once_with({})
-        hunt.assert_called_once_with("JPN", max_results=12)
-        bulk.assert_called_once_with(["JPN", "AUS"], max_results=5)
+        hunt.assert_called_once_with("JPN", max_results=12, topic="general")
+        bulk.assert_called_once_with(["JPN", "AUS"], max_results=5, topic="general")
         stop.assert_called_once_with("run-1")
 
 

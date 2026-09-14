@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse
@@ -281,11 +281,13 @@ class ResearchStartRequest(BaseModel):
 class CountryHuntRequest(BaseModel):
     country_iso3: str
     max_results: int = 12
+    topic: Literal['general', 'news'] = 'general'
 
 
 class BulkCountryHuntRequest(BaseModel):
     country_iso3s: list[str]
     max_results: int = 5
+    topic: Literal['general', 'news'] = 'general'
 
 
 class CountryGapPreviewRequest(BaseModel):
@@ -588,6 +590,7 @@ def create_app(
             research_services.start_country_hunt,
             request.country_iso3,
             max_results=request.max_results,
+            topic=request.topic,
         ))
 
     @app.get("/api/v1/research/country-hunts", response_model=ResearchHistoryResponse, tags=["research"])
@@ -601,6 +604,7 @@ def create_app(
             research_services.start_bulk_country_hunt,
             request.country_iso3s,
             max_results=request.max_results,
+            topic=request.topic,
         ))
 
     @app.post("/api/v1/research/country-gap-preview", response_model=CountryGapPreviewResponse, tags=["research"])

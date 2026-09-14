@@ -327,9 +327,10 @@ def save_research_settings(settings: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def start_country_hunt(country_iso3: str, *, max_results: int = 12) -> dict[str, Any]:
+def start_country_hunt(country_iso3: str, *, max_results: int = 12,
+                       topic: str = 'general') -> dict[str, Any]:
     context = _country_context(country_iso3)
-    settings = country_hunt_settings(context, max_results)
+    settings = country_hunt_settings(context, max_results, topic=topic)
     research_store.upsert_country_hunt_queue([context])
     result = _start_research(
         settings.model_dump(), queue_iso3s=[context['iso3']], persist_settings=False,
@@ -338,14 +339,17 @@ def start_country_hunt(country_iso3: str, *, max_results: int = 12) -> dict[str,
     return result
 
 
-def country_hunt_settings(context: dict[str, str], max_results: int = 12) -> SearchSettings:
+def country_hunt_settings(context: dict[str, str], max_results: int = 12,
+                          *, topic: str = 'general') -> SearchSettings:
     if not 1 <= int(max_results) <= 20:
         raise ValueError('max_results must be between 1 and 20.')
+    if topic not in {'general', 'news'}:
+        raise ValueError('country hunt topic must be general or news.')
     return SearchSettings(
         categories=[{
             'name': f'Country hunt: {context["label"]}',
             'query': HUNT_QUERY.format(country=_country_hunt_query_name(context['label'])),
-            'topic': 'news', 'max_results': int(max_results),
+            'topic': topic, 'max_results': int(max_results),
             'time_range': 'year', 'search_depth': 'advanced',
             'country_iso3': context['iso3'],
         }],
@@ -355,16 +359,19 @@ def country_hunt_settings(context: dict[str, str], max_results: int = 12) -> Sea
     )
 
 
-def start_bulk_country_hunt(country_iso3s: list[str], *, max_results: int = 5) -> dict[str, Any]:
+def start_bulk_country_hunt(country_iso3s: list[str], *, max_results: int = 5,
+                             topic: str = 'general') -> dict[str, Any]:
     if not country_iso3s or len(country_iso3s) > 100:
         raise ValueError('country_iso3s must contain between 1 and 100 countries.')
     contexts = [_country_context(value) for value in country_iso3s]
     if not 1 <= int(max_results) <= 20:
         raise ValueError('max_results must be between 1 and 20.')
+    if topic not in {'general', 'news'}:
+        raise ValueError('country hunt topic must be general or news.')
     categories = [{
         'name': f'Country hunt: {context["label"]}',
         'query': HUNT_QUERY.format(country=_country_hunt_query_name(context['label'])),
-        'topic': 'news', 'max_results': int(max_results),
+        'topic': topic, 'max_results': int(max_results),
         'time_range': 'year', 'search_depth': 'advanced',
         'country_iso3': context['iso3'],
     } for context in contexts]
@@ -413,6 +420,11 @@ def stop_research(run_id: str) -> dict[str, Any]:
     status = run['status']
     if status in {'running', 'stopping'}:
         status = research_store.request_run_stop(run_id)
+        research_store.log_event(run_id, {
+            'event': 'stop_requested',
+            'message': 'Stop requested through the API; the current operation will finish or time out.',
+            'source': 'api',
+        })
         if task is not None and task[0].is_alive():
             task[1].set()
     # A completed/failed/interrupted run is terminal and must not be reported

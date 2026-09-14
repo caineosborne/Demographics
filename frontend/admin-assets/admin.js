@@ -109,6 +109,53 @@ const fixtureFetch = async (path, options = {}) => {
 
 const api = createApiClient({ fetchImpl: fixtureMode ? fixtureFetch : window.fetch.bind(window) });
 
+const RESEARCH_POLL_INTERVAL_MS = 5000;
+const RESEARCH_POLL_MAX_ATTEMPTS = 180;
+
+function elapsedLabel(startedAt) {
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+  const minutes = Math.floor(elapsedSeconds / 60);
+  const seconds = elapsedSeconds % 60;
+  return minutes ? `${minutes}m ${String(seconds).padStart(2, "0")}s elapsed` : `${seconds}s elapsed`;
+}
+
+function researchPollingStatus(current, startedAt) {
+  const events = current.events || current.progress?.logs || [];
+  return `${current.status} · ${events.length} log entries · ${elapsedLabel(startedAt)}`;
+}
+
+async function copyToClipboard(text) {
+  const value = String(text || "");
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return;
+    } catch (error) {
+      // Local HTTP pages often do not receive clipboard permission. Use the
+      // legacy browser command as a fallback.
+    }
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.top = "-1000px";
+  textarea.style.opacity = "0";
+  document.body.append(textarea);
+  textarea.focus();
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("Copy is unavailable in this browser. Select the text and copy it manually.");
+}
+
+function showCopied(button, label) {
+  const original = button.dataset.label || button.textContent;
+  button.dataset.label = original;
+  button.textContent = label;
+  window.setTimeout(() => { button.textContent = original; }, 1200);
+}
+
 const graphState = {
   payloadByCountry: new Map(),
   hiddenByCountry: new Map(),
@@ -363,9 +410,16 @@ function renderResearchRunDetail(run, { resetLogVisibility = false, target = "cu
   activityEvents.forEach((event) => {
     const p = document.createElement("p");
     const subject = event.message || event.error || JSON.stringify(event.outcomes || event);
-    const url = event.url ? ` · ${event.url}` : "";
+    const url = event.url || "";
     const candidate = event.candidate_id ? ` · candidate #${event.candidate_id}` : "";
-    p.textContent = `${event.at || event.created_at || ""} · ${event.event || event.stage || "progress"}${candidate} · ${subject}${url}`;
+    p.append(document.createTextNode(`${event.at || event.created_at || ""} · ${event.event || event.stage || "progress"}${candidate} · ${subject}`));
+    if (url) {
+      p.append(document.createTextNode(" · "));
+      const link = document.createElement("a");
+      link.href = url; link.target = "_blank"; link.rel = "noopener noreferrer";
+      link.textContent = url;
+      p.append(link);
+    }
     eventList.append(p);
   });
   if (!eventList.children.length) {
@@ -395,17 +449,23 @@ function renderResearchRunDetail(run, { resetLogVisibility = false, target = "cu
     const mismatch = candidate.scope_mismatch ? " · SCOPE MISMATCH" : "";
     const relevance = candidate.full_decision || candidate.summary_decision || "not reviewed";
     const geography = candidate.extracted_country || candidate.extracted_iso3 || "not checked";
+    // A relevant model decision is not confirmation. A tick means the
+    // article is durably present in the findings database.
+    const confirmed = candidate.status === "complete" && Boolean(candidate.finding_id);
+    const inProgress = ["reviewing_summary", "fetching", "searching_alternative", "reviewing_full_text", "extracting", "comparing"].includes(candidate.status);
+    const iconState = confirmed ? "yes" : inProgress ? "unclear" : "no";
     const label = document.createElement("span");
     const icon = document.createElement("span");
-    icon.className = `relevance-icon relevance-${relevance === "relevant" ? "yes" : relevance === "irrelevant" ? "no" : "unclear"}`;
-    icon.textContent = relevance === "relevant" ? "✓" : relevance === "irrelevant" ? "✕" : "?";
+    icon.className = `relevance-icon relevance-${iconState}`;
+    icon.textContent = confirmed ? "✓" : inProgress ? "?" : "✕";
+    icon.title = confirmed ? "Confirmed: stored in the database" : inProgress ? "Still being processed" : "Not confirmed in the database";
     label.append(icon, document.createTextNode(` #${candidate.id} · ${candidate.status} · ${relevance}${scope}${mismatch} · ${geography} · ${candidate.full_reason || candidate.summary_reason || ""}`));
     button.append(label);
     const url = candidate.url || candidate.loaded_url || candidate.canonical_url;
     if (url) { const link = document.createElement("a"); link.href = url; link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = url; link.addEventListener("click", (event) => event.stopPropagation()); button.append(link); }
     button.addEventListener("click", () => loadCandidateDetail(candidate.id, target)); candidates.append(button);
   });
-  const copyText = (text, button, done) => navigator.clipboard.writeText(text).then(() => { button.textContent = done; setTimeout(() => { button.textContent = button.dataset.label; }, 1200); });
+  const copyText = (text, button, done) => copyToClipboard(text).then(() => showCopied(button, done)).catch(showGlobalError);
   const copyLog = $(`[data-run-copy-log]`, detail);
   const copyLlm = $(`[data-run-copy-llm]`, detail);
   const copyTable = $(`[data-run-copy-table]`, detail);
@@ -447,17 +507,24 @@ async function loadCandidateDetail(candidateId, target = "current") {
     const candidate = await api.request(`/api/v1/research/candidates/${encodeURIComponent(candidateId)}`);
     const fields = candidate.details || {};
     const extraction = fields.extraction || {};
+    const storage = fields.storage || {};
     detail.hidden = false;
     $(`[data-candidate-detail-title]`, detail).textContent = `Candidate #${candidate.id} · ${candidate.status}`;
     const body = $(`[data-candidate-detail-fields]`, detail); body.replaceChildren();
     const values = [
+      ["Database confirmation", fields.finding_id ? `Confirmed as finding #${fields.finding_id}` : "Not stored in the findings database"],
+      ["Outcome", candidate.status || "—"],
+      ["Title", fields.title || "—"],
+      ["Search result snippet", fields.snippet || "—"],
       ["URL", fields.url || candidate.url || fields.loaded_url || fields.canonical_url || "—"],
       ["Summary decision", fields.summary_decision || "—"], ["Summary reason", fields.summary_reason || "—"],
       ["Full decision", fields.full_decision || "—"], ["Full reason", fields.full_reason || "—"],
       ["Recovery attempts", JSON.stringify(fields.alternative_sources || fields.recovery_attempts || [])],
       ["Recovery error", fields.alternative_search_error || "—"], ["Scope", fields.scope_country_iso3 || fields.country_iso3 || "—"],
       ["Extracted geography", extraction.geography_iso3 || extraction.geography || "—"],
-      ["Scope mismatch", fields.scope_mismatch ? "Yes — excluded from this hunt" : "No"], ["Error", fields.error || "—"],
+      ["Extraction status", storage.status || "—"],
+      ["UN comparison / storage reason", storage.reason || "—"],
+      ["Search context vs allocated country", fields.scope_mismatch ? "Different country — retained and allocated from article evidence" : "Same country or not applicable"], ["Error", fields.error || "—"],
     ];
     values.forEach(([label, value]) => {
       const dt = document.createElement("dt"); dt.textContent = label;
@@ -474,36 +541,40 @@ async function runDiscovery(form) {
   // Polling was previously configured as maxAttempts: 60 (one minute).
   const state = $(`[data-settings-state]`); setState(state, "running", "Saving controls and queueing discovery…");
   let runId = "";
+  let startedAt = 0;
   try {
     const payload = { categories: readCategoryEditors(), max_candidates: Number(form.elements.max_candidates.value), max_per_domain: Number(form.elements.max_per_domain.value), reddit_limit: Number(form.elements.reddit_limit.value), reddit_enabled: form.elements.reddit_enabled.checked };
     await api.request("/api/v1/research/settings", { method: "PUT", body: { settings: payload } });
     const job = await api.request("/api/v1/research/jobs", { method: "POST", body: { settings: payload } });
     runId = job.run_id || job.id; setState(state, "running", `Run ${runId} is running.`);
-    await api.pollJob(`/api/v1/research/jobs/${runId}`, { maxAttempts: 180, onUpdate: (current) => { const currentState = researchPollUpdate(runId, current); setState(state, currentState, `${current.status} · ${(current.events || current.progress?.logs || []).length} log entries.`); } });
+    startedAt = Date.now();
+    await api.pollJob(`/api/v1/research/jobs/${runId}`, { intervalMs: RESEARCH_POLL_INTERVAL_MS, maxAttempts: RESEARCH_POLL_MAX_ATTEMPTS, onUpdate: (current) => { const currentState = researchPollUpdate(runId, current); setState(state, currentState, researchPollingStatus(current, startedAt)); } });
     await loadRunHistory();
-  } catch (error) { if (runId && error.message.includes("timed out")) { await loadRunHistory(); await loadRunDetail(runId); setState(state, "running", "Status polling paused after 180 seconds; the run may still be working. Open its log or use Stop run.", error.message); } else { setState(state, "failed", error.message); showGlobalError(error); } }
+  } catch (error) { if (runId && error.message.includes("timed out")) { await loadRunHistory(); await loadRunDetail(runId); setState(state, "running", "Status polling paused after 15 minutes; the run may still be working. Open its log or use Stop run.", error.message); } else { setState(state, "failed", error.message); showGlobalError(error); } }
 }
 
 async function submitCountryHunt(form, bulk = false) {
   const state = $(`[data-${bulk ? "gap" : "country-hunt"}-state]`);
   setState(state, "running", "Queueing country hunt…");
   let runId = "";
+  let startedAt = 0;
   try {
     const values = Object.fromEntries(new FormData(form));
     const selected = bulk ? $$(`[data-gap-selection] input:checked`).map((input) => input.value) : [values.country_iso3];
     if (!selected.filter(Boolean).length) throw new Error("Choose at least one country.");
     const endpoint = bulk ? "/api/v1/research/bulk-country-hunts" : "/api/v1/research/country-hunts";
-    const body = bulk ? { country_iso3s: selected, max_results: Number(values.max_results || 5) } : { country_iso3: selected[0], max_results: Number(values.max_results || 12) };
+    const body = bulk ? { country_iso3s: selected, max_results: Number(values.max_results || 5) } : { country_iso3: selected[0], max_results: Number(values.max_results || 12), topic: values.topic || "general" };
     const job = await api.request(endpoint, { method: "POST", body });
     runId = job.run_id || job.id;
     setState(state, "running", `Run ${runId} is running.`);
-    await api.pollJob(`/api/v1/research/jobs/${runId}`, { maxAttempts: 180, onUpdate: (current) => { const currentState = researchPollUpdate(runId, current); setState(state, currentState, `${current.status} · ${(current.events || current.progress?.logs || []).length} log entries.`); } });
+    startedAt = Date.now();
+    await api.pollJob(`/api/v1/research/jobs/${runId}`, { intervalMs: RESEARCH_POLL_INTERVAL_MS, maxAttempts: RESEARCH_POLL_MAX_ATTEMPTS, onUpdate: (current) => { const currentState = researchPollUpdate(runId, current); setState(state, currentState, researchPollingStatus(current, startedAt)); } });
     await Promise.all([loadCountryQueue(), loadRunHistory(), loadFindings()]);
     if (bulk) {
       window.location.hash = "findings";
       setState(state, "completed", "Batch complete. Results are open in the Findings table.");
     }
-  } catch (error) { if (runId && error.message.includes("timed out")) { await loadRunHistory(); await loadRunDetail(runId); setState(state, "running", "Status polling paused after 180 seconds; the run may still be working. Open its log or use Stop run.", error.message); } else { setState(state, "failed", error.message); showGlobalError(error); } }
+  } catch (error) { if (runId && error.message.includes("timed out")) { await loadRunHistory(); await loadRunDetail(runId); setState(state, "running", "Status polling paused after 15 minutes; the run may still be working. Open its log or use Stop run.", error.message); } else { setState(state, "failed", error.message); showGlobalError(error); } }
 }
 
 async function previewGaps(form) {
@@ -695,11 +766,8 @@ function updateAnalysisLog(progress = {}, error = "") {
       const lines = entries.map((entry) => [entry.at, entry.message].filter(Boolean).join(" · "));
       if (error) lines.push(`Error · ${error}`);
       try {
-        await navigator.clipboard.writeText(lines.join("\n"));
-        const original = copyButton.dataset.label || copyButton.textContent;
-        copyButton.dataset.label = original;
-        copyButton.textContent = "Copied log";
-        setTimeout(() => { copyButton.textContent = original; }, 1200);
+        await copyToClipboard(lines.join("\n"));
+        showCopied(copyButton, "Copied log");
       } catch (copyError) {
         showGlobalError(copyError);
       }
@@ -720,13 +788,10 @@ function updateAnalysisLog(progress = {}, error = "") {
     }
   }
   if (copyLlmButton) {
-    copyLlmButton.onclick = () => navigator.clipboard.writeText(
+    copyLlmButton.onclick = () => copyToClipboard(
       llmEntries.map((entry) => [entry.at, entry.message].filter(Boolean).join(" · ")).join("\n\n")
     ).then(() => {
-      const original = copyLlmButton.dataset.label || copyLlmButton.textContent;
-      copyLlmButton.dataset.label = original;
-      copyLlmButton.textContent = "Copied LLM log";
-      setTimeout(() => { copyLlmButton.textContent = original; }, 1200);
+      showCopied(copyLlmButton, "Copied LLM log");
     }).catch(showGlobalError);
   }
   if (status) status.textContent = error ? "failed" : entries.length ? "live" : "waiting";
