@@ -317,7 +317,9 @@ function renderResearchRunDetail(run, { resetLogVisibility = false, target = "cu
   detail.hidden = false;
   $(`[data-run-detail-title]`, detail).textContent = `Run ${run.id} · ${run.status || "running"}`;
   const events = run.events || run.progress?.logs || [];
-  $(`[data-run-detail-summary]`, detail).textContent = `${run.candidates?.length || 0} candidates · ${events.length} log entr${events.length === 1 ? "y" : "ies"}. Select Show log for live progress.`;
+  const activityEvents = events.filter((event) => event.event !== "llm_full");
+  const llmEvents = events.filter((event) => event.event === "llm_full");
+  $(`[data-run-detail-summary]`, detail).textContent = `${run.candidates?.length || 0} candidates · ${activityEvents.length} activity log entr${activityEvents.length === 1 ? "y" : "ies"} · ${llmEvents.length} full LLM entr${llmEvents.length === 1 ? "y" : "ies"}.`;
   const stopButton = $(`[data-run-stop]`, detail);
   if (stopButton) {
     if (!stopButton.dataset.bound) {
@@ -358,7 +360,7 @@ function renderResearchRunDetail(run, { resetLogVisibility = false, target = "cu
   }
   const eventList = $(`[data-run-events]`, detail);
   eventList.replaceChildren();
-  events.forEach((event) => {
+  activityEvents.forEach((event) => {
     const p = document.createElement("p");
     const subject = event.message || event.error || JSON.stringify(event.outcomes || event);
     const url = event.url ? ` · ${event.url}` : "";
@@ -370,6 +372,20 @@ function renderResearchRunDetail(run, { resetLogVisibility = false, target = "cu
     const p = document.createElement("p");
     p.textContent = "No log events have been recorded yet. The run is still working or has not reported progress.";
     eventList.append(p);
+  }
+  const llmEventList = $(`[data-run-llm-events]`, detail);
+  if (llmEventList) {
+    llmEventList.replaceChildren();
+    llmEvents.forEach((event) => {
+      const p = document.createElement("p");
+      p.textContent = `${event.at || event.created_at || ""} · ${event.message || ""}`;
+      llmEventList.append(p);
+    });
+    if (!llmEventList.children.length) {
+      const p = document.createElement("p");
+      p.textContent = "No LLM request has been sent yet.";
+      llmEventList.append(p);
+    }
   }
   const candidates = $(`[data-run-candidates]`, detail);
   candidates.replaceChildren();
@@ -391,9 +407,11 @@ function renderResearchRunDetail(run, { resetLogVisibility = false, target = "cu
   });
   const copyText = (text, button, done) => navigator.clipboard.writeText(text).then(() => { button.textContent = done; setTimeout(() => { button.textContent = button.dataset.label; }, 1200); });
   const copyLog = $(`[data-run-copy-log]`, detail);
+  const copyLlm = $(`[data-run-copy-llm]`, detail);
   const copyTable = $(`[data-run-copy-table]`, detail);
   const fullscreen = $(`[data-run-table-fullscreen]`, detail);
-  if (copyLog && !copyLog.dataset.bound) { copyLog.dataset.bound = "true"; copyLog.dataset.label = copyLog.textContent; copyLog.addEventListener("click", () => copyText(events.map((event) => `${event.at || ""} · ${event.event || "progress"} · ${event.message || event.error || ""}${event.url ? ` · ${event.url}` : ""}`).join("\n"), copyLog, "Copied log")); }
+  if (copyLog) { copyLog.dataset.label ||= copyLog.textContent; copyLog.onclick = () => copyText(activityEvents.map((event) => `${event.at || ""} · ${event.event || "progress"} · ${event.message || event.error || ""}${event.url ? ` · ${event.url}` : ""}`).join("\n"), copyLog, "Copied log"); }
+  if (copyLlm) { copyLlm.dataset.label ||= copyLlm.textContent; copyLlm.onclick = () => copyText(llmEvents.map((event) => `${event.at || ""} · ${event.message || ""}`).join("\n\n"), copyLlm, "Copied LLM log"); }
   if (copyTable && !copyTable.dataset.bound) { copyTable.dataset.bound = "true"; copyTable.dataset.label = copyTable.textContent; copyTable.addEventListener("click", () => copyText((run.candidates || []).map((candidate) => [candidate.id, candidate.status, candidate.full_decision || candidate.summary_decision || "", candidate.title || "", candidate.url || "", candidate.full_reason || candidate.summary_reason || ""].join("\t")).join("\n"), copyTable, "Copied table")); }
   if (fullscreen && !fullscreen.dataset.bound) { fullscreen.dataset.bound = "true"; fullscreen.addEventListener("click", () => candidates.requestFullscreen?.()); }
 }
@@ -649,9 +667,12 @@ function updateAnalysisLog(progress = {}, error = "") {
   const list = $(`[data-analysis-log-list]`);
   const status = $(`[data-analysis-log-status]`);
   const copyButton = $(`[data-analysis-copy-log]`);
+  const llmList = $(`[data-analysis-llm-log-list]`);
+  const copyLlmButton = $(`[data-analysis-copy-llm]`);
   if (!list) return;
   list.replaceChildren();
   const entries = Array.isArray(progress.logs) ? progress.logs : [];
+  const llmEntries = Array.isArray(progress.llm_logs) ? progress.llm_logs : [];
   entries.forEach((entry) => {
     const item = document.createElement("li");
     item.textContent = [entry.at, entry.message].filter(Boolean).join(" · ");
@@ -683,6 +704,30 @@ function updateAnalysisLog(progress = {}, error = "") {
         showGlobalError(copyError);
       }
     };
+  }
+  if (llmList) {
+    llmList.replaceChildren();
+    llmEntries.forEach((entry) => {
+      const item = document.createElement("li");
+      item.textContent = [entry.at, entry.message].filter(Boolean).join(" · ");
+      llmList.append(item);
+    });
+    if (!llmList.children.length) {
+      const item = document.createElement("li");
+      item.className = "log-empty";
+      item.textContent = "No LLM request has been sent yet.";
+      llmList.append(item);
+    }
+  }
+  if (copyLlmButton) {
+    copyLlmButton.onclick = () => navigator.clipboard.writeText(
+      llmEntries.map((entry) => [entry.at, entry.message].filter(Boolean).join(" · ")).join("\n\n")
+    ).then(() => {
+      const original = copyLlmButton.dataset.label || copyLlmButton.textContent;
+      copyLlmButton.dataset.label = original;
+      copyLlmButton.textContent = "Copied LLM log";
+      setTimeout(() => { copyLlmButton.textContent = original; }, 1200);
+    }).catch(showGlobalError);
   }
   if (status) status.textContent = error ? "failed" : entries.length ? "live" : "waiting";
 }

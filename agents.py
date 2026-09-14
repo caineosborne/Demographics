@@ -65,8 +65,8 @@ def report_llm_call(stage: str, response=None, *, elapsed: float | None = None,
     else:
         payload['response'] = None
     report_activity('[LLM] ' + json.dumps(payload, ensure_ascii=False)[:8_000])
-    full_payload = {**payload, 'request': request}
-    report_activity('[LLM FULL] ' + json.dumps(full_payload, ensure_ascii=False, default=str),
+    full_payload = {'direction': 'IN', **payload}
+    report_activity('[LLM IN] ' + json.dumps(full_payload, ensure_ascii=False, default=str),
                     event_type='llm_full')
 
 
@@ -77,7 +77,7 @@ def report_llm_request(stage: str, request) -> None:
         f'timeout={_llm_timeout_seconds()}s'
     )
     report_activity(
-        '[LLM REQUEST FULL] ' + json.dumps({'stage': stage, 'request': request}, ensure_ascii=False, default=str),
+        '[LLM OUT] ' + json.dumps({'direction': 'OUT', 'stage': stage, 'request': request}, ensure_ascii=False, default=str),
         event_type='llm_full',
     )
 
