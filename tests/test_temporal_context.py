@@ -21,13 +21,18 @@ class TemporalContextTests(unittest.TestCase):
             self.assertNotIn('2026-09-10', temporal_context())
 
     def test_all_production_model_stages_receive_date_and_vintage(self):
-        research = MagicMock()
-        research.effective_date = '2026-07-31'
+        research = agents.RelevantResult(
+            title='Article', url='https://example.test/article', source='Example', site_seen='example.test',
+            geography='Australia', geography_iso3='AUS', effective_date='2026-07-31',
+            statistics=agents.Statistics(population=agents.Statistic(
+                value=100_000, evidence_excerpt='Population was 100,000 in 2026.',
+                metric_type='population', measured_period='2026',
+            )),
+        )
         with (
             patch('temporal_context.date') as clock,
             patch.object(agents, 'web_llm') as web,
             patch.object(agents, 'research_llm') as extraction,
-            patch.object(agents, 'comparison_llm') as comparison,
             patch.object(agents, 'get_population_forecast') as un_lookup,
             patch.object(agents, 'store_webpage_finding', return_value={'status': 'stored', 'id': 1}),
             patch.object(agents, 'resolve_country_iso3', return_value='AUS'),
@@ -37,8 +42,7 @@ class TemporalContextTests(unittest.TestCase):
             extraction.invoke.return_value = research
             un_lookup.invoke.return_value = [{'Year': 2026, 'Total Births': 100}]
             agents.research_agent({'messages': []})
-            agents.compare_to_un({'messages': [], 'result': research})
-            for model in (web, extraction, comparison):
+            for model in (web, extraction):
                 with self.subTest(model=model):
                     system_prompt = model.invoke.call_args.args[0][0].content
                     self.assertIn('2026-09-10', system_prompt)

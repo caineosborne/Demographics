@@ -700,6 +700,7 @@ def list_candidates(run_id=None):
     displayed = []
     visible_fields = {
         'title', 'snippet', 'summary_decision', 'summary_reason', 'full_decision',
+        'summary_warning', 'discovery_warning', 'review_warning',
         'full_reason', 'error', 'finding_id', 'duplicate_candidate_id',
         'duplicate_of', 'duplicate_kind', 'canonical_url', 'source_classification',
         'country_iso3', 'scope_country_iso3', 'scope_country', 'scope_mismatch',

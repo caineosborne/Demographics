@@ -385,6 +385,16 @@ class ResearchTests(unittest.TestCase):
         self.assertIn('exact same article URL', row['full_reason'])
         self.compare.assert_not_called()
 
+    def test_article_outside_un_bounds_is_not_stored(self):
+        state = self.extract.return_value
+        state['storage'] = {
+            'status': 'excluded_un_bounds',
+            'reason': 'Outside the 25% UN comparison bound for: population.',
+        }
+        row = self.run_boss([candidate()])[0]
+        self.assertEqual(row['status'], 'excluded_un_bounds')
+        self.assertIn('25% UN comparison bound', row['full_reason'])
+
     def test_interrupted_generator_is_recorded(self):
         runner = BossAgent(self.skills, {'tavily': lambda c: []}).run(self.settings)
         next(runner)
@@ -443,7 +453,7 @@ class ResearchTests(unittest.TestCase):
         legacy = {key: value for key, value in self.settings.items() if key != 'max_candidates'}
         store.save_settings(legacy)
         loaded = store.load_settings(self.settings)
-        self.assertEqual(loaded['max_candidates'], 20)
+        self.assertEqual(loaded['max_candidates'], 40)
         self.assertEqual(loaded['categories'], legacy['categories'])
 
     def test_ui_upgrades_untouched_legacy_search_defaults(self):
@@ -644,7 +654,15 @@ class ResearchTests(unittest.TestCase):
     def test_prefetched_extraction_does_not_fetch_again(self):
         with patch('dotenv.load_dotenv'), patch.dict(os.environ, {'OPENROUTER_API_KEY': 'test-key'}):
             import agents
+        result = agents.RelevantResult(
+            title='Article', url='https://example.test', source='Example', site_seen='example.test',
+            statistics=agents.Statistics(population=agents.Statistic(
+                value=123_456, evidence_excerpt='Population was 123,456 in 2026.',
+                metric_type='population', measured_period='2026',
+            )),
+        )
         with patch.object(agents, 'web_llm') as web, patch.object(agents, 'research_llm') as extraction, patch.object(agents, 'store_webpage_finding'):
+            extraction.invoke.return_value = result
             agents.research_agent({'messages': [], 'article_url': 'https://example.test', 'page_text': 'Verified full text'})
         web.invoke.assert_not_called()
         self.assertEqual(extraction.invoke.return_value.url, 'https://example.test')

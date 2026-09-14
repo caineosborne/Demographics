@@ -70,8 +70,7 @@ class SearchSettings(BaseModel):
     domain_limit_scope: Literal['run', 'category'] = 'run'
     review_criteria: str = Field(default=CRITERIA, min_length=1)
     # These flags make country-hunt semantics explicit in durable run state.
-    # Automatic news discovery keeps the normal recency/eligibility gates;
-    # direct and bulk country hunts intentionally do not.
+    # Discovery quality and recency checks are advisory in every mode.
     country_hunt_mode: Literal['automatic', 'direct', 'bulk'] = 'automatic'
     country_hunt_iso3s: list[str] = Field(default_factory=list, max_length=100)
 
@@ -604,9 +603,9 @@ class BossAgent:
                             automatic_recheck_requested_at=recheck['requested_at'],
                             canonical_url=url,
                         )
-                    # Reserve the URL as soon as it is seen so every later
-                    # variant is excluded before discovery review, fetching,
-                    # extraction, or comparison.
+                    # Reserve this exact source URL so an identical later
+                    # discovery is not processed twice. URL variants remain
+                    # independent evidence.
                     seen[source_url] = candidate_id
                     if candidate.get('discovery_only'):
                         store.update_candidate(candidate_id, status='discovery_only', full_reason='Reddit discussion without an external article link.')

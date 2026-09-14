@@ -55,7 +55,8 @@ def test_admin_topbar_stays_visible_when_anchor_navigation_scrolls():
 def test_model_output_uses_provider_safe_function_calling():
     source = (ROOT / "agents.py").read_text()
     assert 'with_structured_output(RelevantResult, method="function_calling")' in source
-    assert 'with_structured_output(ComparisonResult, method="function_calling")' in source
+    assert '_deterministic_un_comparison' in source
+    assert 'comparison_llm' not in source
 
 
 def test_fixture_graph_route_adapts_country_without_reusing_japan_articles():

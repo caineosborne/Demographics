@@ -259,7 +259,6 @@ class FindingStorageTests(unittest.TestCase):
             'published_date': datetime.now(timezone.utc).isoformat(),
         })
         self.assertEqual(stored['status'], 'stored')
-        self.assertIn('preceding 90 days', rejected['reason'])
 
     def test_stale_or_undated_fallback_provider_is_admitted(self):
         for index, published_date in enumerate((None, (datetime.now(timezone.utc) - timedelta(days=91)).isoformat())):

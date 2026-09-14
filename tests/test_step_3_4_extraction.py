@@ -137,14 +137,75 @@ class Step34ExtractionTests(unittest.TestCase):
     def test_negative_extraction_is_not_sent_to_storage(self):
         negative = self.examples[0]["finding"]
         result = RelevantResult.model_validate(negative)
-        with patch("agents.research_llm") as model, patch("agents.store_webpage_finding") as store:
+        with patch("agents.research_llm") as model, patch("agents.research_llm_medium") as medium, patch("agents.store_webpage_finding") as store:
             model.invoke.return_value = result
+            medium.invoke.return_value = result
             response = __import__("agents").research_agent({
                 "messages": [], "article_url": negative["url"], "page_text": "scenario text",
                 "provenance": {"submission_type": "manual"},
             })
         self.assertNotEqual(response["storage"]["status"], "stored")
         store.assert_not_called()
+
+    def test_no_numeric_low_extraction_does_not_retry_at_medium(self):
+        empty = RelevantResult(
+            title='Article', url='https://example.test/article', source='Example', site_seen='example.test',
+            statistics={},
+        )
+        recovered = RelevantResult(
+            title='Article', url='https://example.test/article', source='Example', site_seen='example.test',
+            geography='Japan', geography_iso3='JPN',
+            statistics={'population': {
+                'value': 124_600_000,
+                'evidence_excerpt': 'Japan population was 124.6 million in 2023.',
+                'metric_type': 'population', 'measured_period': '2023',
+            }},
+        )
+        with patch('agents.research_llm') as low, patch('agents.research_llm_medium') as medium:
+            low.invoke.return_value = empty
+            medium.invoke.return_value = recovered
+            response = __import__('agents').extract_from_page_text(
+                'Japan population was 124.6 million in 2023.', empty.url,
+                {'submission_type': 'manual'},
+            )
+        low.invoke.assert_called_once()
+        medium.invoke.assert_not_called()
+        self.assertIsNone(response['result'].statistics.population)
+
+    def test_medium_extraction_retries_for_partial_or_unclear_low_data(self):
+        partial = RelevantResult(
+            title='Article', url='https://example.test/article', source='Example', site_seen='example.test',
+            statistics={
+                'population': {
+                    'value': 124_600_000,
+                    'evidence_excerpt': 'Japan population was 124.6 million in 2023.',
+                    'metric_type': 'population', 'measured_period': '2023',
+                },
+                'births': {
+                    'value': 7.2,
+                    'evidence_excerpt': 'The birth rate was 7.2 per 1,000 people.',
+                    'metric_type': 'births', 'measured_period': '2023',
+                },
+            },
+        )
+        recovered = RelevantResult(
+            title='Article', url='https://example.test/article', source='Example', site_seen='example.test',
+            geography='Japan', geography_iso3='JPN',
+            statistics={'population': {
+                'value': 124_600_000,
+                'evidence_excerpt': 'Japan population was 124.6 million in 2023.',
+                'metric_type': 'population', 'measured_period': '2023',
+            }},
+        )
+        with patch('agents.research_llm') as low, patch('agents.research_llm_medium') as medium:
+            low.invoke.return_value = partial
+            medium.invoke.return_value = recovered
+            response = __import__('agents').extract_from_page_text(
+                'Japan population was 124.6 million in 2023.', partial.url,
+                {'submission_type': 'manual'},
+            )
+        medium.invoke.assert_called_once()
+        self.assertEqual(response['result'].statistics.population.value, 124_600_000)
 
     def test_valid_observation_reaches_storage_with_versions(self):
         positive = self.examples[-1]["finding"]

@@ -221,8 +221,8 @@ def save_controls(*values):
         count = sum(c['max_results'] for c in settings['categories'] if c['enabled'])
         return (f'Settings saved. Up to {count} Tavily results plus links from '
                 f'{settings["reddit_limit"] if settings["reddit_enabled"] else 0} Reddit submissions; '
-                f'up to {settings["max_candidates"]} unique articles and '
-                f'{settings["max_per_domain"]} per publisher will use model processing.')
+                f'up to {settings["max_candidates"]} unique articles will use model processing. '
+                'Publisher mix is advisory and does not exclude articles.')
     except ValueError as exc:
         return f'Settings not saved: {exc}'
 
@@ -553,10 +553,10 @@ def build_search_tabs():
             max_candidates = gr.Number(value=settings['max_candidates'], minimum=1, maximum=100, precision=0,
                                        label='Maximum unique articles to process')
             max_per_domain = gr.Number(value=settings['max_per_domain'], minimum=1, maximum=10, precision=0,
-                                       label='Maximum articles per publisher')
+                                       label='Publisher mix (advisory)')
         gr.Markdown('Reddit supplies external article links, including links in text posts. Discussion-only posts remain in the audit. '
                     'This checks the newest submissions, not the entire subreddit history; access failures appear in the run log.')
-        gr.Markdown('The processing and publisher limits control costly article fetches and model calls. All discoveries remain in Search results; excluded or deferred links retain a reason in their audit record.')
+        gr.Markdown('The total processing limit controls costly article fetches and model calls. Publisher mix and model review are advisory; they do not exclude articles.')
         criteria = gr.Textbox(value=settings['review_criteria'], lines=8, label='Relevance criteria')
         controls = [categories, search_topic, search_window, reddit_enabled, reddit_limit, max_candidates, max_per_domain, criteria]
         with gr.Row():

@@ -130,9 +130,15 @@ undated enabled OWID/Statista country profile can seed a country with no recent
 article datapoint, but it remains secondary evidence and is excluded once that
 country has recent data.
 
-Configure `TAVILY_API_KEY` and `OPENROUTER_API_KEY` in `.env`. The default model
-is `google/gemini-2.5-flash-lite`; set `LLM_MODEL` to override it without editing
-the application. The notebook now
+Configure `TAVILY_API_KEY` and `OPENROUTER_API_KEY` in `.env`. The default
+extraction model is `deepseek/deepseek-v4-flash-0731`: low reasoning performs
+the first article extraction. An empty low pass ends the workflow; medium
+reasoning retries only when low found numeric data but its validation is partial
+or unclear. Set `LLM_MODEL`,
+`LLM_MEDIUM_MODEL`, `LLM_LOW_REASONING_EFFORT`, or
+`LLM_MEDIUM_REASONING_EFFORT` to override those stages without editing the
+application. UN comparison is deterministic from the local WPP data and does
+not call a model. The notebook now
 reads the same Tavily environment variable. Search parameters follow the
 [Tavily Search API](https://docs.tavily.com/documentation/api-reference/endpoint/search):
 1–20 results per category in this UI; advanced depth costs more than basic.
