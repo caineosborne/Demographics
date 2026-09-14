@@ -57,6 +57,45 @@ def _find_column(frame: pd.DataFrame, names: tuple[str, ...]) -> str | None:
     return None
 
 
+def _country_key(value: object) -> str:
+    return ''.join(char for char in str(value).casefold() if char.isalnum())
+
+
+def _populate_iso3(result: pd.DataFrame) -> pd.DataFrame:
+    """Backfill release ISO3 values from the current WPP country reference.
+
+    Archived workbooks do not consistently carry ISO3. The current compact
+    WPP source contains both canonical labels and numeric location codes, so
+    use either stable key before the release is written to the serving copy.
+    """
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute(
+                'SELECT DISTINCT Country, "Location code", "ISO3 Alpha-code" '
+                'FROM medium_variant WHERE "ISO3 Alpha-code" IS NOT NULL'
+            ).fetchall()
+    except sqlite3.Error:
+        rows = []
+    by_name = {_country_key(row[0]): str(row[2]).upper() for row in rows if row[0]}
+    by_location = {str(row[1]).split('.')[0]: str(row[2]).upper()
+                   for row in rows if row[1] is not None and row[2]}
+    existing = result.get("ISO3 Alpha-code")
+    result["ISO3 Alpha-code"] = existing.where(existing.notna(), None) if existing is not None else None
+    missing = result["ISO3 Alpha-code"].isna() | (result["ISO3 Alpha-code"].astype(str).str.strip() == "")
+    if "Location code" in result:
+        result.loc[missing, "ISO3 Alpha-code"] = result.loc[missing, "Location code"].map(
+            lambda value: by_location.get(str(value).split('.')[0])
+        )
+    missing = result["ISO3 Alpha-code"].isna() | (result["ISO3 Alpha-code"].astype(str).str.strip() == "")
+    result.loc[missing, "ISO3 Alpha-code"] = result.loc[missing, "Country"].map(
+        lambda value: by_name.get(_country_key(value))
+    )
+    result["ISO3 Alpha-code"] = result["ISO3 Alpha-code"].where(
+        result["ISO3 Alpha-code"].notna(), None
+    )
+    return result
+
+
 def download_source(source: str) -> Path:
     """Return a local, reproducible copy of an official UN archive file."""
     ARCHIVE_DIR.mkdir(exist_ok=True)
@@ -100,6 +139,7 @@ def _read_wpp2017_interpolated(path: Path) -> pd.DataFrame:
     result = pd.DataFrame({
         "Country": frame["Region, subregion, country or area *"],
         "ISO3 Alpha-code": None,
+        "Location code": frame["Country code"],
         "Year": frame["Year"],
         "Population 1 Jul": frame["Population 1 Jul"],
         "Total Births": frame["Births (thousands)"],
@@ -111,7 +151,7 @@ def _read_wpp2017_interpolated(path: Path) -> pd.DataFrame:
     result["Year"] = pd.to_numeric(result["Year"], errors="coerce")
     result = result.dropna(subset=["Country", "Year"])
     result["Year"] = result["Year"].astype(int)
-    return result.drop_duplicates(subset=["Country", "Year"], keep="first")
+    return _populate_iso3(result.drop_duplicates(subset=["Country", "Year"], keep="first"))
 
 
 def read_release(path: Path) -> pd.DataFrame:
@@ -142,6 +182,8 @@ def read_release(path: Path) -> pd.DataFrame:
     if not country or not year:
         raise ValueError("The release must contain country and year/period columns.")
     result = pd.DataFrame({"Country": frame[country], "Year": frame[year]})
+    location = _find_column(frame, ("Location code", "Country code"))
+    result["Location code"] = frame[location] if location else None
     result["ISO3 Alpha-code"] = frame[iso3] if iso3 else None
     for canonical, aliases in FIELDS.items():
         source = _find_column(frame, (canonical, *aliases))
@@ -156,7 +198,7 @@ def read_release(path: Path) -> pd.DataFrame:
         result[column] = pd.to_numeric(result[column], errors="coerce")
     # The WPP 2017 estimates and medium-variant sheets overlap at the base
     # year.  Keep the estimate row, which was concatenated first.
-    return result.drop_duplicates(subset=["Country", "Year"], keep="first")
+    return _populate_iso3(result.drop_duplicates(subset=["Country", "Year"], keep="first"))
 
 
 def import_release(revision: int, source: str) -> int:

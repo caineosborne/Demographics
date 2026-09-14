@@ -58,6 +58,13 @@ class ModelHandoffTests(unittest.TestCase):
                 }]),
                 AIMessage(content='Article retrieved.'),
             ]
+            extraction.invoke.return_value = agents.RelevantResult(
+                title='Article', url='https://example.test', source='Example', site_seen='example.test',
+                statistics=agents.Statistics(population=agents.Statistic(
+                    value=123456, evidence_excerpt='Population: 123456',
+                    metric_type='population', measured_period='2026',
+                )),
+            )
             agents.research_agent({'messages': [HumanMessage(content='Summarise the URL')]})
             messages = extraction.invoke.call_args.args[0]
             self.assertEqual(extraction.invoke.return_value.url, 'https://example.test')
@@ -65,33 +72,33 @@ class ModelHandoffTests(unittest.TestCase):
             self.assertTrue(any(isinstance(m, ToolMessage) and '123456' in m.content for m in messages))
 
     def test_comparison_uses_one_deterministic_un_lookup(self):
-        research = MagicMock()
-        research.model_dump_json.return_value = '{"title": "Article"}'
-        research.effective_date = '2026-07-31'
+        research = agents.RelevantResult(
+            title='Article', url='https://example.test/article', source='Example', site_seen='example.test',
+            geography='Australia', geography_iso3='AUS', effective_date='2026-07-31',
+            statistics=agents.Statistics(population=agents.Statistic(value=100_000, measured_period='2026')),
+        )
         with (
-            patch.object(agents, 'resolve_country_iso3', return_value='AUS'),
             patch.object(agents, 'get_population_forecast') as lookup,
-            patch.object(agents, 'comparison_llm') as comparison,
         ):
-            lookup.invoke.return_value = [{'Year': '2026'}]
-            agents.compare_to_un({
+            lookup.invoke.return_value = [{'Year': '2026', 'Population 1 Jul': 100}]
+            response = agents.compare_to_un({
                 'messages': [HumanMessage(content='Summarise the URL'), AIMessage(content='Article retrieved.')],
                 'result': research,
             })
             lookup.invoke.assert_called_once_with({
                 'country_iso3': 'AUS', 'years': [2026, 2027], 'historic': False,
             })
-            messages = comparison.invoke.call_args.args[0]
-            self.assertIn('Research JSON:', messages[-2].content)
+        self.assertEqual(response['comparison'].population.un_expected, 100_000)
+        self.assertEqual(response['comparison'].population.difference, 0)
 
     def test_comparison_supplies_the_closest_population_reference(self):
-        research = MagicMock()
-        research.model_dump_json.return_value = '{"title": "Article"}'
-        research.effective_date = '2026-11-15'
+        research = agents.RelevantResult(
+            title='Article', url='https://example.test/article', source='Example', site_seen='example.test',
+            geography='Australia', geography_iso3='AUS', effective_date='2026-11-15',
+            statistics=agents.Statistics(),
+        )
         with (
-            patch.object(agents, 'resolve_country_iso3', return_value='AUS'),
             patch.object(agents, 'get_population_forecast') as lookup,
-            patch.object(agents, 'comparison_llm'),
         ):
             lookup.invoke.return_value = [
                 {'Year': '2026', 'Population 1 Jan': 100, 'Population 1 Jul': 101},
@@ -104,13 +111,13 @@ class ModelHandoffTests(unittest.TestCase):
         self.assertEqual(reference['value_thousands'], 102)
 
     def test_comparison_queries_both_un_tables_across_2023_boundary(self):
-        research = MagicMock()
-        research.model_dump_json.return_value = '{"title": "Article"}'
-        research.effective_date = '2023-12-31'
+        research = agents.RelevantResult(
+            title='Article', url='https://example.test/article', source='Example', site_seen='example.test',
+            geography='Australia', geography_iso3='AUS', effective_date='2023-12-31',
+            statistics=agents.Statistics(),
+        )
         with (
-            patch.object(agents, 'resolve_country_iso3', return_value='AUS'),
             patch.object(agents, 'get_population_forecast') as lookup,
-            patch.object(agents, 'comparison_llm'),
         ):
             lookup.invoke.side_effect = [
                 [{'Year': '2023', 'Population 1 Jan': 100, 'Population 1 Jul': 101}],
@@ -122,3 +129,19 @@ class ModelHandoffTests(unittest.TestCase):
             {'country_iso3': 'AUS', 'years': [2024], 'historic': False},
         ])
         self.assertEqual(result['un_data'][0]['population_reference']['observation_date'], '2024-01-01')
+
+    def test_bulk_un_bound_is_inclusive_at_50_percent_and_ignores_migration(self):
+        comparison = agents.ComparisonResult(
+            population=agents.MetricComparison(reported=150, un_expected=100),
+            births=agents.MetricComparison(), deaths=agents.MetricComparison(),
+            natural_change=agents.MetricComparison(), net_migration=agents.MetricComparison(reported=300, un_expected=100),
+            total_fertility_rate=agents.MetricComparison(), overall_assessment='Compared',
+        )
+        comparison, excluded = agents.apply_outlier_filter(comparison)
+        self.assertEqual(excluded, [])
+        self.assertIsNone(agents.bulk_un_bounds_issue(comparison))
+
+        comparison.population.reported = 150.01
+        comparison, excluded = agents.apply_outlier_filter(comparison)
+        self.assertEqual(excluded, ['population'])
+        self.assertIn('50% UN comparison bound', agents.bulk_un_bounds_issue(comparison))

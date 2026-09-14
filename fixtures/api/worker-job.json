@@ -1,0 +1,15 @@
+{
+  "id": "job-example",
+  "kind": "manual_analysis",
+  "status": "complete",
+  "result": {"result": {}, "comparison": null, "un_data": [], "storage": {"status": "stored"}},
+  "progress": {
+    "stage": "complete",
+    "fetch_status": "Page loaded via Requests — summarising",
+    "logs": [{"at": "2026-09-12T00:00:00+00:00", "message": "[Web] Page loaded via Requests — summarising"}]
+  },
+  "error": null,
+  "created_at": "2026-09-12T00:00:00+00:00",
+  "updated_at": "2026-09-12T00:01:00+00:00",
+  "attempts": 1
+}

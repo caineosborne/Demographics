@@ -5,7 +5,7 @@ Install dependencies and the browser used for fallback fetching:
 ```sh
 uv sync
 uv run playwright install chromium
-uv run python main.py
+uv run python gradio/main.py
 ```
 
 Pages are fetched with Requests first. Request errors, empty pages, and common
@@ -17,6 +17,51 @@ If both fail, the analysis stops and displays the error. The Debug status field
 shows the current fetch method while the analysis runs.
 
 Run the regression checks with `uv run python -m unittest discover -s tests`.
+
+## FastAPI application
+
+Start the API and non-Gradio admin frontend locally with:
+
+```sh
+uv run uvicorn api:app --reload
+```
+
+Open <http://127.0.0.1:8000/admin/> for the research administration workspace.
+Use <http://127.0.0.1:8000/admin/?fixtures=1> for a non-mutating fixture tour,
+or <http://127.0.0.1:8000/docs> for the API documentation. The application is
+local-only at this stage and has no user-admin or login flow.
+
+The admin frontend supports manual URL analysis and approval, editable Tavily
+discovery settings, direct and bounded bulk country hunts, durable run and
+candidate history, finding/source administration, coverage, and WPP graphs.
+These workflows call the FastAPI JSON boundary and do not require Gradio.
+
+The original API desk remains available at <http://127.0.0.1:8000/>.
+
+The initial boundary exposes `GET /health`. Runtime settings can be adjusted
+with `DEMOGRAPHICS_APP_NAME`, `DEMOGRAPHICS_API_VERSION`, and
+`DEMOGRAPHICS_ENVIRONMENT`.
+
+Durable worker commands create job state in the writable application database
+before processing. Run them directly or hand an existing job ID to a worker:
+
+```sh
+uv run python worker.py manual-analysis https://example.test/release --country-iso3 JPN
+uv run python worker.py news-search settings.json
+uv run python worker.py country-search JPN
+uv run python worker.py maintenance
+uv run python worker.py export export.json
+uv run python worker.py run JOB_ID
+uv run python worker.py recover
+```
+
+`recover` marks work interrupted by a terminated local API/worker process as
+retryable and releases its discovery lock. Retrying the same job ID records a
+new attempt; completed jobs remain idempotent.
+
+The versioned JSON API includes the read, research, analysis, administration,
+and `GET /api/v1/worker/jobs/{job_id}` contracts. Representative frontend
+fixtures are under `fixtures/api/`; country-specific routes require ISO3.
 
 ## Database storage and Phase 1.1 rollback
 
@@ -85,9 +130,15 @@ undated enabled OWID/Statista country profile can seed a country with no recent
 article datapoint, but it remains secondary evidence and is excluded once that
 country has recent data.
 
-Configure `TAVILY_API_KEY` and `OPENROUTER_API_KEY` in `.env`. The default model
-is `google/gemini-2.5-flash-lite`; set `LLM_MODEL` to override it without editing
-the application. The notebook now
+Configure `TAVILY_API_KEY` and `OPENROUTER_API_KEY` in `.env`. The default
+summary and full-text review model is `deepseek/deepseek-v4.1-flash:nitro`.
+Structured article extraction and its single corrective retry use
+`deepseek/deepseek-v4-flash-0731`. A retry is used only when the first
+extraction is partial or unclear. Set `LLM_MODEL`,
+`LLM_MEDIUM_MODEL`, `LLM_LOW_REASONING_EFFORT`, or
+`LLM_MEDIUM_REASONING_EFFORT` to override those stages without editing the
+application. UN comparison is deterministic from the local WPP data and does
+not call a model. The notebook now
 reads the same Tavily environment variable. Search parameters follow the
 [Tavily Search API](https://docs.tavily.com/documentation/api-reference/endpoint/search):
 1–20 results per category in this UI; advanced depth costs more than basic.
@@ -163,10 +214,12 @@ skills, independent of Codex's editor skills.
 Runs execute in a background worker, sequentially with one automatic run at a
 time per app process. Browser navigation, refreshes and temporary disconnects do
 not stop that worker. The Automatic research table polls SQLite every two
-seconds; Search results polls every five seconds and can reconnect to a running
-job after a page reload. **Stop current run** signals the worker between stages
-and records `interrupted`; in-flight model calls use the `LLM_TIMEOUT_SECONDS`
-setting (120 seconds by default) so a provider cannot hang the run indefinitely.
+seconds; active research screens poll every five seconds for up to 15 minutes,
+showing elapsed time and the latest durable log count. They can reconnect to a
+running job after a page reload. **Stop current run** signals the worker between
+stages and records `interrupted`; in-flight model calls use the
+`LLM_TIMEOUT_SECONDS` setting (120 seconds by default) so a provider cannot hang
+the run indefinitely.
 On application startup, runs left as `running` or `stopping` by a previous
 process are recorded as interrupted with a recovery event. There is no automatic
 resume after the Python process itself stops. Known stored URLs are skipped on

@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Demographics API desk</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+    <script type="module" src="/assets/app.js"></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="masthead">
+        <div>
+          <p class="eyebrow">Phase 2.8 · local API testing</p>
+          <h1>Demographics<br /><em>API desk</em></h1>
+          <p class="intro">A thin browser surface for checking the contracts before the admin application arrives.</p>
+        </div>
+        <div class="health" id="health" data-state="loading"><span></span><strong>Checking API…</strong><small id="health-detail">/health</small></div>
+      </header>
+
+      <section class="controls panel">
+        <div class="panel-heading"><span class="index">01</span><div><p class="eyebrow">Read surface</p><h2>Choose a country</h2></div></div>
+        <div class="control-row">
+          <label>Country <select id="country-select"><option>Loading countries…</option></select></label>
+          <button class="button" id="load-country" type="button">Load findings + series <span>↗</span></button>
+        </div>
+        <p class="status" id="country-status">Country choices come from <code>GET /api/v1/countries</code>.</p>
+      </section>
+
+      <div class="grid two-up">
+        <section class="panel">
+          <div class="panel-heading"><span class="index">02</span><div><p class="eyebrow">Stored evidence</p><h2>Raw findings</h2></div></div>
+          <div class="json-box" id="findings-output" aria-live="polite">Select a country to inspect findings.</div>
+          <p class="route">GET /api/v1/findings?iso3=…</p>
+        </section>
+        <section class="panel">
+          <div class="panel-heading"><span class="index">03</span><div><p class="eyebrow">Comparison data</p><h2>Graph series</h2></div></div>
+          <div class="json-box" id="series-output" aria-live="polite">Select a country to inspect its series.</div>
+          <p class="route">GET /api/v1/graph-series/{iso3}</p>
+        </section>
+      </div>
+
+      <section class="panel jobs-panel">
+        <div class="panel-heading"><span class="index">04</span><div><p class="eyebrow">Durable work</p><h2>Start a manual analysis</h2></div></div>
+        <form class="job-form" id="analysis-form">
+          <label class="wide">Source URL <input id="analysis-url" type="url" placeholder="https://example.org/demographics-release" required /></label>
+          <label>Country (optional) <input id="analysis-country" type="text" maxlength="3" placeholder="JPN" /></label>
+          <button class="button" type="submit">Queue analysis <span>↗</span></button>
+        </form>
+        <div class="job-card" id="analysis-job" hidden></div>
+        <p class="route">POST /api/v1/analysis/jobs → GET /api/v1/analysis/jobs/{job_id}</p>
+      </section>
+
+      <section class="panel jobs-panel">
+        <div class="panel-heading"><span class="index">05</span><div><p class="eyebrow">Research runner</p><h2>Start a research job</h2></div></div>
+        <form class="job-form" id="research-form">
+          <label class="wide">Settings JSON <textarea id="research-settings" rows="4">{"categories": [], "max_articles": 1}</textarea></label>
+          <button class="button" type="submit">Queue research <span>↗</span></button>
+        </form>
+        <div class="job-card" id="research-job" hidden></div>
+        <p class="route">POST /api/v1/research/jobs → GET /api/v1/research/jobs/{run_id}</p>
+      </section>
+
+      <section class="panel console-panel">
+        <div class="panel-heading"><span class="index">06</span><div><p class="eyebrow">No auth wall · local only</p><h2>Route console</h2></div></div>
+        <p class="console-intro">Call any API route directly. Use this for contracts that do not have a dedicated control yet.</p>
+        <form class="job-form" id="route-form">
+          <label class="method">Method <select id="route-method"><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option></select></label>
+          <label class="wide">Path <input id="route-path" value="/api/v1/research/runs" required /></label>
+          <label class="wide">JSON body <textarea id="route-body" rows="3" placeholder='{"key":"value"}'></textarea></label>
+          <button class="button" type="submit">Run route <span>↗</span></button>
+        </form>
+        <div class="json-box console-output" id="route-output" aria-live="polite">Ready.</div>
+      </section>
+
+      <footer><span>API base</span> <code id="api-base">same origin</code><span class="footer-note">Gradio remains the operational reference.</span></footer>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,28 @@
+{
+  "id": "job-example",
+  "kind": "manual_analysis",
+  "status": "complete",
+  "result": {
+    "draft_id": "draft-example",
+    "draft_status": "pending_review",
+    "finding": {
+      "title": "Japan population release",
+      "url": "https://example.test/release",
+      "source": "Example statistics office",
+      "site_seen": "example.test",
+      "geography": "Japan",
+      "geography_iso3": "JPN",
+      "effective_date": "2023-01-01",
+      "statistics": {"population": {"value": 124600000, "unit": "people", "evidence_excerpt": "Japan's population was 124.6 million people in 2023.", "measured_period": "2023"}}
+    },
+    "comparison": null,
+    "un_data": [],
+    "validation": {"status": "validated"},
+    "storage": {"status": "validated"}
+  },
+  "progress": {"stage": "complete", "fetch_status": "Page loaded via Requests — summarising", "logs": []},
+  "error": null,
+  "created_at": "2026-09-12T00:00:00+00:00",
+  "updated_at": "2026-09-12T00:01:00+00:00",
+  "attempts": 1
+}

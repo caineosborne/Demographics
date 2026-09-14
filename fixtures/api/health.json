@@ -1,0 +1,6 @@
+{
+  "status": "ok",
+  "service": "demographics-agent",
+  "version": "v1",
+  "environment": "fixture"
+}

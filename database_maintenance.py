@@ -33,6 +33,7 @@ CANDIDATE_DETAIL_FIELDS = {
     "published_date", "score", "time_range", "provider_note", "submission_url",
     "submission_published", "submission_created_utc", "transport", "discovery_only",
     "summary_decision", "summary_reason", "summary_batch_seconds", "summary_batch_size",
+    "summary_warning", "discovery_warning", "review_warning",
     "full_decision", "full_reason", "full_review_seconds", "error", "finding_id",
     "duplicate_candidate_id", "duplicate_of", "duplicate_kind", "source_classification",
     "storage", "extraction", "extraction_seconds", "original_access_error",
@@ -40,6 +41,8 @@ CANDIDATE_DETAIL_FIELDS = {
     "page_loaded", "fetch_seconds", "model_text_characters", "original_text_characters",
     "content_transport", "tavily_extract_seconds", "tavily_extract_error",
     "automatic_recheck", "automatic_recheck_requested_at",
+    "extraction_prompt_version", "extraction_rule_version",
+    "country_iso3", "scope_country_iso3", "scope_country", "scope_mismatch",
 }
 ALTERNATIVE_ATTEMPT_FIELDS = {
     "url", "canonical_url", "title", "snippet", "published_date", "status", "error", "reason",

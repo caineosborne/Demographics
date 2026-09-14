@@ -135,3 +135,18 @@ class FlowPeriodNormalisationTests(unittest.TestCase):
 
         self.assertFalse(result.statistics.net_overseas_migration.comparison_eligible)
         self.assertTrue(has_useful_numeric_datapoint(finding))
+
+    def test_measured_year_is_a_full_year_for_comparison(self):
+        result = RelevantResult.model_validate({
+            'title': 'Greece', 'url': 'https://example.test/greece', 'source': 'Example',
+            'site_seen': '2025-12-18', 'geography': 'Greece',
+            'statistics': {
+                'births': {'value': 68_309, 'measured_period': '2024'},
+                'deaths': {'value': 125_873, 'measured_period': '2024'},
+            },
+        })
+
+        mark_partial_periods(result)
+
+        self.assertTrue(result.statistics.births.comparison_eligible)
+        self.assertTrue(result.statistics.deaths.comparison_eligible)
