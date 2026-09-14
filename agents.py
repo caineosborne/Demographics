@@ -9,7 +9,8 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Annotated, Optional, TypedDict
 from urllib.parse import urlsplit
 
@@ -106,8 +107,8 @@ def _stored_result(existing: dict, source_url: str) -> "RelevantResult":
 class Statistic(BaseModel):
     value: Optional[float] = None
     # These fields are deliberately optional at the Pydantic boundary for
-    # backwards compatibility with retained findings.  Fresh model output is
-    # checked by ``validate_extracted_result`` before it can be stored.
+    # backwards compatibility with retained findings and permissive manual
+    # intake. Missing descriptive metadata is a warning, not a storage gate.
     evidence_excerpt: Optional[str] = None
     metric_type: Optional[str] = None
     unit: Optional[str] = None
@@ -200,7 +201,8 @@ _POPULATION_CLAUSE_SPLIT = re.compile(
     re.IGNORECASE,
 )
 _NUMBER_TOKEN = re.compile(
-    r"(?<![\w])([+-]?\d[\d,]*(?:\.\d+)?)\s*(billion|bn|b|million|mn|m|thousand|k)?\b",
+    r"(?<![\w])([+-]?(?:\d{1,3}(?:[.,]\d{3})+|\d+(?:[.,]\d+)?))\s*"
+    r"(billion|bn|b|million|mn|m|thousand|k)?\b",
     re.IGNORECASE,
 )
 
@@ -214,10 +216,29 @@ _SAFE_METRIC_UNITS = {
     "migration_departures": "people",
     "total_fertility_rate": "live births per woman",
 }
+_NON_UNIT_DATE_WORDS = re.compile(
+    r"^(?:jour|jours|day|days|mois|month|months|année|annee|année?s?|"
+    r"year|years|date|dates)$",
+    re.IGNORECASE,
+)
 _NATIONAL_WORDING = re.compile(
     r"\b(?:national|nationwide|countrywide|whole\s+country|entire\s+country|"
     r"across\s+the\s+country|country's|country’s)\b", re.IGNORECASE,
 )
+
+
+def _parse_number_token(raw: str, *, scaled: bool = False) -> float:
+    """Parse English or continental thousands/decimal separators."""
+    value = str(raw or "").strip()
+    if value.count(".") > 1 or ("." in value and "," in value):
+        value = value.replace(".", "").replace(",", ".")
+    elif not scaled and value.count(".") == 1 and len(value.rsplit(".", 1)[1]) == 3:
+        value = value.replace(".", "")
+    elif value.count(",") == 1 and len(value.rsplit(",", 1)[1]) == 3:
+        value = value.replace(",", "")
+    else:
+        value = value.replace(",", "")
+    return float(value)
 _EXPLICIT_PERIOD = re.compile(
     r"\b(?:19|20)\d{2}(?:[-/]\d{1,2})?\b|"
     r"\b(?:January|February|March|April|May|June|July|August|September|October|"
@@ -314,6 +335,23 @@ def normalize_extracted_result(result: "RelevantResult", page_text: str = "",
     """
     if not isinstance(result, RelevantResult):
         return result
+    # Prefer an explicit date extracted from the article. If the model leaves
+    # it blank, retain the provider's publication timestamp as a deterministic
+    # fallback so an available source date is not silently lost.
+    if not result.effective_date:
+        published = (provenance or {}).get("published_date")
+        if published:
+            try:
+                parsed = datetime.fromisoformat(str(published).replace("Z", "+00:00"))
+            except ValueError:
+                try:
+                    parsed = parsedate_to_datetime(str(published))
+                except (TypeError, ValueError, IndexError, OverflowError):
+                    parsed = None
+            if parsed is not None:
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                result.effective_date = parsed.astimezone(timezone.utc).isoformat()
     # Some provider responses place a net-migration claim in the legacy
     # ``migration_departures`` slot.  Move it to the field used by the UN
     # comparison/storage contract when that canonical slot is empty.
@@ -346,7 +384,15 @@ def normalize_extracted_result(result: "RelevantResult", page_text: str = "",
         }
         if not metric.metric_type or metric_type in allowed_metric_types:
             metric.metric_type = _METRIC_LABELS.get(name, name)
-        if not metric.unit:
+        # Multilingual extraction can mistake date wording for a unit (for
+        # example French ``jours`` in ``au 1er septembre 2024``).  For count
+        # metrics, discard only these unambiguous date tokens and restore the
+        # safe metric-specific unit. Do not overwrite meaningful units such as
+        # ``thousands of people``.
+        if not metric.unit or (
+                name in _COUNT_METRICS
+                and _NON_UNIT_DATE_WORDS.fullmatch(str(metric.unit).strip())
+        ):
             metric.unit = _SAFE_METRIC_UNITS.get(name)
         evidence = str(metric.evidence_excerpt or "")
         if (metric.observation_status or "").casefold() in {
@@ -390,7 +436,7 @@ def _evidence_numbers(text: str) -> list[float]:
     values: list[float] = []
     for match in _NUMBER_TOKEN.finditer(text or ""):
         try:
-            value = float(match.group(1).replace(",", ""))
+            value = _parse_number_token(match.group(1), scaled=bool(match.group(2)))
         except ValueError:
             continue
         if not match.group(2) and 1900 <= abs(value) <= 2100 and value.is_integer():
@@ -426,9 +472,8 @@ def _population_claim_context(evidence: str, value: float) -> str:
     matches = list(_NUMBER_TOKEN.finditer(text))
     target = None
     for match in matches:
-        raw = match.group(1).replace(",", "")
         try:
-            number = float(raw)
+            number = _parse_number_token(match.group(1), scaled=bool(match.group(2)))
         except ValueError:
             continue
         multiplier = {
@@ -499,10 +544,9 @@ def validate_extracted_result(result: "RelevantResult", *, retain_rejected_metri
             issues.append({"metric": name, "level": "needs_review", "reason":
                            f"{label} needs a short evidence excerpt."})
             continue
-        if not metric.metric_type or not metric.unit or not metric.observation_status \
-                or not metric.national_scope_status or not metric.measured_period:
+        if not metric.metric_type or not metric.measured_period:
             issues.append({"metric": name, "level": "needs_review", "reason":
-                           f"{label} is missing metric type, unit, status, national scope, or measured period."})
+                           f"{label} is missing metric type or measured period."})
             continue
         canonical_metric_type = _METRIC_TYPE_SYNONYMS.get(
             _canonical_metric_type(metric.metric_type),
@@ -514,16 +558,16 @@ def validate_extracted_result(result: "RelevantResult", *, retain_rejected_metri
         }
         if canonical_metric_type not in allowed_metric_types:
             reasons.append(f"metric type {metric.metric_type!r} does not match {label}")
-        if metric.observation_status.casefold() not in {
+        if metric.observation_status and metric.observation_status.casefold() not in {
                 "observed", "reported", "actual", "historical", "estimate", "estimated", "provisional"}:
             reasons.append(f"observation status is {metric.observation_status}")
-        if metric.national_scope_status.casefold() not in {
+        if metric.national_scope_status and metric.national_scope_status.casefold() not in {
                 "national", "whole_national", "national_total", "total_national", "country_total",
         }:
             reasons.append(f"scope is {metric.national_scope_status}")
         if _CURRENCY_CONTEXT.search(context):
             reasons.append("currency/budget/cost context")
-        if _FUTURE_OR_SCENARIO.search(context) or metric.observation_status.casefold() in {
+        if _FUTURE_OR_SCENARIO.search(context) or (metric.observation_status or "").casefold() in {
                 "projected", "projection", "forecast", "scenario", "conditional", "future",
         }:
             reasons.append("projection/future/scenario context")
@@ -546,14 +590,6 @@ def validate_extracted_result(result: "RelevantResult", *, retain_rejected_metri
             reasons.append("population subset or administrative category")
         if name in _COUNT_METRICS and _PERCENT_OR_RATE.search(context):
             reasons.append("percentage/rate cannot populate an absolute count")
-        if name == "total_fertility_rate" and not re.search(
-                r"(?:births?\s+per\s+woman|live\s+births?\s+per\s+woman|fertility\s+rate)",
-                f"{metric.unit} {evidence}", re.IGNORECASE):
-            reasons.append("fertility unit is not births per woman")
-        if name in _COUNT_METRICS and not re.search(
-                r"(?:count|person|people|residents?|inhabitants?|births?|deaths?|migrat|population)",
-                metric.unit, re.IGNORECASE):
-            reasons.append("unit is not an absolute demographic count")
         evidence_values = _evidence_numbers(evidence)
         if not evidence_values:
             issues.append({"metric": name, "level": "needs_review", "reason":
@@ -734,7 +770,7 @@ def _closest_population_reference(rows: list[dict], effective_day: date | None) 
     }
 
 
-OUTLIER_THRESHOLD_PERCENT = 50.0
+OUTLIER_THRESHOLD_PERCENT = 25.0
 UN_COMPARISON_VINTAGE_NOTE = (
     "UN comparison uses the local World Population Prospects 2024 revision "
     "database; later revisions or observations may not be included."
@@ -935,7 +971,7 @@ def apply_period_compatibility_filter(comparison: ComparisonResult, result: Rele
 
 
 def apply_outlier_filter(comparison: ComparisonResult) -> tuple[ComparisonResult, list[str]]:
-    """Flag metric values that differ from their UN reference by more than 50%."""
+    """Flag metric values that differ from their UN reference by more than 25%."""
     excluded = []
     for field in ('population', 'births', 'deaths', 'natural_change', 'net_migration', 'total_fertility_rate'):
         metric = getattr(comparison, field)
@@ -956,6 +992,23 @@ def apply_outlier_filter(comparison: ComparisonResult) -> tuple[ComparisonResult
         metric.assessment = 'Excluded as outlier'
         excluded.append(field)
     return comparison, excluded
+
+
+def bulk_un_bounds_issue(comparison: ComparisonResult | None) -> str | None:
+    """Return a bulk-admission reason when a comparable metric exceeds 25%."""
+    if not isinstance(comparison, ComparisonResult):
+        return None
+    outside = []
+    for field in ('population', 'births', 'deaths', 'natural_change', 'net_migration', 'total_fertility_rate'):
+        metric = getattr(comparison, field)
+        if metric.outlier_excluded:
+            outside.append(field.replace('_', ' '))
+    if not outside:
+        return None
+    return (
+        f"Outside the {OUTLIER_THRESHOLD_PERCENT:.0f}% UN comparison bound for: "
+        + ', '.join(outside) + '.'
+    )
 
 
 def extract_from_page_text(page_text: str, article_url: str, provenance: dict | None = None,
@@ -993,16 +1046,16 @@ application context. Leave any unsupported metadata null, and leave a metric
 null for projections, rates in count fields,
 subsets, categories, currency, or ambiguous evidence. Set geography_iso3 only
 for the one country owning the statistic. Preserve the supplied URL exactly.
-Read a displayed article publication timestamp as source data when it is
-present. Put that date in effective_date (and a metric's published_date where
-relevant), in ISO format when possible. Use the displayed publication date to
-interpret relative reporting language in the article: for example, an article
-published in August 2026 that reports births "in June" supports a measured
-period of "June 2026", and "last year" supports 2025. Do this only when the
-page's timestamp and wording make the relationship clear; do not substitute
-today's date, extraction date, API run date, or an unsupported guessed year.
-If the page gives only a year, retain that year in the relevant metric's
-measured_period and leave effective_date null.
+Use date priority: first an explicit reporting/effective date in the article,
+then the article publication timestamp when no more specific date is present.
+Put the selected date in effective_date (and a metric's published_date where
+relevant), in ISO format when possible. Use the publication date to interpret
+relative reporting language: an article published in August 2026 that reports
+births "in June" supports a measured_period of "June 2026", and "last year"
+supports 2025. Do not substitute today's date, extraction date, API run date,
+or an unsupported guessed year. If the article gives only a year for its
+reporting period, retain that year in measured_period; effective_date may
+still use the publication-date fallback.
 Set official_source only when the publisher is the producing authority. Use
 comments as a short comment on the extracted data: record material caveats,
 important qualifications, or the underlying source attribution when the page
@@ -1020,10 +1073,12 @@ Retrieved page text:
         result = RelevantResult.model_validate(result)
     result.url = article_url
     normalize_extracted_result(result, page_text, provenance)
-    # Keep rejected metric evidence/explanations in the validation payload,
-    # but remove the rejected numeric value so manual storage and comparison
-    # cannot mistake a crude rate for an absolute count.
-    validation = validate_extracted_result(result)
+    # A manually supplied article is operator-selected evidence. Preserve its
+    # extracted values and surface deterministic concerns as warnings so the
+    # reviewer can correct or approve the broad-scan record.
+    validation = validate_extracted_result(
+        result, retain_rejected_metrics=provenance.get('submission_type') == 'manual'
+    )
     result.extraction_prompt_version = EXTRACTION_PROMPT_VERSION
     result.extraction_rule_version = EXTRACTION_RULE_VERSION
     provenance.update({
@@ -1058,11 +1113,11 @@ Retrieved page text:
     if not has_useful_numeric_datapoint(finding):
         storage = {'status': 'excluded_no_data',
                    'reason': 'No useful numeric demographic data points; finding was not saved.'}
-    elif validation['status'] == 'needs_review':
-        storage = {'status': 'needs_review',
-                   'reason': '; '.join(item['reason'] for item in validation['issues']),
-                   'validation': validation}
     else:
+        # Manual submissions are a flexible intake path.  Keep deterministic
+        # extraction diagnostics with the result, but do not make an article
+        # un-storable because one metric has weak evidence or metadata. The
+        # only content gate here is the absence of any useful number above.
         storage = {'status': 'validated', 'validation': validation}
     return {'result': result, 'validation': validation, 'storage': storage,
             'provenance': provenance}
@@ -1200,15 +1255,17 @@ def research_agent(state: State):
         the page. For example, the page may say that its estimates follow the
         UN's latest estimates and projections. Do not name a specific UN
         revision unless the page names it, and do not put application-level
-        comparison caveats here. When the page displays an article publication
-        timestamp, treat it as source data: set effective_date to it in ISO
-        8601 format when possible, and use it to resolve relative reporting
-        wording. For example, a page published in August 2026 that says births
-        were "in June" supports a June 2026 measured_period; "last year"
-        supports 2025. Apply that only when the timestamp and wording support
-        it. Never use today's date or the API run date, and do not guess a year
-        when the relationship is unclear. If only a year is available, keep it
-        in the metric's measured_period and leave effective_date null.
+        comparison caveats here. Use date priority: first an explicit
+        reporting/effective date in the article, then the article publication
+        timestamp when no more specific date is present. Put the selected date
+        in effective_date in ISO 8601 format when possible, and use the
+        publication date to resolve relative reporting wording. For example,
+        a page published in August 2026 that says births were "in June"
+        supports a June 2026 measured_period; "last year" supports 2025.
+        Never use today's date or the API run date, and do not guess a year
+        when the relationship is unclear. If only a year is available for the
+        reporting period, keep it in the metric's measured_period;
+        effective_date may still use the publication fallback.
         Set official_source=true only when this page is published by the
         authority producing the figures, such as a government or official
         statistics agency. For reporting that attributes the figures to another
@@ -1261,7 +1318,9 @@ def research_agent(state: State):
     if fetched_urls:
         result.url = fetched_urls[-1]
     normalize_extracted_result(result, retrieved_page_text, provenance)
-    validation = validate_extracted_result(result)
+    validation = validate_extracted_result(
+        result, retain_rejected_metrics=bool(provenance.get('permission_first_bulk'))
+    )
     if isinstance(result, RelevantResult):
         # Keep versions in both the structured audit payload and provenance so
         # manual and automatic callers can compare later extraction runs.
@@ -1271,17 +1330,10 @@ def research_agent(state: State):
             "extraction_prompt_version": EXTRACTION_PROMPT_VERSION,
             "extraction_rule_version": EXTRACTION_RULE_VERSION,
         })
-        if validation["status"] == "needs_review":
-            report_activity("[Research agent] extraction needs deterministic review before storage")
-            return {
-                "messages": new_messages,
-                "result": result,
-                "storage": {
-                    "status": "needs_review",
-                    "reason": "; ".join(item["reason"] for item in validation["issues"]),
-                    "validation": validation,
-                },
-            }
+        # Research/Tavily extraction is also an intake path. Keep validation
+        # diagnostics for later quality work, but do not block a source merely
+        # because unit, evidence, status, scope, or value reconciliation needs
+        # review. The no-useful-number gate below remains the content gate.
     # The model must provide the code, but resolve it against the local WPP
     # reference before allowing it into comparison or storage. This also
     # turns the model's display label into the canonical WPP label.
@@ -1300,7 +1352,18 @@ def research_agent(state: State):
     if canonical_country:
         result.geography = canonical_country
     expected_iso3 = str((provenance or {}).get('country_iso3') or '').strip().upper()
-    if expected_iso3 and result.geography_iso3 != expected_iso3:
+    permission_first_bulk = bool(provenance.get('permission_first_bulk'))
+    if expected_iso3 and result.geography_iso3 != expected_iso3 and permission_first_bulk:
+        # The country hunt supplied the authoritative scope. Preserve the
+        # model disagreement as a warning and compare against the requested
+        # country instead of rejecting the article before the numeric check.
+        provenance['geography_warning'] = (
+            f"Extractor returned {result.geography_iso3 or 'no ISO3'}; "
+            f"country-hunt scope {expected_iso3} was used."
+        )
+        result.geography_iso3 = expected_iso3
+        result.geography = normalise_country_name(expected_iso3) or result.geography
+    elif expected_iso3 and result.geography_iso3 != expected_iso3:
         reason = (
             f"Extracted geography ISO3 {result.geography_iso3 or 'none'} does not match "
             f"the requested country ISO3 {expected_iso3}."
@@ -1314,7 +1377,9 @@ def research_agent(state: State):
     annualize_flow_statistics(result)
     mark_partial_periods(result)
     finding = result.model_dump(mode="json")
-    if provenance.get("submission_type") == "automatic" and (not model_iso3 or not result.geography_iso3):
+    if (provenance.get("submission_type") == "automatic"
+            and not permission_first_bulk
+            and (not model_iso3 or not result.geography_iso3)):
         reason = f"No unique UN ISO3 match for geography '{result.geography}'."
         report_activity(f"[Research agent] excluded subnational/unmatched geography: {reason}")
         return {
@@ -1349,6 +1414,16 @@ def research_agent(state: State):
             un_data = compared.get("un_data") or []
             finding["comparison"] = comparison.model_dump(mode="json") if comparison else None
             finding["un_data"] = un_data
+            bounds_issue = bulk_un_bounds_issue(comparison) if permission_first_bulk else None
+            if bounds_issue:
+                report_activity(f"[Compare to UN] excluded bulk article: {bounds_issue}")
+                return {
+                    "messages": new_messages,
+                    "result": result,
+                    "storage": {"status": "excluded_un_bounds", "reason": bounds_issue},
+                    "comparison": comparison,
+                    "un_data": un_data,
+                }
         except Exception as exc:
             report_activity(f"[Compare to UN] automatic comparison unavailable: {exc}")
     storage = store_webpage_finding(finding, provenance=state.get("provenance"))

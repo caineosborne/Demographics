@@ -4,7 +4,7 @@
 
 - [x] **Phase 1 — Stabilize and improve the current research pipeline**
   - [x] **Step 1.1 — Preserve and inventory the current database**
-  - [x] **Step 1.2 — Fix canonical duplicates and deletion behaviour**
+  - [x] **Step 1.2 — Exact-URL duplicates and deletion behaviour**
   - [x] **Step 1.3 — Include and rank every source type**
   - [x] **Step 1.4 — Add fallback providers and manual-only comparison**
   - [x] **Step 1.7 — Verify record and metric deletion**
@@ -156,7 +156,7 @@ with a read-only rollback copy and inventory in
 `databases/inventory/2026-09-12-pre-migration.json`. `Data_Files/` is retained
 only for offline source material and is not a production database location.
 
-### Step 1.2 — Fix canonical duplicates and deletion behaviour
+### Step 1.2 — Exact-URL duplicates and deletion behaviour
 
 #### Required URL canonicalisation
 
@@ -175,7 +175,7 @@ HTTP(S) URL it must:
 
 Do not follow redirects or try to infer that two different publisher URLs have
 the same article in Phase 1. That is deliberately out of scope; only the same
-canonical URL is a duplicate.
+exact submitted URL is a duplicate.
 
 #### Required storage and lookup behaviour
 
@@ -187,9 +187,9 @@ canonical URL is a duplicate.
   discard them. The dated full-database backup remains the recovery source.
 - Add `UNIQUE(canonical_url)` after collisions have been handled.
 - Keep the original, user-visible URL in `source_url`; it is evidence, while
-  `canonical_url` is only the deduplication key.
-- Retain the current “same effective date + same population” duplicate rule
-  unchanged. The canonical URL check is an earlier, simpler duplicate gate;
+  `canonical_url` is retained for audit and suppression, not deduplication.
+- Permit the same effective date and population when they come from a different
+  URL; the broad scan benefits from independent and syndicated evidence.
   this existing value/date safeguard remains the later storage-time check.
   Do not try to attach a second URL as corroborating evidence in the current
   SQLite finding model. Phase 4 replaces this safeguard with claims grouped
@@ -223,26 +223,22 @@ requested/consumed state; do not infer them from a deleted finding row.
 
 #### Required tests
 
-- URL variants with `www`, `http`, tracking parameters, fragments, trailing
-  slashes, and query-pair ordering resolve to one canonical URL.
+- URL variants remain separately admissible; only an exact submitted URL match
+  is a duplicate.
 - Meaningful query parameters remain distinct.
 - A duplicate is skipped before retrieval and model work.
 - “Remove and allow rerun” allows a later run; “remove and suppress” does not;
   unblocking restores eligibility.
 - An explicit recheck permits one automatic retry of a previously loaded URL.
-- The existing same-date plus same-population behavior remains unchanged for
-  different source URLs.
+- The same date and population may be stored for different source URLs.
 
-**Complete when:** the current Gradio tool prevents URL variants from creating duplicate findings while preserving the existing date/population safeguard.
+**Complete when:** the store rejects only exact URL duplicates and retains other evidence.
 
-**Completed 2026-09-12:** canonical URL keys are stored and uniquely indexed;
-the live migration archived one older canonical collision while retaining the
-newer active record. Duplicate candidates are excluded before review, fetch,
-extraction, or comparison. Normal removal permits manual rerun and creates an
-auditable automatic recheck; a successful reload closes that override, while a
-failed reload remains eligible. Suppression blocks a canonical URL, and
-unblocking creates the same automatic recheck. The existing effective-date
-plus population duplicate rule remains unchanged.
+**Updated 2026-09-14:** canonical URL keys remain stored for audit and
+suppression, while exact source URLs are uniquely indexed for deduplication.
+Different URL variants and same-date/same-population reports remain admissible.
+Normal removal permits manual rerun and creates an auditable automatic recheck;
+suppression remains canonical so an explicit block covers URL variants.
 
 ### Step 1.3 — Include and rank every source type
 
@@ -446,7 +442,7 @@ period/caveat; they are not presented as directly comparable annual WPP values.
   preceding 90 days.
 - The same candidate is excluded when that country already has a datapoint
   acquired in the preceding 90 days.
-- A fallback candidate older than 90 days, or without a date, is excluded.
+- Fallback-provider age is recorded for review and is not a storage veto.
 - Disabling a configured provider takes effect without a code change.
 - Alternative-source recovery applies the publication date of the page actually
   loaded when evaluating fallback eligibility.
@@ -1364,7 +1360,7 @@ Generate the complete release in a temporary directory and validate it before pu
 
 ### Step 8.2 — Build the admin moderation queue
 
-- Show pending URLs, canonical duplicates, notes, submission time, and moderation status.
+- Show pending URLs, exact duplicates, notes, submission time, and moderation status.
 - Allow the administrator to analyse, approve for processing, reject, or suppress a URL.
 - Route approved URLs through the same manual analysis and duplicate rules as admin-entered URLs.
 - Record the moderation decision without exposing it publicly.

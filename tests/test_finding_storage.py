@@ -43,13 +43,13 @@ class FindingStorageTests(unittest.TestCase):
         tools.store_webpage_finding(self.finding)
         self.assertEqual(tools.store_webpage_finding(self.finding)["status"], "excluded_duplicate_url")
 
-    def test_canonical_url_variants_are_excluded(self):
+    def test_only_exact_url_is_a_duplicate(self):
         tools.store_webpage_finding({
             **self.finding,
             "url": "http://www.example.test/report/?utm_source=search&b=2&a=1#figures",
         })
         duplicate = {**self.finding, "url": "https://example.test/report?a=1&b=2"}
-        self.assertEqual(tools.store_webpage_finding(duplicate)["status"], "excluded_duplicate_url")
+        self.assertEqual(tools.store_webpage_finding(duplicate)["status"], "stored")
 
     def test_meaningful_query_parameters_remain_distinct(self):
         base = {**self.finding, "effective_date": None, "statistics": {"population": {"value": None}}}
@@ -59,7 +59,7 @@ class FindingStorageTests(unittest.TestCase):
             "stored",
         )
 
-    def test_legacy_canonical_collision_archives_older_record(self):
+    def test_legacy_canonical_collision_preserves_both_records(self):
         with tools.get_connection() as conn:
             conn.execute("""CREATE TABLE webpage_findings (
                 id INTEGER PRIMARY KEY, source_url TEXT NOT NULL UNIQUE,
@@ -76,14 +76,13 @@ class FindingStorageTests(unittest.TestCase):
             )
         tools.initialise_findings_table()
         with tools.get_connection() as conn:
-            self.assertEqual(conn.execute("SELECT COUNT(*) FROM webpage_findings").fetchone()[0], 1)
-            self.assertEqual(conn.execute("SELECT COUNT(*) FROM finding_legacy_duplicates").fetchone()[0], 1)
-            self.assertEqual(conn.execute("SELECT id FROM webpage_findings").fetchone()[0], 2)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM webpage_findings").fetchone()[0], 2)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM finding_legacy_duplicates").fetchone()[0], 0)
 
-    def test_same_effective_date_and_population_is_excluded(self):
+    def test_same_effective_date_and_population_at_another_url_is_stored(self):
         tools.store_webpage_finding(self.finding)
         duplicate = {**self.finding, "url": "https://mirror.test/report"}
-        self.assertEqual(tools.store_webpage_finding(duplicate)["status"], "excluded_duplicate_report")
+        self.assertEqual(tools.store_webpage_finding(duplicate)["status"], "stored")
 
     def test_missing_population_does_not_exclude_different_url(self):
         finding = {**self.finding, "statistics": {"population": {"value": None}}}
@@ -251,25 +250,28 @@ class FindingStorageTests(unittest.TestCase):
         }, {'submission_type': 'automatic', 'published_date': None})
         self.assertEqual(stored['status'], 'stored')
 
-    def test_fallback_provider_is_excluded_when_country_has_recent_article_data(self):
+    def test_fallback_provider_is_admitted_when_country_has_recent_article_data(self):
         tools.store_webpage_finding({**self.finding, 'url': 'https://official.test/japan', 'geography': 'Japan'})
-        rejected = tools.store_webpage_finding({
+        stored = tools.store_webpage_finding({
             **self.finding, 'url': 'https://ourworldindata.org/grapher/japan-population', 'geography': 'Japan',
         }, {
             'submission_type': 'automatic',
             'published_date': datetime.now(timezone.utc).isoformat(),
         })
-        self.assertEqual(rejected['status'], 'excluded_fallback_not_needed')
+        self.assertEqual(stored['status'], 'stored')
         self.assertIn('preceding 90 days', rejected['reason'])
 
-    def test_stale_or_undated_fallback_provider_is_excluded(self):
-        finding = {**self.finding, 'url': 'https://statista.com/statistics/japan', 'geography': 'Japan'}
-        for published_date in (None, (datetime.now(timezone.utc) - timedelta(days=91)).isoformat()):
+    def test_stale_or_undated_fallback_provider_is_admitted(self):
+        for index, published_date in enumerate((None, (datetime.now(timezone.utc) - timedelta(days=91)).isoformat())):
             with self.subTest(published_date=published_date):
-                rejected = tools.store_webpage_finding(finding, {
+                stored = tools.store_webpage_finding({
+                    **self.finding,
+                    'url': f'https://statista.com/statistics/japan-{index}',
+                    'geography': 'Japan',
+                }, {
                     'submission_type': 'automatic', 'published_date': published_date,
                 })
-                self.assertEqual(rejected['status'], 'excluded_fallback_not_needed')
+                self.assertEqual(stored['status'], 'stored')
 
     def test_disabling_fallback_provider_takes_effect_without_code_change(self):
         tools.initialise_findings_table()

@@ -1,4 +1,26 @@
-.research-controls,.country-hunt-card,.bulk-hunt-card,.queue-card,.run-history-card { max-width:1000px; margin-bottom:18px; }
+.research-controls,.country-hunt-card,.bulk-hunt-card,.queue-card,.run-history-card,.current-run-card { max-width:1000px; margin-bottom:18px; }
+.research-tabs { max-width:1000px; margin-bottom:24px; }
+.research-tablist { display:flex; gap:4px; border-bottom:1px solid var(--line); margin-bottom:16px; }
+.research-tab { border:0; border-bottom:3px solid transparent; background:transparent; color:var(--muted); cursor:pointer; padding:11px 14px 10px; font-size:.78rem; font-weight:700; }
+.research-tab:hover,.research-tab.active { color:var(--teal); }
+.research-tab.active { border-bottom-color:var(--coral); }
+.research-tabpanel[hidden] { display:none; }
+.current-run-card { border-top:3px solid var(--teal); }
+.current-run-detail { margin-top:0; padding-top:0; border-top:0; }
+.current-run-detail .event-list { max-height:220px; }
+.historic-runs-card { margin-top:18px; padding:0; overflow:hidden; }
+.historic-runs-card summary { display:flex; justify-content:space-between; align-items:center; gap:16px; cursor:pointer; list-style:none; padding:18px 22px; color:var(--teal); }
+.historic-runs-card summary::-webkit-details-marker { display:none; }
+.historic-runs-card summary::before { content:"+"; color:var(--coral); font-size:1.2rem; line-height:1; }
+.historic-runs-card[open] summary::before { content:"−"; }
+.historic-runs-card summary > span:first-of-type { display:grid; gap:3px; margin-right:auto; }
+.historic-runs-card summary .kicker { margin:0; }
+.historic-runs-card summary strong { color:var(--ink); font-size:1rem; }
+.history-summary { color:var(--muted); font-size:.72rem; font-weight:400; }
+.historic-runs-content { border-top:1px solid var(--line); padding:0 22px 22px; }
+.historic-runs-content > .card-heading { align-items:center; margin:14px 0; }
+.historic-runs-content > .card-heading .help { margin:0; }
+.historic-run-detail { margin-top:18px; }
 .control-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
 .category-list { display:grid; gap:13px; }
 .category-row { padding:15px; border:1px solid var(--line); background:#f8fbf6; display:grid; gap:12px; }
@@ -23,4 +45,4 @@
 .run-detail h4 { margin:0; color:var(--teal); }
 .event-list,.candidate-list { max-height:240px; overflow:auto; margin-top:12px; padding:10px; background:#f4f7f1; font:.68rem/1.5 ui-monospace,monospace; color:#566761; }
 .event-list p,.candidate-list p { margin:0 0 6px; }
-@media (max-width:760px) { .control-grid { grid-template-columns:1fr; } .run-row { display:grid; } }
+@media (max-width:760px) { .control-grid { grid-template-columns:1fr; } .run-row { display:grid; } .research-tablist { overflow-x:auto; } .research-tab { white-space:nowrap; padding-inline:10px; } .historic-runs-card summary { align-items:flex-start; } .history-summary { display:none; } }

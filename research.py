@@ -8,7 +8,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from time import perf_counter
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -43,26 +45,16 @@ class SearchCategory(BaseModel):
     country_iso3: str | None = None
 
 
-CRITERIA = '''Find factual national demographic statistics: population, births,
-deaths, fertility, or migration, including new releases and substantive revisions.
-Include official releases and secondary reporting only when it names the official
-statistical source for the figures. Exclude opinion without new figures,
-unattributed aggregators, generic portals, live population clocks, scheduled
-releases with no figures, and regional-only reports. Economic
-or labour-market reporting, wildlife, health-policy advocacy, methods/tutorials,
-and event schedules are irrelevant unless they clearly report the required
-national human demographic figures. Use irrelevant when the title or snippet
-already establishes an exclusion. Use unclear only when a plausibly relevant
-national demographic article lacks enough evidence to decide; never use unclear
-merely because downloading the full article might reveal more information.
-Do not accept subgroup counts as national metrics: asylum/visa/refugee
-applications, a demographic group defined by origin, religion, age or cause of
-death, and programme/policy totals are irrelevant unless the title or snippet
-also clearly identifies a separate whole-country demographic total.
-Distinguish publication date from the period measured; historic measurement
-periods may appear in newly published releases. Prefer annual flow statistics;
-quarterly, monthly, and year-to-date flows are useful evidence but cannot be
-compared to annual UN totals. Explain date uncertainty.'''
+CRITERIA = '''Identify articles that may contain population, births, deaths,
+fertility, migration, or other useful demographic information. This is a broad
+news scan, so err toward inclusion. Official releases, secondary reporting,
+aggregators, subgroup reporting, regional reporting, and imperfectly attributed
+figures may all be useful evidence. Mark quality, scope, attribution, period, and
+date concerns in the reason for later review; these decisions are advisory and
+must not prevent an article from reaching extraction. Distinguish publication
+date from the period measured. Quarterly, monthly, year-to-date, and historic
+figures remain useful even when they are not directly comparable with annual UN
+totals.'''
 
 
 class SearchSettings(BaseModel):
@@ -73,8 +65,8 @@ class SearchSettings(BaseModel):
     reddit_limit: int = Field(default=30, ge=1, le=100)
     # A bulk gap hunt can retain five results for each of up to 100 countries.
     # The boss still processes candidates in bounded batches of 20.
-    max_candidates: int = Field(default=20, ge=1, le=500)
-    max_per_domain: int = Field(default=2, ge=1, le=10)
+    max_candidates: int = Field(default=40, ge=1, le=500)
+    max_per_domain: int = Field(default=5, ge=1, le=10)
     domain_limit_scope: Literal['run', 'category'] = 'run'
     review_criteria: str = Field(default=CRITERIA, min_length=1)
     # These flags make country-hunt semantics explicit in durable run state.
@@ -189,7 +181,12 @@ LOW_VALUE_TERMS = {
     'county population', '/topics/population',
 }
 RANGE_DAYS = {'day': 2, 'week': 9, 'month': 35, 'year': 400}
-_DOMAIN_EXTRACTOR = tldextract.TLDExtract(suffix_list_urls=())
+# Use tldextract's bundled suffix list without relying on a user-home cache.
+# Worker processes and test runners may not be allowed to create ~/.cache.
+_DOMAIN_EXTRACTOR = tldextract.TLDExtract(
+    suffix_list_urls=(),
+    cache_dir=str(Path(tempfile.gettempdir()) / "demographics-agent-tldextract"),
+)
 
 
 def discovery_issue(candidate: dict) -> str | None:
@@ -542,26 +539,20 @@ class BossAgent:
                 for finding_id, stored_canonical_url, source_url in conn.execute(
                     'SELECT id, canonical_url, source_url FROM webpage_findings'
                 ):
-                    try:
-                        known[stored_canonical_url or canonical_url(source_url)] = finding_id
-                    except ValueError:
-                        pass
+                    known[str(source_url).strip()] = finding_id
                 blocked = {row[0] for row in conn.execute('SELECT canonical_url FROM blocked_sources')}
             historical_candidates = {}
             for prior_candidate_id, prior_url in store.list_historical_candidate_urls(run_id):
-                try:
-                    historical_candidates.setdefault(canonical_url(prior_url), prior_candidate_id)
-                except ValueError:
-                    pass
+                historical_candidates.setdefault(str(prior_url).strip(), prior_candidate_id)
             automatic_rechecks = tools.pending_automatic_rechecks()
             seen = {}
-            domains_seen = {}
             processed = 0
             eligible: list[tuple[int, dict, str]] = []
             for candidate_id, candidate in candidates:
                 try:
                     check_stopped()
-                    url = canonical_url(candidate.get('url', ''))
+                    source_url = str(candidate.get('url') or '').strip()
+                    url = canonical_url(source_url)
                     if url in blocked:
                         store.update_candidate(
                             candidate_id, status='excluded_blocked_source', canonical_url=url,
@@ -580,12 +571,12 @@ class BossAgent:
                         record_outcome('excluded_source_rule')
                         yield run_id, f'EXCLUDED BY SOURCE RULE — {candidate.get("title") or url}'
                         continue
-                    historical_loaded = url in historical_candidates
+                    historical_loaded = source_url in historical_candidates
                     recheck = automatic_rechecks.get(url)
-                    if url in seen or (historical_loaded and not recheck) or url in known:
-                        duplicate_candidate_id = seen.get(url)
-                        finding_id = known.get(url)
-                        prior_candidate_id = historical_candidates.get(url)
+                    if source_url in seen or (historical_loaded and not recheck) or source_url in known:
+                        duplicate_candidate_id = seen.get(source_url)
+                        finding_id = known.get(source_url)
+                        prior_candidate_id = historical_candidates.get(source_url)
                         matches = []
                         if duplicate_candidate_id:
                             matches.append(f'candidate #{duplicate_candidate_id} in this run')
@@ -601,7 +592,7 @@ class BossAgent:
                             finding_id=finding_id,
                             duplicate_of=duplicate_of,
                             canonical_url=url,
-                            full_reason=(f'Duplicate of {duplicate_of}. The article URL normalizes to {url}.'),
+                            full_reason=(f'Duplicate of {duplicate_of}. The exact article URL is {source_url}.'),
                         )
                         record_outcome('duplicate')
                         yield run_id, f'DUPLICATE — {candidate.get("title") or url} — matches {duplicate_of}'
@@ -616,36 +607,19 @@ class BossAgent:
                     # Reserve the URL as soon as it is seen so every later
                     # variant is excluded before discovery review, fetching,
                     # extraction, or comparison.
-                    seen[url] = candidate_id
+                    seen[source_url] = candidate_id
                     if candidate.get('discovery_only'):
                         store.update_candidate(candidate_id, status='discovery_only', full_reason='Reddit discussion without an external article link.')
                         record_outcome('discovery_only')
                         yield run_id, f'Recorded Reddit discussion only: {candidate.get("title") or url}'
                         continue
                     issue = discovery_issue(candidate)
-                    if (issue and settings.country_hunt_mode in {'direct', 'bulk'}
-                            and candidate.get('country_iso3')
-                            and issue.startswith('Excluded stale search result')):
-                        # A direct hunt is an operator-requested exception to
-                        # recency gating, while low-value domains and
-                        # subnational pages remain ineligible.
-                        issue = None
                     if issue:
-                        store.update_candidate(candidate_id, status='excluded_discovery', full_reason=issue)
-                        record_outcome('excluded_discovery')
-                        yield run_id, f'Excluded before model review: {candidate.get("title") or url} — {issue}'
-                        continue
-                    domain = publisher_domain(url)
-                    domain_key = (domain, candidate.get('category')) if settings.domain_limit_scope == 'category' else domain
-                    if domains_seen.get(domain_key, 0) >= settings.max_per_domain:
-                        store.update_candidate(
-                            candidate_id, status='deferred_domain_limit',
-                            full_reason=(f'Publisher limit of {settings.max_per_domain} reached for {domain}.'),
-                        )
-                        record_outcome('deferred_domain_limit')
-                        yield run_id, f'Deferred due to publisher limit: {candidate.get("title") or url}'
-                        continue
-                    domains_seen[domain_key] = domains_seen.get(domain_key, 0) + 1
+                        # Discovery heuristics are advisory. The extraction and
+                        # 25% UN comparison decide whether demographic evidence
+                        # is stored, so a broad scan does not discard articles
+                        # from their title, publisher, geography, or date alone.
+                        store.update_candidate(candidate_id, discovery_warning=issue)
                     if processed >= settings.max_candidates:
                         store.update_candidate(
                             candidate_id, status='deferred_budget',
@@ -680,12 +654,11 @@ class BossAgent:
                 except ResearchStopRequested:
                     raise
                 except Exception as exc:
-                    errors += 1
                     for candidate_id, _, _ in batch:
-                        store.update_candidate(candidate_id, status='needs_review_summary', error=str(exc))
-                        record_outcome('needs_review_summary')
-                    yield run_id, f'Summary batch failed; {len(batch)} candidates need review: {exc}'
-                    continue
+                        store.update_candidate(candidate_id, summary_warning=str(exc))
+                    reviews = []
+                    batch_seconds = round(perf_counter() - started, 2)
+                    yield run_id, f'Summary review unavailable; continuing with {len(batch)} article(s): {exc}'
 
                 expected_ids = {candidate_id for candidate_id, _, _ in batch}
                 decisions = {
@@ -696,22 +669,14 @@ class BossAgent:
                 for candidate_id, candidate, url in batch:
                     decision = decisions.get(candidate_id)
                     if decision is None:
-                        store.update_candidate(
-                            candidate_id, status='needs_review_summary',
-                            full_reason='Summary batch did not return an auditable decision for this candidate.',
-                            summary_batch_seconds=batch_seconds, summary_batch_size=len(batch),
+                        decision = ReviewDecision(
+                            decision='unclear',
+                            reason='No summary decision returned; article admitted for full extraction by default.',
                         )
-                        record_outcome('needs_review_summary')
-                        yield run_id, f'Summary decision missing; candidate needs review: {candidate.get("title") or url}'
-                        continue
                     store.update_candidate(
                         candidate_id, summary_decision=decision.decision, summary_reason=decision.reason,
                         summary_batch_seconds=batch_seconds, summary_batch_size=len(batch),
                     )
-                    if decision.decision == 'irrelevant':
-                        store.update_candidate(candidate_id, status='irrelevant_summary')
-                        record_outcome('irrelevant_summary')
-                        continue
                     to_process.append((candidate_id, candidate, url, decision))
 
                 tavily_pages, tavily_failures, tavily_seconds = {}, {}, None
@@ -787,9 +752,10 @@ class BossAgent:
                                             'reason': alternative_source_rule.get('note') or 'Excluded by configured source rule.',
                                         })
                                         continue
-                                    if (alternative_canonical_url in seen
-                                            or alternative_canonical_url in historical_candidates
-                                            or alternative_canonical_url in known):
+                                    alternative_source_url = str(alternative_url).strip()
+                                    if (alternative_source_url in seen
+                                            or alternative_source_url in historical_candidates
+                                            or alternative_source_url in known):
                                         attempts.append({
                                             **alternative, 'status': 'duplicate',
                                             'reason': 'Alternative source has already been loaded or recorded as a finding.',
@@ -824,7 +790,7 @@ class BossAgent:
                                     # loaded URL in this run and must not be
                                     # fetched again if it appears as a later
                                     # discovery candidate.
-                                    seen[alternative_canonical_url] = candidate_id
+                                    seen[alternative_source_url] = candidate_id
                                     content_transport = 'alternative_source'
                                     break
                                 store.update_candidate(
@@ -854,17 +820,29 @@ class BossAgent:
                         if canonical_url(retrieval_url) == url and url in automatic_rechecks:
                             tools.complete_automatic_recheck(url, candidate_id)
                         started = perf_counter()
-                        decision = self.skills.review_full_article(analysis_candidate, settings.review_criteria, model_page)
-                        check_stopped()
+                        try:
+                            decision = self.skills.review_full_article(
+                                analysis_candidate, settings.review_criteria, model_page
+                            )
+                            check_stopped()
+                        except ResearchStopRequested:
+                            raise
+                        except Exception as exc:
+                            decision = ReviewDecision(
+                                decision='unclear',
+                                reason=f'Full-text review unavailable; continued to extraction: {exc}',
+                            )
                         store.update_candidate(
                             candidate_id, full_decision=decision.decision, full_reason=decision.reason,
                             full_review_seconds=round(perf_counter() - started, 2),
                         )
                         if decision.decision != 'relevant':
-                            status = 'irrelevant_full_text' if decision.decision == 'irrelevant' else 'needs_review'
-                            store.update_candidate(candidate_id, status=status)
-                            record_outcome(status)
-                            continue
+                            store.update_candidate(
+                                candidate_id,
+                                review_warning=(
+                                    f'Full-text review said {decision.decision}: {decision.reason}'
+                                ),
+                            )
                         store.update_candidate(candidate_id, status='extracting')
                         yield run_id, f'Extract useful information (LLM structured extraction): {retrieval_url}'
                         started = perf_counter()
@@ -873,6 +851,7 @@ class BossAgent:
                             'search_run_id': run_id, 'search_candidate_id': candidate_id,
                             'published_date': analysis_candidate.get('published_date'),
                             'country_iso3': candidate.get('country_iso3'),
+                            'permission_first_bulk': True,
                         })
                         check_stopped()
                         storage = state.get('storage') or {}
@@ -893,6 +872,16 @@ class BossAgent:
                             )
                             record_outcome('excluded_no_data')
                             yield run_id, f'Excluded after extraction — no demographic data points: {retrieval_url}'
+                            continue
+                        if storage.get('status') == 'excluded_un_bounds':
+                            store.update_candidate(
+                                candidate_id, status='excluded_un_bounds', storage=storage,
+                                extraction=extraction_payload, **extraction_versions,
+                                extraction_seconds=round(perf_counter() - started, 2),
+                                full_reason=storage.get('reason'),
+                            )
+                            record_outcome('excluded_un_bounds')
+                            yield run_id, f'Excluded after UN comparison — outside 25% bounds: {retrieval_url}'
                             continue
                         if storage.get('status') == 'needs_review':
                             store.update_candidate(
@@ -925,21 +914,8 @@ class BossAgent:
                             record_outcome('excluded_source_rule')
                             yield run_id, f'EXCLUDED BY SOURCE RULE — {retrieval_url}'
                             continue
-                        if storage.get('status') == 'excluded_fallback_not_needed':
-                            store.update_candidate(
-                                candidate_id, status='excluded_fallback_not_needed', storage=storage,
-                                extraction=extraction_payload, **extraction_versions,
-                                extraction_seconds=round(perf_counter() - started, 2),
-                                full_reason=storage.get('reason') or 'Fallback provider was not needed for this country.',
-                            )
-                            record_outcome('excluded_fallback_not_needed')
-                            yield run_id, f'Excluded fallback provider result — {retrieval_url}'
-                            continue
-                        if storage.get('status') in {'excluded_duplicate_url', 'excluded_duplicate_report'}:
-                            duplicate_kind = (
-                                'the same article URL' if storage['status'] == 'excluded_duplicate_url'
-                                else 'the same effective date and population value'
-                            )
+                        if storage.get('status') == 'excluded_duplicate_url':
+                            duplicate_kind = 'the exact same article URL'
                             duplicate_of = f'database finding #{finding_id}'
                             store.update_candidate(
                                 candidate_id,

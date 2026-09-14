@@ -1,8 +1,9 @@
 # Research Methodology and Business Rules
 
-This document describes the Phase 1 research pipeline as implemented in the
-current Gradio application. It is the operational rulebook for deciding when a
-URL is processed, stored, skipped, suppressed, or allowed to run again.
+This is a permission-first evidence collection system. Its purpose is a broad
+scan of news and web information that can crowdsource population and demographic
+observations. Findings are expected to be imperfect; quality signals are kept
+for review instead of becoming unnecessary rejection gates.
 
 ## 1. Two research entry points
 
@@ -10,8 +11,8 @@ The pipeline has two distinct entry points:
 
 | Entry point | Purpose | Comparison agent | Duplicate check |
 |---|---|---:|---|
-| Manual URL submission | An administrator asks the tool to analyse a specific webpage | Yes, for an eligible new URL | Yes, before retrieval when the URL is explicitly present in the submission |
-| Bulk/automatic search | News, Reddit, country-hunt, or other provider discovery | No separate comparison run | Yes, after discovery is recorded but before review, retrieval, extraction, or comparison |
+| Manual URL submission | An administrator asks the tool to analyse a specific webpage | Yes when requested | Exact URL only |
+| Bulk/automatic search | News, Reddit, country-hunt, or other provider discovery | Yes, against local WPP data | Exact URL only |
 
 The duplicate rule is therefore not limited to bulk search. It also applies to
 manually submitted URLs.
@@ -22,7 +23,7 @@ The system keeps two URL values:
 
 - `source_url`: the original URL supplied by the user or provider. This is
   retained as evidence and is the URL shown to the reviewer.
-- `canonical_url`: the normalized URL used only for identity and deduplication.
+- `canonical_url`: the normalized URL used for audit and explicit suppression.
 
 Canonicalization applies the following deterministic rules:
 
@@ -36,9 +37,8 @@ Canonicalization applies the following deterministic rules:
 7. Remaining query parameters are retained and sorted, so their order does not
    create a second identity.
 
-The system does not follow redirects or decide that two different publisher
-URLs describe the same article. Different canonical URLs remain different
-URLs.
+Duplicate identity uses the exact trimmed `source_url`. Canonical variants,
+mirrors, syndications, and different publisher URLs are separate evidence.
 
 Examples:
 
@@ -47,7 +47,7 @@ HTTP://www.example.com/report/?b=2&utm_source=news&a=1#chart
 https://example.com/report?a=1&b=2
 ```
 
-These are the same canonical URL.
+These have the same canonical form but are not storage duplicates.
 
 ```text
 https://example.com/report?edition=mobile
@@ -62,18 +62,18 @@ When an administrator submits a message containing an explicit HTTP(S) URL:
 
 1. The URL is canonicalized without asking a model to identify it.
 2. The suppression list is checked.
-3. If the canonical URL is suppressed, the submission is excluded before page
-   retrieval.
-4. If the canonical URL already belongs to an active finding, the existing
+3. If the URL is explicitly suppressed, the submission is excluded before retrieval.
+4. If the exact submitted URL already belongs to an active finding, the existing
    finding is shown and the URL is excluded before retrieval and extraction.
 5. The comparison agent is not rerun for an excluded duplicate or suppressed
    URL.
 6. A new, eligible URL proceeds through page retrieval, structured extraction,
    storage, and the manual UN comparison flow.
 
-Therefore, duplicate detection does work for manually submitted links. A
-manual submission of an HTTP/HTTPS URL variant of an existing finding does not
-download or reanalyse the page.
+Manual fields such as `unit`, `observation_status`, and
+`national_scope_status` are optional. A unit such as `people` may be inferred
+when obvious, but it is not required for approval. Deterministic validation
+issues are warnings when at least one numeric demographic metric is present.
 
 Removing a finding is the **Remove and allow rerun** control. It permits a
 manual resubmission immediately and records an automatic recheck for the
@@ -100,7 +100,7 @@ For each discovered candidate:
 2. Its URL is canonicalized.
 3. A suppressed canonical URL is marked `excluded_blocked_source` and is not
    fetched.
-4. A URL already present in the active findings database is marked `duplicate`
+4. An exact URL already present in the active findings database is marked `duplicate`
    with the existing finding ID and is not sent to summary review, retrieval,
    extraction, Tavily extraction, or comparison.
 5. A URL whose page content successfully loaded in an earlier search-result
@@ -113,59 +113,38 @@ For each discovered candidate:
    retry.
 6. A URL already seen earlier in the same run is marked `duplicate` and points
    to the earlier candidate. It is not processed twice.
-7. Only a new, eligible URL can proceed to discovery screening, publisher
-   limits, budget limits, summary review, retrieval, extraction, and storage.
+7. Discovery heuristics, publisher mix, summary review, and full-text review are
+   advisory. They are recorded as warnings and do not prevent extraction.
+8. A comparable numeric metric more than 25% above or below its UN WPP value
+   excludes the bulk finding. Exactly 25% is allowed.
+9. If no UN comparison is available, the article is admitted by default and
+   the missing comparison is retained as an audit caveat.
 
 The URL is reserved as soon as it is seen in the run. Earlier search runs are
 treated as prior sightings only after a page was successfully loaded. This
-means same-run URL variants cannot be processed twice, while a prior failed
-or never-loaded result does not permanently block a legitimate retry.
-
-Bulk research stores eligible extracted findings but does not run the separate
-manual comparison agent. WPP remains the graph reference series.
+means the exact same URL is processed once, while URL variants and a prior
+failed or never-loaded result remain eligible.
 
 ## 5. Fallback providers and explicit search configuration
 
-Statista and Our World in Data are fallback providers, not special search
-providers. The application never creates a Statista/OWID-only news or country
-hunt. A result from either domain is accepted only when it is naturally
-returned by normal discovery (or an administrator explicitly places the domain
-in a search category's Include domains control), has a usable publication date
-within the configured limit, and the country has no article datapoint acquired
-in the preceding configured gap period.
-
-An undated country profile from an enabled fallback provider may instead be
-stored as a secondary seed only when the country is blank in that same gap
-window. This is how an OWID country profile can establish an initial Sweden
-datapoint; it does not make undated fallback pages generally eligible.
+Statista, Our World in Data, DataReportal, and other secondary providers may be
+stored when returned by normal discovery. Source class, attribution, scope,
+publication date, and staleness remain visible metadata; none is a default
+storage veto.
 
 The Include domains control remains an administrator choice. It is not blocked
 for fallback domains. Configuring such a domain does not make it official or
 independent corroboration.
 
-DataReportal is excluded before model review: its digital reports commonly
-repeat an external population headline rather than provide a demographic source
-or national release. This is a configured discovery-quality decision, not a
-claim that every non-official publisher is unusable.
-
 When an inaccessible automatic result is recovered through an alternative
 page, that alternative passes the same blocked-URL, source-rule, duplicate,
-low-value-domain, stale-result, and geography checks before it is fetched. Its
-own publication date—not the inaccessible result's date—governs any fallback
-provider eligibility. Facebook and other excluded sources are therefore never
-retrieved merely because they appear as an alternative.
+and basic article-quality checks before it is fetched.
 
 ## 6. Storage-time duplicate rules
 
-The canonical URL check is the primary URL identity rule and is enforced by a
-unique canonical URL index on `webpage_findings`.
-
-The existing effective-date plus population-value duplicate rule remains in
-place as a separate storage-time safeguard. It is checked after the canonical
-URL check. This means a different URL can still be rejected if it reports the
-same effective date and population value under the existing rule.
-
-This rule is intentionally unchanged in Phase 1.
+Only an exact `source_url` match is a duplicate, enforced by a unique index on
+`webpage_findings.source_url`. The same date and population value at a different
+URL is allowed because independent and syndicated reports are useful evidence.
 
 ## 7. Removal, suppression, and unblocking
 
@@ -217,10 +196,9 @@ The dated pre-migration backup remains the full rollback source.
 
 Duplicates remain visible in the research audit. Typical statuses include:
 
-- `duplicate`: active finding or earlier candidate uses the same canonical URL.
+- `duplicate`: active finding or earlier candidate uses the same exact source URL.
 - `excluded_blocked_source`: the canonical URL is suppressed.
 - `excluded_duplicate_url`: storage or manual handling found an existing URL.
-- `excluded_duplicate_report`: the unchanged date+population safeguard matched.
 - `stored`: a new finding was saved.
 
 The audit keeps the original URL, canonical URL, reason, and related finding or

@@ -214,7 +214,7 @@ function coreResearchCategories() {
 }
 
 function coreResearchSettings() {
-  return { categories: coreResearchCategories(), max_candidates: 20, max_per_domain: 2, reddit_limit: 30, reddit_enabled: true };
+  return { categories: coreResearchCategories(), max_candidates: 40, max_per_domain: 5, reddit_limit: 30, reddit_enabled: true };
 }
 
 function readCategoryEditors() {
@@ -266,13 +266,15 @@ async function loadRunHistory() {
   try {
     const payload = await api.request("/api/v1/research/runs");
     list.replaceChildren();
-    (payload?.items || []).forEach((run) => { const button = document.createElement("button"); button.className = "run-row"; button.type = "button"; button.innerHTML = `<strong>${escapeHtml(run.id)}</strong><span>${escapeHtml(run.status)} · ${escapeHtml(run.started_at || "")}</span>`; button.addEventListener("click", () => loadRunDetail(run.id)); list.append(button); });
+    const runs = payload?.items || [];
+    runs.forEach((run) => { const button = document.createElement("button"); button.className = "run-row"; button.type = "button"; button.innerHTML = `<strong>Run ${escapeHtml(run.id)}</strong><span>${escapeHtml(run.status)} · ${escapeHtml(run.started_at || "")}</span>`; button.addEventListener("click", () => loadRunDetail(run.id, "historic")); list.append(button); });
     if (!list.children.length) list.innerHTML = '<p class="help">No research runs yet.</p>';
+    if (runs.length) await loadRunDetail(runs[0].id, "current");
   } catch (error) { list.innerHTML = `<p class="help">${escapeHtml(error.message)}</p>`; showGlobalError(error); }
 }
 
-function renderResearchRunDetail(run, { resetLogVisibility = false } = {}) {
-  const detail = $(`[data-run-detail]`);
+function renderResearchRunDetail(run, { resetLogVisibility = false, target = "current" } = {}) {
+  const detail = $(`[data-${target === "current" ? "current" : "historic"}-run-detail]`);
   if (!detail) return;
   detail.hidden = false;
   $(`[data-run-detail-title]`, detail).textContent = `Run ${run.id} · ${run.status || "running"}`;
@@ -307,18 +309,18 @@ function renderResearchRunDetail(run, { resetLogVisibility = false } = {}) {
   }
   const candidates = $(`[data-run-candidates]`, detail);
   candidates.replaceChildren();
-  (run.candidates || []).forEach((candidate) => { const button = document.createElement("button"); button.className = "candidate-row"; button.type = "button"; const scope = candidate.scope_country_iso3 ? ` · scope ${candidate.scope_country || candidate.scope_country_iso3}` : ""; const mismatch = candidate.scope_mismatch ? " · SCOPE MISMATCH" : ""; button.textContent = `#${candidate.id} · ${candidate.status}${scope}${mismatch} · ${candidate.full_reason || candidate.summary_reason || ""}`; button.addEventListener("click", () => loadCandidateDetail(candidate.id)); candidates.append(button); });
+  (run.candidates || []).forEach((candidate) => { const button = document.createElement("button"); button.className = "candidate-row"; button.type = "button"; const scope = candidate.scope_country_iso3 ? ` · scope ${candidate.scope_country || candidate.scope_country_iso3}` : ""; const mismatch = candidate.scope_mismatch ? " · SCOPE MISMATCH" : ""; button.textContent = `#${candidate.id} · ${candidate.status}${scope}${mismatch} · ${candidate.full_reason || candidate.summary_reason || ""}`; button.addEventListener("click", () => loadCandidateDetail(candidate.id, target)); candidates.append(button); });
 }
 
-async function loadRunDetail(runId) {
+async function loadRunDetail(runId, target = "current") {
   try {
     const run = await api.request(`/api/v1/research/jobs/${encodeURIComponent(runId)}`);
-    renderResearchRunDetail(run, { resetLogVisibility: true });
+    renderResearchRunDetail(run, { resetLogVisibility: target === "historic", target });
   } catch (error) { showGlobalError(error); }
 }
 
 function researchPollUpdate(runId, current) {
-  renderResearchRunDetail({ ...current, id: runId });
+  renderResearchRunDetail({ ...current, id: runId }, { target: "current" });
   return current.status === "complete" || current.status === "completed_with_errors" ? "completed" : current.status === "interrupted" || current.status === "failed" ? "failed" : "running";
 }
 
@@ -335,8 +337,8 @@ async function resetResearchSettings(form) {
   } catch (error) { setState(state, "failed", "Defaults are shown locally but could not be saved.", error.message); showGlobalError(error); }
 }
 
-async function loadCandidateDetail(candidateId) {
-  const detail = $(`[data-candidate-detail]`);
+async function loadCandidateDetail(candidateId, target = "current") {
+  const detail = $(`[data-${target === "current" ? "current" : "historic"}-run-detail] [data-candidate-detail]`);
   try {
     const candidate = await api.request(`/api/v1/research/candidates/${encodeURIComponent(candidateId)}`);
     const fields = candidate.details || {};
@@ -884,9 +886,22 @@ function selectViewFromLocation() {
   selectView(known);
 }
 
+function selectResearchTab(name) {
+  $$(`[data-research-tab]`).forEach((tab) => {
+    const active = tab.dataset.researchTab === name;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+  });
+  $$(`[data-research-panel]`).forEach((panel) => {
+    panel.hidden = panel.dataset.researchPanel !== name;
+    panel.classList.toggle("active", panel.dataset.researchPanel === name);
+  });
+}
+
 function wire() {
   if (fixtureMode) { const badge = $(`[data-mode-badge]`); badge.hidden = false; $("[data-mode-label]").textContent = "Fixtures"; }
   $$(`[data-view]`).forEach((link) => link.addEventListener("click", () => selectView(link.dataset.view)));
+  $$(`[data-research-tab]`).forEach((tab) => tab.addEventListener("click", () => selectResearchTab(tab.dataset.researchTab)));
   window.addEventListener("hashchange", selectViewFromLocation);
   $$(`[data-country-control]`).forEach((select) => select.addEventListener("change", () => updateSelected(select)));
   $$(`[data-graph-metric], [data-graph-revision]`).forEach((input) => input.addEventListener("change", () => loadGraphs({ force: true })));

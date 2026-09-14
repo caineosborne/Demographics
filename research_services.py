@@ -136,10 +136,19 @@ def _validate_manual_finding(finding: dict[str, Any]) -> tuple[dict[str, Any], d
     agents.normalize_extracted_result(model, provenance={
         'country_iso3': model.geography_iso3,
     })
-    validation = agents.validate_extracted_result(model)
-    if validation.get('status') == 'validated' and not any(
-            isinstance(metric, agents.Statistic) and metric.value is not None
-            for metric in model.statistics.__dict__.values()):
+    validation = agents.validate_extracted_result(model, retain_rejected_metrics=True)
+    # Manual review is intentionally an intake workflow, not the strict
+    # research-quality gate. Preserve diagnostics as warnings, but allow a
+    # finding with at least one numeric metric to be approved. Articles with
+    # no useful numeric metrics are still excluded by extraction/storage.
+    has_numeric_metric = agents.has_useful_numeric_datapoint(model.model_dump(mode='json'))
+    if validation.get('status') in {'needs_review', 'rejected'} and has_numeric_metric:
+        validation = {
+            **validation,
+            'status': 'validated',
+            'warnings': validation.get('issues') or [],
+        }
+    if not has_numeric_metric:
         validation = {
             **validation,
             'status': 'rejected',

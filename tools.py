@@ -300,7 +300,7 @@ def get_wpp_connection() -> sqlite3.Connection:
 
 
 def canonicalise_source_url(url: str) -> str:
-    """Return the shared canonical key used for URL deduplication."""
+    """Return the shared canonical key used for audit and suppression."""
     parts = urlsplit(str(url or "").strip())
     if parts.scheme not in {"http", "https"} or not parts.hostname or parts.username or parts.password:
         raise ValueError("Expected an HTTP(S) article URL without credentials.")
@@ -481,11 +481,13 @@ def initialise_findings_table() -> None:
             )
         """)
         _backfill_canonical_urls(conn)
-        _archive_legacy_url_collisions(conn)
+        # Keep the canonical form for suppression and audit only. Evidence
+        # identity is the exact submitted URL, so distinct URLs for syndicated
+        # or separately published articles remain admissible.
+        conn.execute("DROP INDEX IF EXISTS idx_webpage_findings_canonical_url")
         conn.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_webpage_findings_canonical_url
-            ON webpage_findings(canonical_url)
-            WHERE canonical_url IS NOT NULL
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_webpage_findings_source_url
+            ON webpage_findings(source_url)
         """)
         _purge_legacy_partial_period_metrics(conn)
 
@@ -1088,31 +1090,11 @@ def store_webpage_finding(finding: dict[str, Any], provenance: dict | None = Non
                     "reason": rule.get('note') or 'Excluded by configured source rule.'}
         if conn.execute("SELECT 1 FROM blocked_sources WHERE canonical_url = ?", (canonical_url,)).fetchone():
             return {"status": "excluded_blocked_source", "canonical_url": canonical_url}
-        fallback_exclusion = _fallback_exclusion(finding, provenance, conn)
-        if fallback_exclusion:
-            return {
-                'status': 'excluded_fallback_not_needed',
-                'canonical_url': canonical_url,
-                **fallback_exclusion,
-            }
         duplicate_url = conn.execute(
-            "SELECT id FROM webpage_findings WHERE canonical_url = ?", (canonical_url,)
+            "SELECT id FROM webpage_findings WHERE source_url = ?", (str(source_url).strip(),)
         ).fetchone()
         if duplicate_url:
             return {"status": "excluded_duplicate_url", "existing_id": duplicate_url[0]}
-
-        if effective_date is not None and population_value is not None:
-            duplicate_report = conn.execute(
-                """SELECT id FROM webpage_findings
-                   WHERE effective_date = ? AND population_value = ?
-                   LIMIT 1""",
-                (effective_date, population_value),
-            ).fetchone()
-            if duplicate_report:
-                return {
-                    "status": "excluded_duplicate_report",
-                    "existing_id": duplicate_report[0],
-                }
 
         classification = source_classification(finding)
         finding = {**finding, 'source_classification': classification}
@@ -1202,7 +1184,7 @@ def get_webpage_finding(finding_id: int) -> dict[str, Any]:
 
 
 def find_webpage_finding_by_url(url: str) -> dict[str, Any] | None:
-    """Return the active finding for a canonical URL, if one exists."""
+    """Return the active finding for this exact submitted URL, if one exists."""
     normalise_stored_finding_geographies()
     canonical_url = canonicalise_source_url(url)
     initialise_findings_table()
@@ -1210,8 +1192,8 @@ def find_webpage_finding_by_url(url: str) -> dict[str, Any] | None:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             """SELECT id, source_url, canonical_url, finding_json
-               FROM webpage_findings WHERE canonical_url = ?""",
-            (canonical_url,),
+               FROM webpage_findings WHERE source_url = ?""",
+            (str(url).strip(),),
         ).fetchone()
     if row is None:
         return None
@@ -1269,18 +1251,10 @@ def update_webpage_finding(finding_id: int, finding_json: str) -> None:
         if not exists:
             raise ValueError(f"No stored finding exists with ID {finding_id}.")
         duplicate_url = conn.execute(
-            "SELECT id FROM webpage_findings WHERE canonical_url = ? AND id != ?", (canonical_url, finding_id)
+            "SELECT id FROM webpage_findings WHERE source_url = ? AND id != ?", (source_url, finding_id)
         ).fetchone()
         if duplicate_url:
-            raise ValueError(f"This canonical webpage URL is already stored as ID {duplicate_url[0]}.")
-        if effective_date is not None and population_value is not None:
-            duplicate_report = conn.execute(
-                """SELECT id FROM webpage_findings
-                   WHERE effective_date = ? AND population_value = ? AND id != ?""",
-                (effective_date, population_value, finding_id),
-            ).fetchone()
-            if duplicate_report:
-                raise ValueError(f"This effective date and population already exist in ID {duplicate_report[0]}.")
+            raise ValueError(f"This exact webpage URL is already stored as ID {duplicate_url[0]}.")
         conn.execute(
             """UPDATE webpage_findings SET
                    source_url = ?, canonical_url = ?, effective_date = ?, population_value = ?,

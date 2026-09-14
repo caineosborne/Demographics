@@ -55,12 +55,13 @@ class ResearchTests(unittest.TestCase):
         updates = list(BossAgent(self.skills, providers or {'tavily': lambda c: rows}).run(self.settings))
         return store.list_candidates(updates[-1][0])
 
-    def test_reject_summary_never_fetches(self):
+    def test_reject_summary_is_advisory_and_article_is_still_processed(self):
         self.summary_decision = ReviewDecision(decision='irrelevant', reason='Opinion only')
         row = self.run_boss([candidate()])[0]
-        self.assertEqual(row['status'], 'irrelevant_summary')
+        self.assertEqual(row['status'], 'complete')
         self.assertEqual(row['summary_reason'], 'Opinion only')
-        self.fetch.assert_not_called()
+        self.fetch.assert_called_once()
+        self.extract.assert_called_once()
         self.compare.assert_not_called()
 
     def test_reviews_twenty_summaries_in_one_model_call(self):
@@ -83,19 +84,17 @@ class ResearchTests(unittest.TestCase):
         self.run_boss(rows)
         self.assertEqual([len(call.args[0]) for call in self.summary_review.call_args_list], [20, 1])
 
-    def test_unclear_summary_fetches_and_full_review_gates_extraction(self):
-        for index, (verdict, expected) in enumerate([
-            ('irrelevant', 'irrelevant_full_text'), ('unclear', 'needs_review'), ('relevant', 'complete')
-        ]):
+    def test_full_review_is_advisory_and_all_articles_reach_extraction(self):
+        for index, verdict in enumerate(('irrelevant', 'unclear', 'relevant')):
             with self.subTest(verdict=verdict):
                 self.summary_decision = ReviewDecision(decision='unclear', reason='No figures in snippet')
                 self.full_review.return_value = ReviewDecision(decision=verdict, reason='Full page evidence')
                 row = self.run_boss([candidate(f'https://example.test/unclear-{index}')])[0]
-                self.assertEqual(row['status'], expected)
+                self.assertEqual(row['status'], 'complete')
                 details = store.get_candidate(row['id'])['details']
                 self.assertTrue(details['page_loaded'])
                 self.assertNotIn('full_text', details)
-        self.extract.assert_called_once()
+        self.assertEqual(self.extract.call_count, 3)
         # Automatic discovery extracts and stores; UN comparison is reserved
         # for the manual Analyse webpage flow.
         self.compare.assert_not_called()
@@ -125,8 +124,8 @@ class ResearchTests(unittest.TestCase):
         row = self.run_boss([candidate('https://example.test/unclear')])[0]
         self.assertEqual(row['status'], 'unclear_access_blocked')
 
-    def test_duplicates_preserve_both_discoveries_but_process_once(self):
-        rows = self.run_boss([candidate(), candidate('https://example.test/article?utm_source=reddit#heading', source='reddit')])
+    def test_exact_duplicates_preserve_both_discoveries_but_process_once(self):
+        rows = self.run_boss([candidate(), candidate(source='reddit')])
         self.assertEqual([r['status'] for r in rows], ['duplicate', 'complete'])
         self.assertEqual(rows[0]['duplicate_of'], f"candidate #{rows[1]['id']} in this run")
         self.assertIn('Duplicate of candidate', rows[0]['full_reason'])
@@ -146,7 +145,7 @@ class ResearchTests(unittest.TestCase):
 
         self.assertEqual(rows[0]['status'], 'duplicate')
         self.assertEqual(rows[0]['duplicate_of'], f'candidate #{prior_id} in an earlier run')
-        self.assertIn('normalizes to https://example.test/article', rows[0]['full_reason'])
+        self.assertIn('exact article URL is https://example.test/article', rows[0]['full_reason'])
         self.summary_review.assert_not_called()
         self.fetch.assert_not_called()
         self.compare.assert_not_called()
@@ -244,23 +243,26 @@ class ResearchTests(unittest.TestCase):
         extraction_candidate = self.extract.call_args.args[0]
         self.assertEqual(extraction_candidate['url'], original)
 
-    def test_obvious_explainers_and_social_results_do_not_use_a_model_call(self):
+    def test_discovery_heuristics_are_warnings_not_exclusions(self):
         rows = self.run_boss([
             candidate('https://www.ons.gov.uk/methodologies/understanding-statistics'),
             candidate('https://www.facebook.com/ons/posts/123'),
         ])
-        self.assertEqual({row['status'] for row in rows}, {'excluded_discovery'})
-        self.fetch.assert_not_called()
-        self.summary_review.assert_not_called()
-        self.full_review.assert_not_called()
+        self.assertEqual({row['status'] for row in rows}, {'complete'})
+        self.assertEqual(self.fetch.call_count, 2)
+        self.summary_review.assert_called_once()
+        self.assertEqual(self.full_review.call_count, 2)
+        self.assertTrue(all(
+            store.get_candidate(row['id'])['details']['discovery_warning'] for row in rows
+        ))
 
-    def test_publisher_cap_defers_extra_articles_from_the_same_publisher(self):
+    def test_publisher_cap_does_not_discard_articles(self):
         self.settings['max_per_domain'] = 1
         rows = self.run_boss([
             candidate('https://www.ons.gov.uk/release-one'),
             candidate('https://cy.ons.gov.uk/release-two'),
         ])
-        self.assertEqual([row['status'] for row in rows], ['deferred_domain_limit', 'complete'])
+        self.assertEqual([row['status'] for row in rows], ['complete', 'complete'])
         self.assertEqual(publisher_domain('https://cy.ons.gov.uk/release-two'), 'ons.gov.uk')
 
     def test_publisher_domain_respects_multi_part_public_suffixes(self):
@@ -271,11 +273,11 @@ class ResearchTests(unittest.TestCase):
             publisher_domain('https://second.com.tw/release'),
         )
 
-    def test_stale_results_with_a_provider_date_are_excluded(self):
+    def test_stale_provider_date_is_an_advisory_warning(self):
         self.settings['categories'][0]['time_range'] = 'week'
         rows = self.run_boss([candidate(published_date='2020-01-01', time_range='week')])
-        self.assertEqual(rows[0]['status'], 'excluded_discovery')
-        self.assertIn('stale', rows[0]['full_reason'])
+        self.assertEqual(rows[0]['status'], 'complete')
+        self.assertIn('stale', store.get_candidate(rows[0]['id'])['details']['discovery_warning'])
 
     def test_processing_cap_defers_after_recording_discoveries(self):
         self.settings['max_candidates'] = 1
@@ -358,13 +360,12 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(attempts[0]['status'], 'excluded_source_rule')
         self.assertEqual(attempts[0]['reason'], 'Excluded publisher')
 
-    def test_existing_finding_is_not_downloaded_or_relabelled(self):
+    def test_different_url_variant_is_processed_as_distinct_evidence(self):
         tools.store_webpage_finding({'url': 'https://example.test/article', 'statistics': {}})
         row = self.run_boss([candidate(url='http://www.example.test/article/?utm_source=search#top')])[0]
-        self.assertEqual(row['status'], 'duplicate')
-        self.assertEqual(row['duplicate_of'], 'database finding #1')
-        self.fetch.assert_not_called()
-        self.summary_review.assert_not_called()
+        self.assertEqual(row['status'], 'complete')
+        self.fetch.assert_called_once()
+        self.summary_review.assert_called_once()
         self.assertEqual(tools.list_webpage_findings()[0]['Submission type'], 'manual')
 
     def test_excluded_source_rule_stops_before_summary_or_fetch(self):
@@ -375,13 +376,13 @@ class ResearchTests(unittest.TestCase):
         self.summary_review.assert_not_called()
         self.fetch.assert_not_called()
 
-    def test_duplicate_report_found_during_extraction_is_shown_as_duplicate(self):
+    def test_exact_duplicate_found_during_extraction_is_shown_as_duplicate(self):
         state = self.extract.return_value
-        state['storage'] = {'status': 'excluded_duplicate_report', 'existing_id': 42}
+        state['storage'] = {'status': 'excluded_duplicate_url', 'existing_id': 42}
         row = self.run_boss([candidate()])[0]
         self.assertEqual(row['status'], 'duplicate')
         self.assertEqual(row['duplicate_of'], 'database finding #42')
-        self.assertIn('effective date and population value', row['full_reason'])
+        self.assertIn('exact same article URL', row['full_reason'])
         self.compare.assert_not_called()
 
     def test_interrupted_generator_is_recorded(self):
@@ -532,7 +533,7 @@ class ResearchTests(unittest.TestCase):
     def test_candidate_table_names_duplicate_target_and_reason(self):
         import research_ui
 
-        rows = self.run_boss([candidate(), candidate('https://example.test/article?utm_source=other')])
+        rows = self.run_boss([candidate(), candidate()])
         table = research_ui.candidate_table(rows[0]['run_id'])
         duplicate = table.loc[table['Outcome'] == '🔁 DUPLICATE'].iloc[0]
         self.assertTrue(duplicate['Duplicate of'].startswith('candidate #'))

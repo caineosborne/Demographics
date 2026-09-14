@@ -122,3 +122,19 @@ class ModelHandoffTests(unittest.TestCase):
             {'country_iso3': 'AUS', 'years': [2024], 'historic': False},
         ])
         self.assertEqual(result['un_data'][0]['population_reference']['observation_date'], '2024-01-01')
+
+    def test_bulk_un_bound_is_inclusive_at_25_percent(self):
+        comparison = agents.ComparisonResult(
+            population=agents.MetricComparison(reported=125, un_expected=100),
+            births=agents.MetricComparison(), deaths=agents.MetricComparison(),
+            natural_change=agents.MetricComparison(), net_migration=agents.MetricComparison(),
+            total_fertility_rate=agents.MetricComparison(), overall_assessment='Compared',
+        )
+        comparison, excluded = agents.apply_outlier_filter(comparison)
+        self.assertEqual(excluded, [])
+        self.assertIsNone(agents.bulk_un_bounds_issue(comparison))
+
+        comparison.population.reported = 125.01
+        comparison, excluded = agents.apply_outlier_filter(comparison)
+        self.assertEqual(excluded, ['population'])
+        self.assertIn('25% UN comparison bound', agents.bulk_un_bounds_issue(comparison))

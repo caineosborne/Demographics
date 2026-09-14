@@ -16,6 +16,25 @@ FIXTURE = Path(__file__).parents[1] / "fixtures" / "bbc_recovered_extraction.jso
 
 
 class BbcRecoveryNormalizationTests(unittest.TestCase):
+    def test_publication_date_is_fallback_when_effective_date_is_missing(self):
+        result = RelevantResult.model_validate(json.loads(FIXTURE.read_text()))
+        normalize_extracted_result(
+            result,
+            "China's population was 1.416 billion in 2025.",
+            {"published_date": "Sun, 13 Sep 2026 07:00:00 GMT"},
+        )
+        self.assertEqual(result.effective_date, "2026-09-13T07:00:00+00:00")
+
+    def test_article_effective_date_has_priority_over_publication_date(self):
+        result = RelevantResult.model_validate(json.loads(FIXTURE.read_text()))
+        result.effective_date = "2025-12-31"
+        normalize_extracted_result(
+            result,
+            "China's population was 1.416 billion in 2025.",
+            {"published_date": "Sun, 13 Sep 2026 07:00:00 GMT"},
+        )
+        self.assertEqual(result.effective_date, "2025-12-31")
+
     def test_recovered_bbc_result_gets_country_and_safe_metric_metadata(self):
         result = RelevantResult.model_validate(json.loads(FIXTURE.read_text()))
 

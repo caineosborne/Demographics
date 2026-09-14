@@ -117,7 +117,7 @@ class Step35ManualAnalysisTests(unittest.TestCase):
             self.assertEqual(approved['finding']['comments'], 'Reviewed by analyst.')
             store.assert_called_once()
 
-    def test_edit_revalidates_subset_and_approval_keeps_draft_pending(self):
+    def test_edit_keeps_scope_warning_but_allows_manual_approval(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(
             tools, 'DB_PATH', Path(directory) / 'db.sqlite'
         ), patch.object(tools, 'store_webpage_finding') as store:
@@ -129,11 +129,12 @@ class Step35ManualAnalysisTests(unittest.TestCase):
                 'evidence_excerpt': '5 million immigrants lived in Japan in 2023.',
             }}}
             updated = research_services.edit_analysis_draft(draft['id'], edited, expected_revision=1)
-            self.assertEqual(updated['validation']['status'], 'rejected')
-            with self.assertRaisesRegex(ValueError, 'deterministic validation'):
-                research_services.approve_analysis_draft(draft['id'])
-            self.assertEqual(research_services.get_analysis_draft(draft['id'])['status'], 'pending_review')
-            store.assert_not_called()
+            self.assertEqual(updated['validation']['status'], 'validated')
+            self.assertTrue(updated['validation']['warnings'])
+            store.return_value = {'status': 'stored', 'id': 9}
+            approved = research_services.approve_analysis_draft(draft['id'])
+            self.assertEqual(approved['status'], 'approved')
+            store.assert_called_once()
 
     def test_non_stored_approval_outcome_does_not_mark_draft_approved(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(
