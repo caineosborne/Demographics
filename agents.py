@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import httpx
+from time import perf_counter
 from datetime import date, datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Annotated, Optional, TypedDict
@@ -20,7 +22,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 import tools
 from tools import (
@@ -39,6 +41,45 @@ EXTRACTION_PROMPT_VERSION = "3.4.1"
 EXTRACTION_RULE_VERSION = "3.4.1"
 OBSERVED_STATUS = "observed"
 PROJECTION_LABEL = "projection"
+
+
+def report_llm_call(stage: str, response=None, *, elapsed: float | None = None,
+                    request_size: int | None = None, error: Exception | None = None,
+                    request=None) -> None:
+    """Emit bounded, structured model-call diagnostics to the active GUI log."""
+    payload = {
+        'stage': stage,
+        'model': os.getenv('LLM_MODEL', DEFAULT_LLM_MODEL),
+        'request_characters': request_size,
+        'elapsed_seconds': round(elapsed, 2) if elapsed is not None else None,
+    }
+    if error is not None:
+        payload['error'] = str(error)
+    elif response is not None:
+        try:
+            value = response.model_dump(mode='json') if hasattr(response, 'model_dump') else response
+            payload['response'] = json.loads(json.dumps(value, default=str))
+        except Exception as exc:
+            payload['response'] = str(response)
+            payload['response_serialization_error'] = str(exc)
+    else:
+        payload['response'] = None
+    report_activity('[LLM] ' + json.dumps(payload, ensure_ascii=False)[:8_000])
+    full_payload = {**payload, 'request': request}
+    report_activity('[LLM FULL] ' + json.dumps(full_payload, ensure_ascii=False, default=str),
+                    event_type='llm_full')
+
+
+def report_llm_request(stage: str, request) -> None:
+    """Record an outbound model request before the blocking HTTP call starts."""
+    report_activity(
+        f'[LLM] request sent stage={stage} model={os.getenv("LLM_MODEL", DEFAULT_LLM_MODEL)} '
+        f'timeout={_llm_timeout_seconds()}s'
+    )
+    report_activity(
+        '[LLM REQUEST FULL] ' + json.dumps({'stage': stage, 'request': request}, ensure_ascii=False, default=str),
+        event_type='llm_full',
+    )
 
 
 def _coerce_number(value):
@@ -70,9 +111,9 @@ def _coerce_number(value):
 
 def _llm_timeout_seconds() -> int:
     try:
-        return max(10, int(os.getenv('LLM_TIMEOUT_SECONDS', '120')))
+        return max(10, int(os.getenv('LLM_TIMEOUT_SECONDS', '60')))
     except ValueError:
-        return 120
+        return 60
 
 
 URL_IN_MESSAGE = re.compile(r"https?://[^\s<>\"']+")
@@ -629,7 +670,10 @@ class RelevantResult(BaseModel):
     official_source: bool = False
     quoted_source: Optional[str] = None
     quoted_source_url: Optional[str] = None
-    statistics: Statistics
+    # Articles can be relevant but contain no usable numeric claim. Keep the
+    # extraction result valid so the pipeline can record that outcome rather
+    # than failing on a missing optional object.
+    statistics: Statistics = Field(default_factory=Statistics)
     comments: Optional[str] = None
     extraction_prompt_version: Optional[str] = None
     extraction_rule_version: Optional[str] = None
@@ -705,7 +749,9 @@ def _openrouter_llm(model: str, reasoning_effort: str) -> ChatOpenAI:
         base_url="https://openrouter.ai/api/v1",
         api_key=os.getenv("OPENROUTER_API_KEY"),
         model=model,
-        timeout=_llm_timeout_seconds(),
+        timeout=httpx.Timeout(
+            _llm_timeout_seconds(), connect=10.0, write=15.0, pool=10.0,
+        ),
         max_retries=0,
         extra_body={"reasoning": {"effort": reasoning_effort, "exclude": True}},
     )
@@ -715,6 +761,10 @@ low_llm = _openrouter_llm(
     os.getenv("LLM_MODEL", DEFAULT_LLM_MODEL),
     os.getenv("LLM_LOW_REASONING_EFFORT", "low"),
 )
+# Compatibility name used by the automatic search-review stage.  Keep the
+# canonical stage-specific names above, but expose the historical ``llm``
+# symbol so older callers and persisted runs do not fail at import time.
+llm = low_llm
 medium_llm = _openrouter_llm(
     os.getenv("LLM_MEDIUM_MODEL", os.getenv("LLM_MODEL", DEFAULT_LLM_MODEL)),
     os.getenv("LLM_MEDIUM_REASONING_EFFORT", "medium"),
@@ -1007,7 +1057,10 @@ def is_full_year_statistic(statistic: Statistic) -> bool:
             return start.year == end.year and start.month == 1 and start.day == 1 and end.month == 12 and end.day == 31
         except ValueError:
             pass
-    period = (statistic.time_period or '').strip().casefold()
+    # Extraction commonly records a year in measured_period and leaves the
+    # optional cadence field empty. A bare four-digit measured period is still
+    # an explicit full-year reporting period and must remain comparable.
+    period = (statistic.time_period or statistic.measured_period or '').strip().casefold()
     return bool(re.fullmatch(r'\d{4}', period) or re.fullmatch(r'year ending \d{4}-12-31', period))
 
 
@@ -1150,20 +1203,47 @@ Retrieved page text:
 {page_text[:120000]}
     """
     extraction_messages = [HumanMessage(content=prompt)]
-    result = research_llm.invoke(extraction_messages)
-    if not isinstance(result, RelevantResult):
-        result = RelevantResult.model_validate(result)
-    result.url = article_url
-    normalize_extracted_result(result, page_text, provenance)
-    # Remove structurally incompatible auto-extractions (for example a birth
-    # rate placed in a birth-count field) while allowing the article through
-    # when another useful metric remains. Explicit reviewer edits are handled
-    # permissively by the manual draft service.
-    validation = validate_extracted_result(result)
-    if (has_useful_numeric_datapoint(result.model_dump(mode="json"))
-            and validation.get("status") != "validated"):
+    started = perf_counter()
+    try:
+        report_llm_request('extraction_low_effort', extraction_messages)
+        result = research_llm.invoke(extraction_messages)
+        report_llm_call('extraction_low_effort', result, elapsed=perf_counter() - started,
+                        request_size=len(str(extraction_messages)), request=extraction_messages)
+    except Exception as exc:
+        report_llm_call('extraction_low_effort', elapsed=perf_counter() - started,
+                        request_size=len(str(extraction_messages)), error=exc, request=extraction_messages)
+        raise
+    if result is None:
+        report_activity("[Research agent] low-effort extraction returned no structured result; retrying medium")
+        validation = {'status': 'needs_review', 'issues': ['Low-effort extraction returned no structured result.']}
+    else:
+        if not isinstance(result, RelevantResult):
+            result = RelevantResult.model_validate(result)
+        result.url = article_url
+        normalize_extracted_result(result, page_text, provenance)
+        # Remove structurally incompatible auto-extractions (for example a birth
+        # rate placed in a birth-count field) while allowing the article through
+        # when another useful metric remains. Explicit reviewer edits are handled
+        # permissively by the manual draft service.
+        validation = validate_extracted_result(result)
+    if (result is None or (has_useful_numeric_datapoint(result.model_dump(mode="json"))
+            and validation.get("status") != "validated")):
         report_activity("[Research agent] low-effort extraction found partial or unclear data; retrying medium")
-        result = research_llm_medium.invoke(extraction_messages)
+        started = perf_counter()
+        try:
+            report_llm_request('extraction_medium_retry', extraction_messages)
+            result = research_llm_medium.invoke(extraction_messages)
+            report_llm_call('extraction_medium_retry', result, elapsed=perf_counter() - started,
+                            request_size=len(str(extraction_messages)), request=extraction_messages)
+        except Exception as exc:
+            report_llm_call('extraction_medium_retry', elapsed=perf_counter() - started,
+                            request_size=len(str(extraction_messages)), error=exc, request=extraction_messages)
+            raise
+        if result is None:
+            error = RuntimeError("Medium-effort extraction returned no structured result.")
+            report_llm_call('extraction_medium_retry', elapsed=perf_counter() - started,
+                            request_size=len(str(extraction_messages)), error=error, request=extraction_messages)
+            raise error
         if not isinstance(result, RelevantResult):
             result = RelevantResult.model_validate(result)
         result.url = article_url
@@ -1404,20 +1484,48 @@ def research_agent(state: State):
         # Gemini rejects generation requests ending with an assistant turn.
         HumanMessage(content="Extract the structured research result from the retrieved page above."),
     ]
-    result = research_llm.invoke(extraction_messages)
-    if not isinstance(result, RelevantResult):
-        result = RelevantResult.model_validate(result)
+    started = perf_counter()
+    try:
+        report_llm_request('extraction_low_effort', extraction_messages)
+        result = research_llm.invoke(extraction_messages)
+        report_llm_call('extraction_low_effort', result, elapsed=perf_counter() - started,
+                        request_size=len(str(extraction_messages)), request=extraction_messages)
+    except Exception as exc:
+        report_llm_call('extraction_low_effort', elapsed=perf_counter() - started,
+                        request_size=len(str(extraction_messages)), error=exc, request=extraction_messages)
+        raise
+    if result is None:
+        report_activity("[Research agent] low-effort extraction returned no structured result; retrying medium")
+        validation = {'status': 'needs_review', 'issues': ['Low-effort extraction returned no structured result.']}
+    else:
+        if not isinstance(result, RelevantResult):
+            result = RelevantResult.model_validate(result)
     # Persist the URL actually fetched, rather than a URL inferred by the model.
-    if fetched_urls:
+    if fetched_urls and result is not None:
         result.url = fetched_urls[-1]
-    normalize_extracted_result(result, retrieved_page_text, provenance)
-    validation = validate_extracted_result(
-        result, retain_rejected_metrics=bool(provenance.get('permission_first_bulk'))
-    )
-    if (has_useful_numeric_datapoint(result.model_dump(mode="json"))
-            and validation.get("status") != "validated"):
+    if result is not None:
+        normalize_extracted_result(result, retrieved_page_text, provenance)
+        validation = validate_extracted_result(
+            result, retain_rejected_metrics=bool(provenance.get('permission_first_bulk'))
+        )
+    if (result is None or (has_useful_numeric_datapoint(result.model_dump(mode="json"))
+            and validation.get("status") != "validated")):
         report_activity("[Research agent] low-effort extraction found partial or unclear data; retrying medium")
-        result = research_llm_medium.invoke(extraction_messages)
+        started = perf_counter()
+        try:
+            report_llm_request('extraction_medium_retry', extraction_messages)
+            result = research_llm_medium.invoke(extraction_messages)
+            report_llm_call('extraction_medium_retry', result, elapsed=perf_counter() - started,
+                            request_size=len(str(extraction_messages)), request=extraction_messages)
+        except Exception as exc:
+            report_llm_call('extraction_medium_retry', elapsed=perf_counter() - started,
+                            request_size=len(str(extraction_messages)), error=exc, request=extraction_messages)
+            raise
+        if result is None:
+            error = RuntimeError("Medium-effort extraction returned no structured result.")
+            report_llm_call('extraction_medium_retry', elapsed=perf_counter() - started,
+                            request_size=len(str(extraction_messages)), error=error, request=extraction_messages)
+            raise error
         if not isinstance(result, RelevantResult):
             result = RelevantResult.model_validate(result)
         if fetched_urls:
@@ -1458,17 +1566,7 @@ def research_agent(state: State):
         result.geography = canonical_country
     expected_iso3 = str((provenance or {}).get('country_iso3') or '').strip().upper()
     permission_first_bulk = bool(provenance.get('permission_first_bulk'))
-    if expected_iso3 and result.geography_iso3 != expected_iso3 and permission_first_bulk:
-        # The country hunt supplied the authoritative scope. Preserve the
-        # model disagreement as a warning and compare against the requested
-        # country instead of rejecting the article before the numeric check.
-        provenance['geography_warning'] = (
-            f"Extractor returned {result.geography_iso3 or 'no ISO3'}; "
-            f"country-hunt scope {expected_iso3} was used."
-        )
-        result.geography_iso3 = expected_iso3
-        result.geography = normalise_country_name(expected_iso3) or result.geography
-    elif expected_iso3 and result.geography_iso3 != expected_iso3:
+    if expected_iso3 and result.geography_iso3 != expected_iso3:
         reason = (
             f"Extracted geography ISO3 {result.geography_iso3 or 'none'} does not match "
             f"the requested country ISO3 {expected_iso3}."
@@ -1514,7 +1612,9 @@ def research_agent(state: State):
         # finding is written.  A comparison-provider failure must not discard
         # otherwise useful numeric source evidence.
         try:
+            comparison_started = perf_counter()
             compared = compare_to_un({"result": result, "storage": {"status": "validated"}})
+            report_activity(f"[Compare to UN] completed in {round(perf_counter() - comparison_started, 2)}s")
             comparison = compared.get("comparison")
             un_data = compared.get("un_data") or []
             finding["comparison"] = comparison.model_dump(mode="json") if comparison else None
@@ -1530,6 +1630,7 @@ def research_agent(state: State):
                     "un_data": un_data,
                 }
         except Exception as exc:
+            report_activity(f"[Compare to UN] failed after {round(perf_counter() - comparison_started, 2)}s: {exc}")
             report_activity(f"[Compare to UN] automatic comparison unavailable: {exc}")
     storage = store_webpage_finding(finding, provenance=state.get("provenance"))
     report_activity(f"[Research agent] finding storage: {storage['status']}")

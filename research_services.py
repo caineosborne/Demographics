@@ -59,7 +59,7 @@ def start_manual_analysis(url: str, *, country_iso3: str | None = None,
         'url': url, 'country_iso3': context['iso3'] if context else None,
         'country': context['label'] if context else None,
         'compare': bool(compare), 'allow_rerun': bool(allow_rerun),
-        'review_before_store': bool(review_before_store), 'logs': [], 'fetch_status': None,
+        'review_before_store': bool(review_before_store), 'logs': [], 'llm_logs': [], 'fetch_status': None,
         'extraction_prompt_version': agents.EXTRACTION_PROMPT_VERSION,
         'extraction_rule_version': agents.EXTRACTION_RULE_VERSION,
         'created_at': _now(), 'updated_at': _now(),
@@ -444,6 +444,7 @@ def _start_research(
 
     def worker() -> None:
         heartbeat_stop = threading.Event()
+        progress_token = None
         heartbeat = threading.Thread(
             target=_heartbeat_loop,
             args=(lock_id, worker_owner, heartbeat_stop),
@@ -451,6 +452,13 @@ def _start_research(
         )
         heartbeat.start()
         try:
+            def fetch_progress(event):
+                if holder.get('run_id') and event.get('message'):
+                    research_store.log_event(holder['run_id'], {
+                        'event': 'llm_full' if event.get('type') == 'llm_full' else 'progress',
+                        'message': event['message'],
+                    })
+            progress_token = tools.set_progress_callback(fetch_progress)
             iterator = BossAgent().run(
                 settings, stop_event=stop_event, owner_id=worker_owner,
                 persist_settings=persist_settings,
@@ -515,6 +523,8 @@ def _start_research(
                     )
             research_store.update_job(lock_id, status='failed', error=str(exc))
         finally:
+            if progress_token is not None:
+                tools.reset_progress_callback(progress_token)
             heartbeat_stop.set()
             research_store.release_worker_lock('discovery', lock_id, worker_owner)
             research_store.update_job(lock_id, owner_id=None)
@@ -742,7 +752,7 @@ def _set_job(job_id: str, **updates: Any) -> None:
     if 'stage' in updates or 'fetch_status' in updates or 'logs' in updates:
         durable_updates['progress'] = {
             'stage': job.get('stage'), 'fetch_status': job.get('fetch_status'),
-            'logs': job.get('logs', []),
+            'logs': job.get('logs', []), 'llm_logs': job.get('llm_logs', []),
         }
     if durable_updates:
         research_store.update_job(job_id, **durable_updates)
@@ -761,14 +771,19 @@ def _record_job_progress(job_id: str, event: dict[str, Any]) -> None:
         if job is None:
             return
         logs = job.setdefault('logs', [])
+        llm_logs = job.setdefault('llm_logs', [])
         message = event.get('message')
         if message:
-            logs.append({'at': _now(), 'message': str(message)})
-            del logs[:-100]
+            target = llm_logs if event.get('type') == 'llm_full' else logs
+            target.append({'at': _now(), 'message': str(message)})
+            del target[:-100]
         if event.get('type') == 'fetch_status':
             job['fetch_status'] = event.get('status')
         job['updated_at'] = _now()
-        progress = {'stage': job.get('stage'), 'fetch_status': job.get('fetch_status'), 'logs': logs}
+        progress = {
+            'stage': job.get('stage'), 'fetch_status': job.get('fetch_status'),
+            'logs': logs, 'llm_logs': llm_logs,
+        }
         job['progress'] = progress
     research_store.update_job(job_id, progress=progress)
 

@@ -442,7 +442,20 @@ def acquire_worker_lock(name, job_id, worker_owner=None, *, owner_id=None,
             if existing:
                 expires = existing[1]
                 if expires and expires >= timestamp:
-                    raise RuntimeError(f'Worker lock is already held: {name}.')
+                    # Include the durable job/run handle so the operator can
+                    # stop the existing work instead of guessing which lock
+                    # belongs to the active process.
+                    progress_row = conn.execute(
+                        'SELECT progress_json FROM worker_jobs WHERE id = ?', (existing[0],)
+                    ).fetchone()
+                    run_id = None
+                    if progress_row and progress_row[0]:
+                        try:
+                            run_id = json.loads(progress_row[0]).get('run_id')
+                        except (TypeError, ValueError):
+                            run_id = None
+                    handle = f" job {existing[0]}" + (f" (run {run_id})" if run_id else '')
+                    raise RuntimeError(f'Worker lock is already held: {name}.{handle} Stop that run or wait for its lease to expire.')
                 conn.execute('DELETE FROM worker_locks WHERE name = ?', (name,))
             expiry = _lease_expiry(lease_seconds) if owner else timestamp
             conn.execute(
@@ -778,6 +791,10 @@ def get_candidate(candidate_id):
     # Keep extraction/review outcomes while excluding retrieved bodies and
     # provider payloads that can contain unbounded or sensitive content.
     details = compact_candidate_details(details)
+    # Keep the original discovery URL in the detail contract even when the
+    # audit payload has been compacted after a terminal outcome.
+    if result.get('url') and not details.get('url'):
+        details['url'] = result['url']
     for field in ('full_text', 'page_text', 'raw', 'provider_response'):
         details.pop(field, None)
     scoped_iso3 = str(details.get('country_iso3') or '').upper()

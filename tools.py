@@ -5,6 +5,7 @@ import sqlite3
 import time
 import json
 import re
+import threading
 import unicodedata
 from datetime import datetime, timezone, timedelta
 from functools import lru_cache
@@ -25,14 +26,38 @@ DB_PATH = configured_database_path()
 WPP_DB_PATH = configured_wpp_database_path()
 _COUNTRY_MIGRATION_IN_PROGRESS = False
 _progress_callback: ContextVar[Any] = ContextVar("progress_callback", default=None)
+_progress_callback_lock = threading.Lock()
+_fallback_progress_callbacks: dict[int, Any] = {}
 
 
 def set_progress_callback(callback):
-    """Install a thread-local progress sink for callers such as API jobs."""
-    return _progress_callback.set(callback)
+    """Install a progress sink for callers such as API jobs and the GUI.
+
+    The ContextVar is the preferred route, but provider/model integrations can
+    execute callbacks in a different context. Keep a process-local fallback
+    for the single active UI worker so diagnostics cannot silently become
+    console-only during an LLM call.
+    """
+    thread_id = threading.get_ident()
+    with _progress_callback_lock:
+        previous = _fallback_progress_callbacks.get(thread_id)
+        _fallback_progress_callbacks[thread_id] = callback
+    token = _progress_callback.set(callback)
+    return token, thread_id, previous, callback
 
 
 def reset_progress_callback(token) -> None:
+    if isinstance(token, tuple):
+        context_token, thread_id, previous, callback = token
+        _progress_callback.reset(context_token)
+        with _progress_callback_lock:
+            if _fallback_progress_callbacks.get(thread_id) is callback:
+                if previous is None:
+                    _fallback_progress_callbacks.pop(thread_id, None)
+                else:
+                    _fallback_progress_callbacks[thread_id] = previous
+        return
+    # Backwards compatibility for callers holding the old ContextVar token.
     _progress_callback.reset(token)
 
 
@@ -95,17 +120,25 @@ class PageAccessError(RuntimeError):
     """Neither fetch method could retrieve usable page content."""
 
 
-def report_activity(message: str) -> None:
+def report_activity(message: str, *, event_type: str = "log") -> None:
     """Write an activity message to the console and active streamed UI run."""
     print(message, flush=True)
     callback = _progress_callback.get()
+    if callback is None:
+        with _progress_callback_lock:
+            callback = _fallback_progress_callbacks.get(threading.get_ident())
     if callback:
-        callback({"type": "log", "message": message})
+        try:
+            callback({"type": event_type, "message": message})
+        except Exception:
+            # Diagnostics must never interrupt research because a UI sink is
+            # temporarily unavailable or its database connection is busy.
+            pass
     try:
         writer = get_stream_writer()
     except (RuntimeError, KeyError):
         return  # The tool can also be called outside LangGraph.
-    writer({"log": message})
+    writer({event_type: message})
 
 
 def report_fetch_status(status: str) -> None:
@@ -113,8 +146,14 @@ def report_fetch_status(status: str) -> None:
     message = f"[Web] {status}"
     print(message, flush=True)
     callback = _progress_callback.get()
+    if callback is None:
+        with _progress_callback_lock:
+            callback = _fallback_progress_callbacks.get(threading.get_ident())
     if callback:
-        callback({"type": "fetch_status", "status": status, "message": message})
+        try:
+            callback({"type": "fetch_status", "status": status, "message": message})
+        except Exception:
+            pass
     try:
         writer = get_stream_writer()
     except (RuntimeError, KeyError):
@@ -129,17 +168,22 @@ def extract_page_text(html: str | bytes) -> str:
     ) is not None
     for tag in soup(["script", "style", "nav", "footer", "noscript"]):
         tag.decompose()
+    def cleaned_text(node) -> str:
+        # Preserve text-node boundaries so tables remain interpretable by the
+        # extraction model (header → year → value), rather than becoming one
+        # indistinguishable stream of words and numbers.
+        return re.sub(r"\n{3,}", "\n\n", node.get_text("\n", strip=True))
     # Some publishers put the article body in sibling sections rather than
     # inside <main>. Prefer the longest cleaned content container so that a
     # valid article is not silently truncated just because its markup is
     # unconventional.
     containers = [node for node in (soup.find("main"), soup.find("article"), soup.body, soup) if node]
-    text = max((node.get_text(" ", strip=True) for node in containers), key=len, default="")
+    text = max((cleaned_text(node) for node in containers), key=len, default="")
     # A server response can contain an article title/metadata while the body
     # is only a client-side shell. Do not treat that shell as usable article
     # text; let the rendered-browser fallback inspect the populated page.
     semantic_containers = [node for node in (soup.find("main"), soup.find("article")) if node]
-    semantic_text = max((node.get_text(" ", strip=True) for node in semantic_containers), key=len, default="")
+    semantic_text = max((cleaned_text(node) for node in semantic_containers), key=len, default="")
     if declared_article and len(semantic_text) < 200 and len(text) < 500:
         raise ValueError("The response contains article metadata but no server-rendered article body.")
     # Common successful HTTP responses that contain a challenge or JS shell.

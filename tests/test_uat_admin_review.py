@@ -43,6 +43,8 @@ def test_research_uses_core_searches_and_opens_batch_results_in_findings():
     assert 'window.location.hash = "findings"' in script
     assert "data-reset-research-settings" in TestClient(create_app()).get("/admin/").text
     assert "data-run-log-toggle" in TestClient(create_app()).get("/admin/").text
+    assert "data-analysis-copy-log" in TestClient(create_app()).get("/admin/").text
+    assert "navigator.clipboard.writeText" in script
     assert "maxAttempts: 60" in script
 
 

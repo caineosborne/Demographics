@@ -11,6 +11,7 @@ import pandas as pd
 from research import BossAgent, CRITERIA, DEFAULT_SETTINGS, ResearchStopRequested, SearchSettings, recommended_categories
 import research_store as store
 from tools import list_country_names, list_webpage_findings
+import tools
 
 
 HEADERS = ['Enabled', 'Category', 'Search terms', 'Max results',
@@ -230,9 +231,15 @@ def save_controls(*values):
 def _run_snapshot(run_id):
     run = store.get_run(run_id)
     if not run:
-        return '', pd.DataFrame(), run_id or '', '**Run not found.**'
+        return '', '', pd.DataFrame(), run_id or '', '**Run not found.**'
     events = json.loads(run.get('events_json') or '[]')
-    messages = [event.get('message') for event in events if event.get('event') == 'progress' and event.get('message')]
+    # Every pipeline diagnostic is persisted as an event. Do not filter this
+    # down to generator-yielded progress only: LLM, fetch, UN-query, and other
+    # diagnostics are emitted through the shared activity sink as well.
+    messages = [event.get('message') for event in events
+                if event.get('message') and event.get('event') != 'llm_full']
+    llm_messages = [event.get('message') for event in events
+                    if event.get('event') == 'llm_full' and event.get('message')]
     log = '\n'.join(messages)
     status = run.get('status', 'unknown')
     settings = json.loads(run.get('settings_json') or '{}')
@@ -249,7 +256,7 @@ def _run_snapshot(run_id):
         summary = '**Run interrupted. Completed findings and the audit remain saved.**'
     else:
         summary = f'**Run status: {status}**'
-    return log, candidate_table(run_id), run_id, summary
+    return log, '\n\n'.join(llm_messages), candidate_table(run_id), run_id, summary
 
 
 def candidate_table(run_id):
@@ -282,7 +289,17 @@ def candidate_table(run_id):
             geography_status = 'NOT CHECKED'
         displayed.append({
             'ID': row.get('id'),
-            'Outcome': '🔁 DUPLICATE' if status == 'duplicate' else status.replace('_', ' ').upper(),
+            'Outcome': (
+                '🔁 DUPLICATE' if status == 'duplicate' else
+                '❓ ' + status.replace('_', ' ').upper()
+                if status in {
+                    'reviewing_summary', 'fetching', 'searching_alternative',
+                    'reviewing_full_text', 'extracting', 'comparing',
+                } else
+                '⛔ ' + status.replace('_', ' ').upper()
+                if status.startswith('excluded_') else
+                status.replace('_', ' ').upper()
+            ),
             'Relevance': relevance_label,
             'Geography status': geography_status,
             'Extracted country': row.get('extracted_country') or '',
@@ -338,6 +355,13 @@ def inspect_run(run_id):
 
 def _background_search(settings, stop_event, ready, result):
     run_id = None
+    # Persist the same retrieval diagnostics shown by the manual Gradio flow,
+    # including whether Requests or Playwright supplied the page text.
+    def fetch_progress(event):
+        if run_id and event.get('message'):
+            event_type = 'llm_full' if event.get('type') == 'llm_full' else 'progress'
+            store.log_event(run_id, {'event': event_type, 'message': event['message']})
+    progress_token = tools.set_progress_callback(fetch_progress)
     try:
         for run_id, message in BossAgent().run(settings, stop_event=stop_event):
             if result.get('run_id') is None:
@@ -358,6 +382,7 @@ def _background_search(settings, stop_event, ready, result):
             except Exception:
                 pass
     finally:
+        tools.reset_progress_callback(progress_token)
         ready.set()
         if run_id:
             with _ACTIVE_RUNS_LOCK:
@@ -372,7 +397,7 @@ def start_search_settings(settings):
         if active:
             return _run_snapshot(active)
         if _BACKGROUND_STARTING:
-            return '', pd.DataFrame(), '', '**A background run is already starting.**'
+            return '', '', pd.DataFrame(), '', '**A background run is already starting.**'
         _BACKGROUND_STARTING = True
 
     stop_event = threading.Event()
@@ -394,14 +419,14 @@ def start_search_settings(settings):
     if run_id:
         return _run_snapshot(run_id)
     error = result.get('error') or 'The background worker did not start within five seconds.'
-    return error, pd.DataFrame(), '', f'**Run not started: {error}**'
+    return error, '', pd.DataFrame(), '', f'**Run not started: {error}**'
 
 
 def run_search(*values):
     try:
         settings = parse_settings(*values)
     except ValueError as exc:
-        return f'Invalid settings: {exc}', pd.DataFrame(), '', f'**Run not started:** {exc}'
+        return f'Invalid settings: {exc}', '', pd.DataFrame(), '', f'**Run not started:** {exc}'
     return start_search_settings(settings)
 
 
@@ -409,7 +434,7 @@ def run_country_hunt(country):
     try:
         return start_search_settings(country_hunt_settings(country))
     except ValueError as exc:
-        return f'Invalid country hunt: {exc}', pd.DataFrame(), '', f'**Run not started:** {exc}'
+        return f'Invalid country hunt: {exc}', '', pd.DataFrame(), '', f'**Run not started:** {exc}'
 
 
 def preview_bulk_hunt(prefix, days, country_count=5, start_at=1):
@@ -435,12 +460,12 @@ def run_bulk_hunt(prefix, days, country_count=5, start_at=1):
     try:
         days = gap_age_days(days)
         settings, countries = bulk_country_hunt_settings(prefix, days, country_count, start_at)
-        log, results, run_id, summary = start_search_settings(settings)
-        return log, results, run_id, summary, (
+        log, llm_log, results, run_id, summary = start_search_settings(settings)
+        return log, llm_log, results, run_id, summary, (
             f'Queued {len(countries)} country gap hunt(s): ' + ', '.join(countries)
         )
     except ValueError as exc:
-        return f'Invalid bulk hunt: {exc}', pd.DataFrame(), '', f'**Run not started:** {exc}', str(exc)
+        return f'Invalid bulk hunt: {exc}', '', pd.DataFrame(), '', f'**Run not started:** {exc}', str(exc)
 
 
 def poll_run(run_id):
@@ -448,7 +473,7 @@ def poll_run(run_id):
     if not run_id:
         run = next((run for run in store.list_runs() if run.get('status') == 'running'), None)
         if not run:
-            return '', pd.DataFrame(), '', 'No automatic research run is active.'
+            return '', '', pd.DataFrame(), '', 'No automatic research run is active.'
         run_id = run['id']
     return _run_snapshot(run_id)
 
@@ -593,6 +618,10 @@ def build_search_tabs():
         run_id = gr.Textbox(label='Run ID', interactive=False)
         run_summary = gr.Markdown('Run outcome will appear here.')
         log = gr.Textbox(label='Research activity', lines=12, interactive=False)
+        llm_log = gr.Textbox(
+            label='Full LLM calls (diagnostics)', lines=12, interactive=False,
+            info='Complete request and response payloads. This is separate from the readable activity log.',
+        )
         results = gr.Dataframe(
             label='This run — every candidate and its outcome', interactive=False, wrap=False,
             line_breaks=False, max_height=360, pinned_columns=2, show_search='filter',
@@ -603,19 +632,19 @@ def build_search_tabs():
         run_monitor = gr.Timer(2, active=True)
         recommended.click(recommended_controls, outputs=[categories, search_topic, search_window])
         save.click(save_controls, inputs=controls, outputs=settings_status)
-        run.click(run_search, inputs=controls, outputs=[log, results, run_id, run_summary], concurrency_limit=1,
+        run.click(run_search, inputs=controls, outputs=[log, llm_log, results, run_id, run_summary], concurrency_limit=1,
                   concurrency_id='automatic-research')
-        hunt_country_run.click(run_country_hunt, inputs=hunt_country, outputs=[log, results, run_id, run_summary],
+        hunt_country_run.click(run_country_hunt, inputs=hunt_country, outputs=[log, llm_log, results, run_id, run_summary],
                                concurrency_limit=1, concurrency_id='automatic-research')
         gap_preview.click(preview_bulk_hunt, inputs=[gap_prefix, gap_days, gap_count, gap_start], outputs=gap_status)
         gap_prefix.change(preview_bulk_hunt, inputs=[gap_prefix, gap_days, gap_count, gap_start], outputs=gap_status)
         gap_days.change(preview_bulk_hunt, inputs=[gap_prefix, gap_days, gap_count, gap_start], outputs=gap_status)
         gap_count.change(preview_bulk_hunt, inputs=[gap_prefix, gap_days, gap_count, gap_start], outputs=gap_status)
         gap_start.change(preview_bulk_hunt, inputs=[gap_prefix, gap_days, gap_count, gap_start], outputs=gap_status)
-        gap_run.click(run_bulk_hunt, inputs=[gap_prefix, gap_days, gap_count, gap_start], outputs=[log, results, run_id, run_summary, gap_status],
+        gap_run.click(run_bulk_hunt, inputs=[gap_prefix, gap_days, gap_count, gap_start], outputs=[log, llm_log, results, run_id, run_summary, gap_status],
                       concurrency_limit=1, concurrency_id='automatic-research')
         stop.click(stop_search, inputs=run_id, outputs=run_summary)
-        run_monitor.tick(poll_run, inputs=run_id, outputs=[log, results, run_id, run_summary], show_progress='hidden')
+        run_monitor.tick(poll_run, inputs=run_id, outputs=[log, llm_log, results, run_id, run_summary], show_progress='hidden')
     with gr.Tab('Search results') as history_tab:
         gr.Markdown('Inspect accepted, rejected, unclear, duplicate and failed results. Select a candidate row to open '
                     'its compact audit record, including provider snippet, review reasons, extracted summary/facts, and fallback decisions.')

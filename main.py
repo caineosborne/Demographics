@@ -8,6 +8,7 @@ import pandas as pd
 
 from agents import graph
 from research_ui import build_search_tabs
+import tools
 from tools import (
     PageAccessError, delete_and_block_webpage_finding, delete_finding_metric, delete_webpage_finding, get_webpage_finding,
     list_blocked_sources, list_country_names, list_webpage_findings, unblock_source_url, update_webpage_finding,
@@ -70,8 +71,18 @@ html, body {
 
 def run_pipeline(user_input: str):
     log_lines = ["Starting analysis"]
-    yield None, "", None, "", "Starting analysis", gr.skip(), "\n".join(log_lines)
+    full_llm_lines = []
+    yield None, "", None, "", "Starting analysis", gr.skip(), "\n".join(log_lines), "\n".join(full_llm_lines)
     result = None
+    def progress_callback(event):
+        message = event.get("message") if isinstance(event, dict) else None
+        if not message:
+            return
+        if event.get("type") == "llm_full":
+            full_llm_lines.append(message)
+        elif not log_lines or log_lines[-1] != message:
+            log_lines.append(message)
+    progress_token = tools.set_progress_callback(progress_callback)
     try:
         for mode, event in graph.stream(
             {"messages": [{"role": "user", "content": user_input}]},
@@ -80,25 +91,30 @@ def run_pipeline(user_input: str):
         ):
             if mode == "custom":
                 if "log" in event:
-                    log_lines.append(event["log"])
+                    if not log_lines or log_lines[-1] != event["log"]:
+                        log_lines.append(event["log"])
+                if "llm_full" in event:
+                    full_llm_lines.append(event["llm_full"])
                 if "fetch_status" in event:
-                    yield gr.skip(), gr.skip(), gr.skip(), gr.skip(), event["fetch_status"], gr.skip(), "\n".join(log_lines)
+                    yield gr.skip(), gr.skip(), gr.skip(), gr.skip(), event["fetch_status"], gr.skip(), "\n".join(log_lines), "\n".join(full_llm_lines)
                 elif "log" in event:
-                    yield gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), "\n".join(log_lines)
+                    yield gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), "\n".join(log_lines), "\n".join(full_llm_lines)
             elif mode == "values":
                 result = event
     except PageAccessError as exc:
         log_lines.append(f"Failed: {exc}")
-        yield None, str(exc), None, "", "Failed — Requests and Playwright could not access the page", gr.skip(), "\n".join(log_lines)
+        yield None, str(exc), None, "", "Failed — Requests and Playwright could not access the page", gr.skip(), "\n".join(log_lines), "\n".join(full_llm_lines)
         return
     except Exception:
         log_lines.append("Analysis failed. See the terminal for the traceback.")
-        yield None, "Analysis failed. Please try again.", None, "", "Analysis failed", gr.skip(), "\n".join(log_lines)
+        yield None, "Analysis failed. Please try again.", None, "", "Analysis failed", gr.skip(), "\n".join(log_lines), "\n".join(full_llm_lines)
         raise
+    finally:
+        tools.reset_progress_callback(progress_token)
 
     if result is None:
         log_lines.append("No result was produced.")
-        yield None, "No result was produced.", None, "", "Analysis failed", gr.skip(), "\n".join(log_lines)
+        yield None, "No result was produced.", None, "", "Analysis failed", gr.skip(), "\n".join(log_lines), "\n".join(full_llm_lines)
         return
     research = result["result"].model_dump()
     comparison = result["comparison"].model_dump()
@@ -131,6 +147,7 @@ def run_pipeline(user_input: str):
         "Complete",
         research.get("geography"),
         "\n".join([*log_lines, "Complete"]),
+        "\n".join(full_llm_lines),
     )
 
 
@@ -492,6 +509,11 @@ if __name__ == "__main__":
                 fetch_status = gr.Textbox(label="Debug status", value="Ready", interactive=False)
                 with gr.Accordion("Run log", open=False):
                     run_log = gr.Textbox(label="Activity", lines=16, interactive=False)
+                with gr.Accordion("Full LLM calls (diagnostics)", open=False):
+                    full_llm_log = gr.Textbox(
+                        label="Complete LLM request and response payloads",
+                        lines=16, interactive=False,
+                    )
 
                 with gr.Row():
                     with gr.Column():
@@ -517,6 +539,7 @@ if __name__ == "__main__":
                     fetch_status,
                     latest_analysis_country,
                     run_log,
+                    full_llm_log,
                 ]
                 run_button.click(run_pipeline, inputs=prompt, outputs=outputs)
                 prompt.submit(run_pipeline, inputs=prompt, outputs=outputs)

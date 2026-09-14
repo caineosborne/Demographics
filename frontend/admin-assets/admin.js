@@ -273,6 +273,44 @@ async function loadRunHistory() {
   } catch (error) { list.innerHTML = `<p class="help">${escapeHtml(error.message)}</p>`; showGlobalError(error); }
 }
 
+async function stopActiveRun(button) {
+  if (!button || button.disabled) return;
+  button.disabled = true;
+  const original = button.textContent;
+  button.textContent = "Finding active run…";
+  try {
+    const payload = await api.request("/api/v1/research/runs");
+    const active = (payload?.items || []).find((run) => ["running", "stopping"].includes(run.status));
+    if (!active) { button.textContent = "No active run"; return; }
+    button.textContent = "Stopping…";
+    await api.request(`/api/v1/research/jobs/${encodeURIComponent(active.id)}/stop`, { method: "POST" });
+    button.textContent = "Stop requested";
+    await loadRunHistory();
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = original;
+    showGlobalError(error);
+  }
+}
+
+async function stopAllResearch(button) {
+  if (!button || button.disabled) return;
+  button.disabled = true;
+  button.textContent = "Stopping research…";
+  try {
+    const payload = await api.request("/api/v1/research/runs");
+    const active = (payload?.items || []).filter((run) => ["running", "stopping"].includes(run.status));
+    if (!active.length) { button.textContent = "No active research"; return; }
+    await Promise.all(active.map((run) => api.request(`/api/v1/research/jobs/${encodeURIComponent(run.id)}/stop`, { method: "POST" })));
+    button.textContent = `Stop requested (${active.length})`;
+    await loadRunHistory();
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = "Stop all research";
+    showGlobalError(error);
+  }
+}
+
 function renderResearchRunDetail(run, { resetLogVisibility = false, target = "current" } = {}) {
   const detail = $(`[data-${target === "current" ? "current" : "historic"}-run-detail]`);
   if (!detail) return;
@@ -280,6 +318,29 @@ function renderResearchRunDetail(run, { resetLogVisibility = false, target = "cu
   $(`[data-run-detail-title]`, detail).textContent = `Run ${run.id} · ${run.status || "running"}`;
   const events = run.events || run.progress?.logs || [];
   $(`[data-run-detail-summary]`, detail).textContent = `${run.candidates?.length || 0} candidates · ${events.length} log entr${events.length === 1 ? "y" : "ies"}. Select Show log for live progress.`;
+  const stopButton = $(`[data-run-stop]`, detail);
+  if (stopButton) {
+    if (!stopButton.dataset.bound) {
+      stopButton.dataset.bound = "true";
+      stopButton.addEventListener("click", async () => {
+        if (!stopButton.dataset.runId || stopButton.disabled) return;
+        stopButton.disabled = true;
+        stopButton.textContent = "Stopping…";
+        try {
+          await api.request(`/api/v1/research/jobs/${encodeURIComponent(stopButton.dataset.runId)}/stop`, { method: "POST" });
+        } catch (error) {
+          stopButton.disabled = false;
+          stopButton.textContent = "Stop run";
+          showGlobalError(error);
+        }
+      });
+    }
+    const terminal = ["complete", "completed", "completed_with_errors", "failed", "stopped", "cancelled", "interrupted"].includes(run.status);
+    stopButton.dataset.runId = run.id || "";
+    stopButton.hidden = terminal || !run.id;
+    stopButton.disabled = run.status === "stopping" || stopButton.textContent === "Stopping…";
+    if (!stopButton.disabled) stopButton.textContent = "Stop run";
+  }
   const toggle = $(`[data-run-log-toggle]`, detail);
   if (toggle && !toggle.dataset.bound) {
     toggle.dataset.bound = "true";
@@ -297,9 +358,12 @@ function renderResearchRunDetail(run, { resetLogVisibility = false, target = "cu
   }
   const eventList = $(`[data-run-events]`, detail);
   eventList.replaceChildren();
-  events.slice(-30).forEach((event) => {
+  events.forEach((event) => {
     const p = document.createElement("p");
-    p.textContent = `${event.at || event.created_at || ""} · ${event.event || event.stage || "progress"} · ${event.message || event.error || JSON.stringify(event.outcomes || event)}`;
+    const subject = event.message || event.error || JSON.stringify(event.outcomes || event);
+    const url = event.url ? ` · ${event.url}` : "";
+    const candidate = event.candidate_id ? ` · candidate #${event.candidate_id}` : "";
+    p.textContent = `${event.at || event.created_at || ""} · ${event.event || event.stage || "progress"}${candidate} · ${subject}${url}`;
     eventList.append(p);
   });
   if (!eventList.children.length) {
@@ -309,7 +373,29 @@ function renderResearchRunDetail(run, { resetLogVisibility = false, target = "cu
   }
   const candidates = $(`[data-run-candidates]`, detail);
   candidates.replaceChildren();
-  (run.candidates || []).forEach((candidate) => { const button = document.createElement("button"); button.className = "candidate-row"; button.type = "button"; const scope = candidate.scope_country_iso3 ? ` · scope ${candidate.scope_country || candidate.scope_country_iso3}` : ""; const mismatch = candidate.scope_mismatch ? " · SCOPE MISMATCH" : ""; button.textContent = `#${candidate.id} · ${candidate.status}${scope}${mismatch} · ${candidate.full_reason || candidate.summary_reason || ""}`; button.addEventListener("click", () => loadCandidateDetail(candidate.id, target)); candidates.append(button); });
+  (run.candidates || []).forEach((candidate) => {
+    const button = document.createElement("button"); button.className = "candidate-row"; button.type = "button";
+    const scope = candidate.scope_country_iso3 ? ` · scope ${candidate.scope_country || candidate.scope_country_iso3}` : "";
+    const mismatch = candidate.scope_mismatch ? " · SCOPE MISMATCH" : "";
+    const relevance = candidate.full_decision || candidate.summary_decision || "not reviewed";
+    const geography = candidate.extracted_country || candidate.extracted_iso3 || "not checked";
+    const label = document.createElement("span");
+    const icon = document.createElement("span");
+    icon.className = `relevance-icon relevance-${relevance === "relevant" ? "yes" : relevance === "irrelevant" ? "no" : "unclear"}`;
+    icon.textContent = relevance === "relevant" ? "✓" : relevance === "irrelevant" ? "✕" : "?";
+    label.append(icon, document.createTextNode(` #${candidate.id} · ${candidate.status} · ${relevance}${scope}${mismatch} · ${geography} · ${candidate.full_reason || candidate.summary_reason || ""}`));
+    button.append(label);
+    const url = candidate.url || candidate.loaded_url || candidate.canonical_url;
+    if (url) { const link = document.createElement("a"); link.href = url; link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = url; link.addEventListener("click", (event) => event.stopPropagation()); button.append(link); }
+    button.addEventListener("click", () => loadCandidateDetail(candidate.id, target)); candidates.append(button);
+  });
+  const copyText = (text, button, done) => navigator.clipboard.writeText(text).then(() => { button.textContent = done; setTimeout(() => { button.textContent = button.dataset.label; }, 1200); });
+  const copyLog = $(`[data-run-copy-log]`, detail);
+  const copyTable = $(`[data-run-copy-table]`, detail);
+  const fullscreen = $(`[data-run-table-fullscreen]`, detail);
+  if (copyLog && !copyLog.dataset.bound) { copyLog.dataset.bound = "true"; copyLog.dataset.label = copyLog.textContent; copyLog.addEventListener("click", () => copyText(events.map((event) => `${event.at || ""} · ${event.event || "progress"} · ${event.message || event.error || ""}${event.url ? ` · ${event.url}` : ""}`).join("\n"), copyLog, "Copied log")); }
+  if (copyTable && !copyTable.dataset.bound) { copyTable.dataset.bound = "true"; copyTable.dataset.label = copyTable.textContent; copyTable.addEventListener("click", () => copyText((run.candidates || []).map((candidate) => [candidate.id, candidate.status, candidate.full_decision || candidate.summary_decision || "", candidate.title || "", candidate.url || "", candidate.full_reason || candidate.summary_reason || ""].join("\t")).join("\n"), copyTable, "Copied table")); }
+  if (fullscreen && !fullscreen.dataset.bound) { fullscreen.dataset.bound = "true"; fullscreen.addEventListener("click", () => candidates.requestFullscreen?.()); }
 }
 
 async function loadRunDetail(runId, target = "current") {
@@ -347,6 +433,7 @@ async function loadCandidateDetail(candidateId, target = "current") {
     $(`[data-candidate-detail-title]`, detail).textContent = `Candidate #${candidate.id} · ${candidate.status}`;
     const body = $(`[data-candidate-detail-fields]`, detail); body.replaceChildren();
     const values = [
+      ["URL", fields.url || candidate.url || fields.loaded_url || fields.canonical_url || "—"],
       ["Summary decision", fields.summary_decision || "—"], ["Summary reason", fields.summary_reason || "—"],
       ["Full decision", fields.full_decision || "—"], ["Full reason", fields.full_reason || "—"],
       ["Recovery attempts", JSON.stringify(fields.alternative_sources || fields.recovery_attempts || [])],
@@ -354,11 +441,19 @@ async function loadCandidateDetail(candidateId, target = "current") {
       ["Extracted geography", extraction.geography_iso3 || extraction.geography || "—"],
       ["Scope mismatch", fields.scope_mismatch ? "Yes — excluded from this hunt" : "No"], ["Error", fields.error || "—"],
     ];
-    values.forEach(([label, value]) => { const dt = document.createElement("dt"); dt.textContent = label; const dd = document.createElement("dd"); dd.textContent = value; body.append(dt, dd); });
+    values.forEach(([label, value]) => {
+      const dt = document.createElement("dt"); dt.textContent = label;
+      const dd = document.createElement("dd");
+      if (label === "URL" && value !== "—") {
+        const link = document.createElement("a"); link.href = value; link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = value; dd.append(link);
+      } else dd.textContent = value;
+      body.append(dt, dd);
+    });
   } catch (error) { showGlobalError(error); }
 }
 
 async function runDiscovery(form) {
+  // Polling was previously configured as maxAttempts: 60 (one minute).
   const state = $(`[data-settings-state]`); setState(state, "running", "Saving controls and queueing discovery…");
   let runId = "";
   try {
@@ -366,9 +461,9 @@ async function runDiscovery(form) {
     await api.request("/api/v1/research/settings", { method: "PUT", body: { settings: payload } });
     const job = await api.request("/api/v1/research/jobs", { method: "POST", body: { settings: payload } });
     runId = job.run_id || job.id; setState(state, "running", `Run ${runId} is running.`);
-    await api.pollJob(`/api/v1/research/jobs/${runId}`, { maxAttempts: 60, onUpdate: (current) => { const currentState = researchPollUpdate(runId, current); setState(state, currentState, `${current.status} · ${(current.events || current.progress?.logs || []).length} log entries.`); } });
+    await api.pollJob(`/api/v1/research/jobs/${runId}`, { maxAttempts: 180, onUpdate: (current) => { const currentState = researchPollUpdate(runId, current); setState(state, currentState, `${current.status} · ${(current.events || current.progress?.logs || []).length} log entries.`); } });
     await loadRunHistory();
-  } catch (error) { if (runId && error.message.includes("timed out")) { await loadRunHistory(); await loadRunDetail(runId); setState(state, "failed", "Polling timed out, but the run is still visible in the audit trail. Open its log for the latest recorded progress.", error.message); } else setState(state, "failed", error.message); showGlobalError(error); }
+  } catch (error) { if (runId && error.message.includes("timed out")) { await loadRunHistory(); await loadRunDetail(runId); setState(state, "running", "Status polling paused after 180 seconds; the run may still be working. Open its log or use Stop run.", error.message); } else { setState(state, "failed", error.message); showGlobalError(error); } }
 }
 
 async function submitCountryHunt(form, bulk = false) {
@@ -384,13 +479,13 @@ async function submitCountryHunt(form, bulk = false) {
     const job = await api.request(endpoint, { method: "POST", body });
     runId = job.run_id || job.id;
     setState(state, "running", `Run ${runId} is running.`);
-    await api.pollJob(`/api/v1/research/jobs/${runId}`, { maxAttempts: 60, onUpdate: (current) => { const currentState = researchPollUpdate(runId, current); setState(state, currentState, `${current.status} · ${(current.events || current.progress?.logs || []).length} log entries.`); } });
+    await api.pollJob(`/api/v1/research/jobs/${runId}`, { maxAttempts: 180, onUpdate: (current) => { const currentState = researchPollUpdate(runId, current); setState(state, currentState, `${current.status} · ${(current.events || current.progress?.logs || []).length} log entries.`); } });
     await Promise.all([loadCountryQueue(), loadRunHistory(), loadFindings()]);
     if (bulk) {
       window.location.hash = "findings";
       setState(state, "completed", "Batch complete. Results are open in the Findings table.");
     }
-  } catch (error) { if (runId && error.message.includes("timed out")) { await loadRunHistory(); await loadRunDetail(runId); setState(state, "failed", "Polling timed out, but the run is still visible in the audit trail. Open its log for the latest recorded progress.", error.message); } else setState(state, "failed", error.message); showGlobalError(error); }
+  } catch (error) { if (runId && error.message.includes("timed out")) { await loadRunHistory(); await loadRunDetail(runId); setState(state, "running", "Status polling paused after 180 seconds; the run may still be working. Open its log or use Stop run.", error.message); } else { setState(state, "failed", error.message); showGlobalError(error); } }
 }
 
 async function previewGaps(form) {
@@ -553,6 +648,7 @@ function updateAnalysisProgress(stage, fetchStatus) {
 function updateAnalysisLog(progress = {}, error = "") {
   const list = $(`[data-analysis-log-list]`);
   const status = $(`[data-analysis-log-status]`);
+  const copyButton = $(`[data-analysis-copy-log]`);
   if (!list) return;
   list.replaceChildren();
   const entries = Array.isArray(progress.logs) ? progress.logs : [];
@@ -572,6 +668,21 @@ function updateAnalysisLog(progress = {}, error = "") {
     item.className = "log-empty";
     item.textContent = "No activity yet.";
     list.append(item);
+  }
+  if (copyButton) {
+    copyButton.onclick = async () => {
+      const lines = entries.map((entry) => [entry.at, entry.message].filter(Boolean).join(" · "));
+      if (error) lines.push(`Error · ${error}`);
+      try {
+        await navigator.clipboard.writeText(lines.join("\n"));
+        const original = copyButton.dataset.label || copyButton.textContent;
+        copyButton.dataset.label = original;
+        copyButton.textContent = "Copied log";
+        setTimeout(() => { copyButton.textContent = original; }, 1200);
+      } catch (copyError) {
+        showGlobalError(copyError);
+      }
+    };
   }
   if (status) status.textContent = error ? "failed" : entries.length ? "live" : "waiting";
 }
@@ -919,6 +1030,8 @@ function wire() {
   $(`[data-add-category]`)?.addEventListener("click", () => $(`[data-category-list]`)?.append(categoryEditor()));
   $(`[data-reset-research-settings]`)?.addEventListener("click", () => resetResearchSettings($(`[data-research-settings-form]`)));
   $(`[data-country-hunt-form]`)?.addEventListener("submit", (event) => { event.preventDefault(); submitCountryHunt(event.currentTarget); });
+  $(`[data-stop-active-run]`)?.addEventListener("click", (event) => stopActiveRun(event.currentTarget));
+  $(`[data-stop-all-research]`)?.addEventListener("click", (event) => stopAllResearch(event.currentTarget));
   $(`[data-gap-form]`)?.addEventListener("submit", (event) => { event.preventDefault(); previewGaps(event.currentTarget); });
   $(`[data-queue-batch]`)?.addEventListener("click", () => submitCountryHunt($(`[data-gap-form]`), true));
   $(`[data-refresh-queue]`)?.addEventListener("click", loadCountryQueue);
