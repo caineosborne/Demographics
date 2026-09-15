@@ -173,8 +173,25 @@ function selectedGraphRevisions() {
 }
 
 function reviewGraphFinding(findingId) {
+  openFindingEditor(findingId);
+}
+
+function openGraphForCountry(iso3) {
+  const country = String(iso3 || "").trim().toUpperCase();
+  if (!country) return;
+  const select = $(`[data-graph-country]`);
+  if (select && [...select.options].some((option) => option.value === country)) select.value = country;
+  window.location.hash = "graphs";
   selectView("graphs");
-  loadRecord(findingId);
+  loadGraphs({ force: true });
+}
+
+function openFindingEditor(findingId) {
+  const id = Number(findingId);
+  if (!Number.isInteger(id) || id <= 0) return;
+  window.location.hash = `finding-edit?id=${encodeURIComponent(id)}`;
+  selectView("finding-edit");
+  loadRecord(id);
 }
 
 function renderGraphs(payload) {
@@ -444,6 +461,7 @@ function renderResearchRunDetail(run, { resetLogVisibility = false, target = "cu
   const candidates = $(`[data-run-candidates]`, detail);
   candidates.replaceChildren();
   (run.candidates || []).forEach((candidate) => {
+    const row = document.createElement("div"); row.className = "candidate-row-wrap";
     const button = document.createElement("button"); button.className = "candidate-row"; button.type = "button";
     const scope = candidate.scope_country_iso3 ? ` · scope ${candidate.scope_country || candidate.scope_country_iso3}` : "";
     const mismatch = candidate.scope_mismatch ? " · SCOPE MISMATCH" : "";
@@ -463,7 +481,25 @@ function renderResearchRunDetail(run, { resetLogVisibility = false, target = "cu
     button.append(label);
     const url = candidate.url || candidate.loaded_url || candidate.canonical_url;
     if (url) { const link = document.createElement("a"); link.href = url; link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = url; link.addEventListener("click", (event) => event.stopPropagation()); button.append(link); }
-    button.addEventListener("click", () => loadCandidateDetail(candidate.id, target)); candidates.append(button);
+    button.addEventListener("click", () => loadCandidateDetail(candidate.id, target));
+    const forceable = Boolean(candidate.url) && !["complete", "reviewing_summary", "fetching", "searching_alternative", "reviewing_full_text", "extracting", "comparing"].includes(candidate.status);
+    row.append(button);
+    if (forceable) {
+      const force = document.createElement("button");
+      force.className = "quiet-button"; force.type = "button"; force.textContent = "Force process";
+      force.title = "Ignore duplicate, deterministic, and summary checks; send this URL to secondary review.";
+      force.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        force.disabled = true; force.textContent = "Queueing…";
+        try {
+          const job = await api.request(`/api/v1/research/candidates/${encodeURIComponent(candidate.id)}/force-process`, { method: "POST" });
+          force.textContent = `Queued run ${job.run_id || job.id || ""}`;
+          if (job.run_id || job.id) loadRunDetail(job.run_id || job.id, "current");
+        } catch (error) { force.disabled = false; force.textContent = "Force process"; showGlobalError(error); }
+      });
+      row.append(force);
+    }
+    candidates.append(row);
   });
   const copyText = (text, button, done) => copyToClipboard(text).then(() => showCopied(button, done)).catch(showGlobalError);
   const copyLog = $(`[data-run-copy-log]`, detail);
@@ -926,15 +962,12 @@ function findingMetricValues(item) {
 
 function appendFindingIdLink(cell, item) {
   const id = item.ID ?? item.id;
-  const url = item["Webpage URL"] || item["Canonical URL"] || item.url || item.canonical_url;
-  const link = safeSourceLink(url, `#${id}`);
-  if (link.nodeName === "A") {
-    link.title = "Open source URL";
-    link.addEventListener("click", (event) => event.stopPropagation());
-    cell.append(link);
-  } else {
-    cell.textContent = `#${id}`;
-  }
+  const link = document.createElement("a");
+  link.href = `#finding-edit?id=${encodeURIComponent(id)}`;
+  link.textContent = `#${id}`;
+  link.title = "Open finding record";
+  link.addEventListener("click", (event) => { event.preventDefault(); event.stopPropagation(); openFindingEditor(id); });
+  cell.append(link);
 }
 
 function renderFindingRows(body, items) {
@@ -942,14 +975,20 @@ function renderFindingRows(body, items) {
   (items || []).forEach((item) => {
     const row = document.createElement("tr");
     row.tabIndex = 0;
-    row.innerHTML = `<td></td><th>${escapeHtml(item.Country || item.ISO3 || "—")} <small>${escapeHtml(item.ISO3 || "")}</small></th><td>${escapeHtml(item["Effective date"] || "—")}</td><td>${escapeHtml(findingMetricValues(item))}</td><td>${escapeHtml(item["Source classification"] || "—")}</td><td>${escapeHtml(item.Source || item["Quoted source"] || "—")}</td><td class="source-cell"></td>`;
+    row.innerHTML = `<td></td><th class="country-cell"></th><td>${escapeHtml(item["Effective date"] || "—")}</td><td>${escapeHtml(item["Processed date"] || item["Extracted at (UTC)"] || "—")}</td><td>${escapeHtml(findingMetricValues(item))}</td><td>${escapeHtml(item["Source classification"] || "—")}</td><td>${escapeHtml(item.Source || item["Quoted source"] || "—")}</td><td class="source-cell"></td><td><button class="quiet-button row-edit-button" type="button">Edit</button></td>`;
+    const countryLink = document.createElement("a");
+    countryLink.href = `#graphs?iso3=${encodeURIComponent(item.ISO3 || "")}`;
+    countryLink.textContent = item.Country || item.ISO3 || "—";
+    countryLink.title = "Open graphs filtered to this country";
+    countryLink.addEventListener("click", (event) => { event.preventDefault(); event.stopPropagation(); openGraphForCountry(item.ISO3); });
+    row.querySelector(".country-cell").append(countryLink);
+    const iso = document.createElement("small"); iso.textContent = item.ISO3 || ""; row.querySelector(".country-cell").append(iso);
     appendFindingIdLink(row.firstElementChild, item);
     row.lastElementChild.append(safeSourceLink(item["Webpage URL"] || item["Canonical URL"] || item.url || item.canonical_url));
-    row.addEventListener("click", () => { selectView("graphs"); reviewGraphFinding(item.ID ?? item.id); });
-    row.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectView("graphs"); reviewGraphFinding(item.ID ?? item.id); } });
+    row.querySelector(".row-edit-button").addEventListener("click", (event) => { event.stopPropagation(); openFindingEditor(item.ID ?? item.id); });
     body.append(row);
   });
-  if (!body.children.length) body.innerHTML = '<tr><td colspan="7" class="empty-cell">No findings match the current filters.</td></tr>';
+  if (!body.children.length) body.innerHTML = '<tr><td colspan="9" class="empty-cell">No findings match the current filters.</td></tr>';
 }
 
 async function loadFindings() {
@@ -970,12 +1009,12 @@ function renderGraphFindings(items, country) {
   const title = $(`[data-graph-findings-title]`);
   if (title) title.textContent = `${country} findings`;
   const status = $(`[data-graph-findings-status]`);
-  if (status) status.textContent = `${items.length} finding${items.length === 1 ? "" : "s"} for ${country}. Select an ID to open its source URL.`;
+  if (status) status.textContent = `${items.length} finding${items.length === 1 ? "" : "s"} for ${country}. Select an ID or Edit to open the record.`;
 }
 
 function renderGraphFindingsError(error) {
   const body = $(`[data-graph-findings-body]`);
-  if (body) body.innerHTML = `<tr><td colspan="7" class="empty-cell">${escapeHtml(error.message)}</td></tr>`;
+  if (body) body.innerHTML = `<tr><td colspan="9" class="empty-cell">${escapeHtml(error.message)}</td></tr>`;
   const status = $(`[data-graph-findings-status]`);
   if (status) status.textContent = "The country findings table could not be loaded.";
 }
@@ -1098,13 +1137,20 @@ function selectView(view) {
   $$(`[data-view-panel]`).forEach((panel) => { const active = panel.dataset.viewPanel === name; panel.hidden = !active; panel.classList.toggle("active-view", active); });
   $$(`[data-view]`).forEach((link) => link.classList.toggle("active", link.dataset.view === name));
   const title = $(`[data-page-title]`);
-  title.textContent = $(`[data-view="${name}"]`)?.textContent || "Overview";
+  title.textContent = $(`[data-view="${name}"]`)?.textContent || (name === "finding-edit" ? "Edit finding" : "Overview");
 }
 
 function selectViewFromLocation() {
-  const requested = window.location.hash.replace(/^#/, "");
+  const requested = window.location.hash.replace(/^#/, "").split("?", 1)[0];
   const known = requested && $(`[data-view-panel="${requested}"]`) ? requested : "overview";
   selectView(known);
+  const locationParams = new URLSearchParams(window.location.hash.split("?", 2)[1] || "");
+  if (known === "graphs" && locationParams.get("iso3")) {
+    const select = $(`[data-graph-country]`);
+    if (select) select.value = locationParams.get("iso3").toUpperCase();
+    loadGraphs({ force: true });
+  }
+  if (known === "finding-edit" && locationParams.get("id")) loadRecord(locationParams.get("id"));
 }
 
 function selectResearchTab(name) {

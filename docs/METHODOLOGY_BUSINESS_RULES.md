@@ -80,9 +80,11 @@ Country hunt and manual URL analysis use the same evidence principles. The autom
 - The batch review model receives at most 20 candidate snippets in one structured call.
 - The review model is normally `deepseek/deepseek-v4.1-flash:nitro`.
 - The summary decision meanings are:
-  - **irrelevant** — clearly not a plausible national demographic source; candidate becomes `excluded_summary` and is not fetched.
+  - **irrelevant** — the title or snippet positively establishes that the result is not a plausible national demographic source. This is an advisory warning, not a terminal exclusion.
   - **relevant** — plausible demographic evidence; candidate is fetched.
-  - **unclear** — insufficient snippet evidence but plausible; candidate is fetched rather than discarded.
+  - **unclear** — insufficient snippet evidence but plausible; candidate is fetched rather than discarded. Missing source attribution in a snippet is an `unclear` case, not proof that the page is unusable.
+- Summary review is advisory for every candidate. All discovered candidates proceed to page retrieval, full-text review, and structured extraction. Source attribution and whether a secondary source has usable demographic evidence are determined from the retrieved page. `excluded_summary` is retained only for legacy/audit compatibility and is not produced by the automatic pipeline.
+- After a run, an operator may use **Force process** on a candidate that was marked duplicate or excluded by an early check. This starts a separate one-URL run that bypasses duplicate, source-rule, deterministic, budget, and summary checks, then sends the page to full-text secondary review. A secondary `irrelevant` decision is terminal for that forced run.
 - If batch review fails or times out, candidates continue to retrieval with an audit warning. Discovery should not silently lose potentially useful pages.
 
 ## 5. Retrieval and source recovery

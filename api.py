@@ -416,6 +416,12 @@ def create_app(
                            _auth: AuthContext = Depends(auth_dependency)) -> CandidateDetailResponse:
         return CandidateDetailResponse(**_admin_call(read_services.get_candidate, candidate_id))
 
+    @app.post("/api/v1/research/candidates/{candidate_id}/force-process", status_code=202,
+              response_model_exclude_none=True, tags=["research"])
+    def force_process_candidate(candidate_id: int,
+                                _auth: AuthContext = Depends(auth_dependency)) -> JobStartResponse:
+        return JobStartResponse(**_admin_call(research_services.force_process_candidate, candidate_id))
+
     @app.get("/api/v1/admin/findings/{finding_id}", response_model_exclude_none=True, tags=["administration"])
     def admin_finding(finding_id: int, _auth: AuthContext = Depends(auth_dependency)) -> MutationResponse:
         return MutationResponse(**_admin_call(admin_services.get_finding, finding_id))
@@ -587,10 +593,8 @@ def create_app(
     def country_hunt(request: CountryHuntRequest,
                     _auth: AuthContext = Depends(auth_dependency)) -> JobStartResponse:
         return JobStartResponse(**_admin_call(
-            research_services.start_country_hunt,
-            request.country_iso3,
-            max_results=request.max_results,
-            topic=request.topic,
+            research_services.start_country_hunt, request.country_iso3,
+            max_results=request.max_results, topic=request.topic,
         ))
 
     @app.get("/api/v1/research/country-hunts", response_model=ResearchHistoryResponse, tags=["research"])

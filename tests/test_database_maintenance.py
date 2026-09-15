@@ -29,7 +29,7 @@ class DatabaseMaintenanceTests(unittest.TestCase):
         self.directory.cleanup()
 
     def test_default_runtime_path_is_not_in_legacy_data_folder(self):
-        self.assertEqual(DEFAULT_DB_PATH.parent.name, "databases")
+        self.assertEqual(DEFAULT_DB_PATH.parent.name, "runtime")
         self.assertNotIn("data_files", str(DEFAULT_DB_PATH).casefold())
 
     def test_inventory_records_table_counts_and_checksum(self):

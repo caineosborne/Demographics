@@ -26,6 +26,7 @@
           <button class="nav-stop-button" type="button" data-stop-all-research>Stop all research</button>
           <a href="#coverage" data-view="coverage">Country coverage</a>
           <a href="#findings" data-view="findings">Findings</a>
+          <a href="#source-rules" data-view="source-rules">Source rules</a>
           <a href="#graphs" data-view="graphs">Graphs &amp; reporting</a>
           <a href="#conflicts" data-view="conflicts">Conflicts</a>
           <a href="#submissions" data-view="submissions">Submissions</a>
@@ -105,11 +106,15 @@
             <div class="graph-report-summary" data-graph-summary>WPP 2024 historical estimates are solid blue; forecasts are dashed orange. WPP 2017 is a dotted alternate series. Article marker shapes are the source-class key.</div>
           </article>
           <article class="card graph-findings-card">
-            <div class="card-heading"><div><p class="kicker">Filtered evidence</p><h3 data-graph-findings-title>Country findings</h3></div><span class="help">Select a point or row to edit the evidence on this page.</span></div>
-            <div class="table-wrap"><table class="audit-table findings-table"><thead><tr><th>ID</th><th>Country</th><th>Effective</th><th>Metrics &amp; values</th><th>Source class</th><th>Source</th><th>URL</th></tr></thead><tbody data-graph-findings-body><tr><td colspan="7">Load a series to see findings for this country.</td></tr></tbody></table></div>
+            <div class="card-heading"><div><p class="kicker">Filtered evidence</p><h3 data-graph-findings-title>Country findings</h3></div><span class="help">Select a point, finding ID, or Edit to open the record.</span></div>
+            <div class="table-wrap"><table class="audit-table findings-table"><thead><tr><th>ID</th><th>Country</th><th>Effective</th><th>Processed</th><th>Metrics &amp; values</th><th>Source class</th><th>Source</th><th>URL</th><th>Action</th></tr></thead><tbody data-graph-findings-body><tr><td colspan="9">Load a series to see findings for this country.</td></tr></tbody></table></div>
             <div class="coverage-note" data-graph-findings-status role="status">Load a series to see findings for this country.</div>
           </article>
-          <article class="card record-editor graph-record-editor" data-record-editor hidden>
+        </section>
+
+        <section id="finding-edit" class="view" data-view-panel="finding-edit" hidden>
+          <div class="section-intro"><p class="kicker">Evidence workspace</p><h2>Edit finding</h2><p>Update the stored evidence record, then save the change back to the research register.</p></div>
+          <article class="card record-editor" data-record-editor hidden>
             <div class="card-heading"><div><p class="kicker">Evidence workspace</p><h3 data-record-title>Finding</h3></div><span class="route-label">GET / PUT /api/v1/admin/findings/{id}</span></div>
             <div class="safe-source" data-record-source></div>
             <div class="record-metrics" data-record-metrics></div>
@@ -209,10 +214,13 @@
           <article class="card findings-card">
             <div class="card-heading"><div><p class="kicker">Stored record</p><h3>Finding table</h3></div><button class="quiet-button" type="button" data-refresh-findings>Refresh</button></div>
             <div class="filter-grid"><label class="field">Country <select data-findings-country data-country-control><option value="">All countries</option></select></label><label class="field">Metric <select data-findings-metric><option value="">Any metric</option><option value="population">Population</option><option value="births">Births</option><option value="deaths">Deaths</option><option value="natural_change">Natural change</option><option value="net_migration">Net migration</option><option value="total_fertility_rate">Total fertility rate</option></select></label></div>
-            <div class="table-wrap"><table class="audit-table findings-table"><thead><tr><th>ID</th><th>Country</th><th>Effective</th><th>Metrics &amp; values</th><th>Source class</th><th>Source</th><th>URL</th></tr></thead><tbody data-findings-body><tr><td colspan="7">Loading findings…</td></tr></tbody></table></div>
+            <div class="table-wrap"><table class="audit-table findings-table"><thead><tr><th>ID</th><th>Country</th><th>Effective</th><th>Processed</th><th>Metrics &amp; values</th><th>Source class</th><th>Source</th><th>URL</th><th>Action</th></tr></thead><tbody data-findings-body><tr><td colspan="9">Loading findings…</td></tr></tbody></table></div>
             <div class="coverage-note" data-findings-status role="status">Choose a row to load its complete record.</div>
           </article>
-          <p class="coverage-note">Findings is the QA register. Edit and delete evidence from the Graphs workspace.</p>
+        </section>
+
+        <section id="source-rules" class="view" data-view-panel="source-rules" hidden>
+          <div class="section-intro"><p class="kicker">Source policy</p><h2>Source rules</h2><p>Control how sources are classified, excluded, and kept auditable before they become findings.</p></div>
           <article class="card source-rules-card">
             <div class="card-heading"><div><p class="kicker">Source policy</p><h3>Source rules</h3></div><button class="quiet-button" type="button" data-refresh-source-rules>Refresh</button></div>
             <p class="help">Exact canonical URL rules take precedence over domain rules. Classification overrides are explicit; exclude rules prevent storage. Disabled rules remain auditable and can be undone.</p>

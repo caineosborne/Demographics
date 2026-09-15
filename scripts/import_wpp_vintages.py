@@ -3,7 +3,7 @@
 The current WPP 2024 tables are intentionally not modified.  Run this once
 with official archive files (or their direct download URLs), for example:
 
-    uv run python Data_Files/import_wpp_vintages.py \
+    uv run python scripts/import_wpp_vintages.py \
       --revision 2022 --source /path/to/WPP2022_DB1_Medium.xlsx \
       --revision 2017 --source /path/to/WPP2017_DB1_Medium.xlsx \
       --revision 2012 --source /path/to/WPP2012_DB1_Medium.xlsx

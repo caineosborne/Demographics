@@ -150,7 +150,8 @@ source-to-source conflict grouping, are deliberate Phase 4 work.
 
 **Complete when:** the existing application can still run from the untouched backup and the pre-migration counts are documented.
 
-**Completed 2026-09-12:** the runtime database now lives under `databases/`,
+**Completed 2026-09-12:** the runtime database now lives under
+`databases/runtime/`,
 with a read-only rollback copy and inventory in
 `databases/backups/`. The pre-migration inventory is also committed at
 `databases/inventory/2026-09-12-pre-migration.json`. `Data_Files/` is retained
@@ -537,11 +538,11 @@ creating its rollback backup.
 `medium_variant` archive, with the WPP revision-history overlay, is now held
 offline in `Data_Files/WPP2024_GEN_F01_DEMOGRAPHIC_INDICATORS_COMPACT.sqlite`.
 The repeatable maintenance build creates the read-only
-`databases/wpp_serving.sqlite`, retaining the two logical WPP tables and only
+`databases/runtime/wpp_serving.sqlite`, retaining the two logical WPP tables and only
 the ten columns used by comparisons and graphs. Numeric measures and years are
 converted during generation; source placeholders become SQL `NULL`, and ISO3/
 year lookup indexes plus a checksum manifest are included. The writable
-research database remains under `databases/`, while WPP reads use the serving
+research database remains under `databases/runtime/`, while WPP reads use the serving
 copy, preserving application behaviour without a fallback to `Data_Files`.
 
 ### Step 1.7 — Verify record and metric deletion

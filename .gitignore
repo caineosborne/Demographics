@@ -23,3 +23,6 @@ databases/inventory/*
 !databases/inventory/2026-09-12-pre-migration.json
 
 .env
+
+# macOS metadata
+.DS_Store

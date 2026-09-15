@@ -61,8 +61,20 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(row['status'], 'complete')
         self.assertEqual(row['summary_reason'], 'Opinion only')
         self.fetch.assert_called_once()
+        self.full_review.assert_called_once()
         self.extract.assert_called_once()
         self.compare.assert_not_called()
+
+    def test_forced_url_reaches_secondary_review_and_stops_when_rejected(self):
+        self.settings['forced_urls'] = ['https://example.test/known-source']
+        self.summary_decision = ReviewDecision(decision='irrelevant', reason='Summary cannot establish relevance')
+        self.full_review.return_value = ReviewDecision(decision='irrelevant', reason='Full page is not demographic')
+        row = self.run_boss([])[0]
+        self.assertEqual(row['status'], 'excluded_full_review')
+        self.assertEqual(row['full_reason'], 'Full page is not demographic')
+        self.fetch.assert_called_once_with('https://example.test/known-source')
+        self.full_review.assert_called_once()
+        self.extract.assert_not_called()
 
     def test_reviews_twenty_summaries_in_one_model_call(self):
         rows = [candidate(f'https://publisher-{index}.test/release') for index in range(20)]

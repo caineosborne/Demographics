@@ -65,8 +65,9 @@ fixtures are under `fixtures/api/`; country-specific routes require ISO3.
 
 ## Database storage and Phase 1.1 rollback
 
-The writable research SQLite database is stored under `databases/`; WPP
-comparisons use the generated read-only `databases/wpp_serving.sqlite` file.
+The writable research SQLite database is stored under `databases/runtime/`; WPP
+comparisons use the generated read-only `databases/runtime/wpp_serving.sqlite`
+file.
 `Data_Files/` is an offline source/archive location and is excluded from the
 production path. Override these locations explicitly with
 `DEMOGRAPHICS_DB_PATH` and `DEMOGRAPHICS_WPP_DB_PATH`; neither has a fallback
