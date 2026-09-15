@@ -96,17 +96,18 @@ class ResearchTests(unittest.TestCase):
         self.run_boss(rows)
         self.assertEqual([len(call.args[0]) for call in self.summary_review.call_args_list], [20, 1])
 
-    def test_full_review_is_advisory_and_all_articles_reach_extraction(self):
+    def test_full_review_irrelevant_stops_before_structured_extraction(self):
         for index, verdict in enumerate(('irrelevant', 'unclear', 'relevant')):
             with self.subTest(verdict=verdict):
                 self.summary_decision = ReviewDecision(decision='unclear', reason='No figures in snippet')
                 self.full_review.return_value = ReviewDecision(decision=verdict, reason='Full page evidence')
                 row = self.run_boss([candidate(f'https://example.test/unclear-{index}')])[0]
-                self.assertEqual(row['status'], 'complete')
+                expected_status = 'excluded_full_review' if verdict == 'irrelevant' else 'complete'
+                self.assertEqual(row['status'], expected_status)
                 details = store.get_candidate(row['id'])['details']
                 self.assertTrue(details['page_loaded'])
                 self.assertNotIn('full_text', details)
-        self.assertEqual(self.extract.call_count, 3)
+        self.assertEqual(self.extract.call_count, 2)
         # Automatic discovery extracts and stores; UN comparison is reserved
         # for the manual Analyse webpage flow.
         self.compare.assert_not_called()
@@ -322,7 +323,7 @@ class ResearchTests(unittest.TestCase):
             'title': 'Official release', 'snippet': 'Official figures', 'published_date': '2026-09-01',
         }])
 
-        row = self.run_boss([candidate()])[0]
+        row = self.run_boss([candidate(topic='news')])[0]
 
         self.assertEqual(row['status'], 'complete')
         stored = store.get_candidate(row['id'])['details']
@@ -342,7 +343,7 @@ class ResearchTests(unittest.TestCase):
              'snippet': 'Official figures', 'published_date': '2026-09-01'},
         ])
 
-        row = self.run_boss([candidate()])[0]
+        row = self.run_boss([candidate(topic='news')])[0]
 
         self.assertEqual(row['status'], 'complete')
         self.assertEqual(self.fetch.call_args_list[0].args[0], 'https://example.test/article')
@@ -364,13 +365,27 @@ class ResearchTests(unittest.TestCase):
              'snippet': 'Official figures', 'published_date': '2026-09-01'},
         ])
 
-        row = self.run_boss([candidate()])[0]
+        row = self.run_boss([candidate(topic='news')])[0]
 
         self.assertEqual(row['status'], 'complete')
         self.assertEqual(self.fetch.call_count, 2)
         attempts = store.get_candidate(row['id'])['details']['alternative_sources']
         self.assertEqual(attempts[0]['status'], 'excluded_source_rule')
         self.assertEqual(attempts[0]['reason'], 'Excluded publisher')
+
+    def test_country_hunt_access_failure_does_not_substitute_an_alternative(self):
+        self.fetch.side_effect = tools.PageAccessError('Timed out')
+        self.skills.find_alternative_sources = MagicMock(return_value=[{
+            'url': 'https://official.example.test/release',
+            'canonical_url': 'https://official.example.test/release',
+            'title': 'Official release', 'snippet': 'Official figures',
+        }])
+
+        row = self.run_boss([candidate(topic='news', country_iso3='VEN')])[0]
+
+        self.assertEqual(row['status'], 'relevant_access_blocked')
+        self.skills.find_alternative_sources.assert_not_called()
+        self.assertEqual(self.fetch.call_count, 1)
 
     def test_different_url_variant_is_processed_as_distinct_evidence(self):
         tools.store_webpage_finding({'url': 'https://example.test/article', 'statistics': {}})

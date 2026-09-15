@@ -275,11 +275,12 @@ class FindingStorageTests(unittest.TestCase):
                 })
                 self.assertEqual(stored['status'], 'excluded_fallback_not_needed')
 
-    def test_automatic_owid_wpp_page_is_excluded_as_un_derived(self):
+    def test_automatic_wpp_derived_page_is_excluded_for_any_publisher(self):
         stored = tools.store_webpage_finding({
             **self.finding,
-            'url': 'https://ourworldindata.org/profile/population-demography/japan',
+            'url': 'https://republisher.example.test/japan-demographics',
             'geography': 'Japan', 'geography_iso3': 'JPN',
+            'underlying_source': 'wpp',
             'quoted_source': 'United Nations, World Population Prospects',
             'quoted_source_url': 'https://population.un.org/wpp/',
         }, {'submission_type': 'automatic', 'published_date': None})

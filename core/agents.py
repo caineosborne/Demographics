@@ -15,7 +15,7 @@ from threading import Thread
 from time import perf_counter
 from datetime import date, datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Annotated, Optional, TypedDict
+from typing import Annotated, Literal, Optional, TypedDict
 from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
@@ -39,8 +39,8 @@ load_dotenv(override=True)
 
 # Extraction is an evaluated contract.  Keep these values together so a
 # finding/candidate can be compared with later prompt or rule revisions.
-EXTRACTION_PROMPT_VERSION = "3.4.4"
-EXTRACTION_RULE_VERSION = "3.4.4"
+EXTRACTION_PROMPT_VERSION = "3.5.0"
+EXTRACTION_RULE_VERSION = "3.5.0"
 OBSERVED_STATUS = "observed"
 PROJECTION_LABEL = "projection"
 DEFAULT_LLM_MODEL = "deepseek/deepseek-v4.1-flash:nitro"
@@ -98,6 +98,11 @@ For Our World in Data pages, identify the underlying dataset authority in
 quoted_source and quoted_source_url whenever the page names one. In particular,
 record United Nations / World Population Prospects when that is the data source;
 do not label the page official merely because it displays a chart.
+
+Set underlying_source to wpp when the page's demographic figures are derived
+from United Nations World Population Prospects, including republished WPP
+tables, charts, estimates, or projections. Otherwise set it to other. This is
+about the data behind the figures, not the publisher of the webpage.
 
 Write a one-sentence summary of the metrics actually populated. Set comments
 to null unless a short caveat directly affects a populated value. Do not list,
@@ -861,6 +866,7 @@ class RelevantResult(BaseModel):
     official_source: bool = False
     quoted_source: Optional[str] = None
     quoted_source_url: Optional[str] = None
+    underlying_source: Literal['wpp', 'other'] = 'other'
     # Articles can be relevant but contain no usable numeric claim. Keep the
     # extraction result valid so the pipeline can record that outcome rather
     # than failing on a missing optional object.
@@ -1690,6 +1696,18 @@ def research_agent(state: State):
     annualize_flow_statistics(result)
     mark_partial_periods(result)
     finding = result.model_dump(mode="json")
+    if (provenance.get("submission_type") == "automatic"
+            and result.underlying_source == "wpp"):
+        reason = (
+            "The extracted demographic figures are derived from United Nations "
+            "World Population Prospects and are not independent evidence."
+        )
+        report_activity("[Research agent] excluded: WPP-derived source")
+        return {
+            "messages": new_messages,
+            "result": result,
+            "storage": {"status": "excluded_un_derived_source", "reason": reason},
+        }
     if (provenance.get("submission_type") == "automatic"
             and not permission_first_bulk
             and (not model_iso3 or not result.geography_iso3)):

@@ -41,6 +41,9 @@ def test_browser_renderer_keeps_marker_contract_and_graph_series_route():
     assert "data-finding-id" in renderer
     assert 'data-view="graphs"' in template
     assert 'data-graph-revision="2022"' in template
+    assert "data-graph-datapoint-count" in template
+    assert "function graphDataPointCounts" in admin
+    assert "selected datapoint" in admin
 
 
 def test_browser_renderer_positions_july_rows_and_pads_y_extents():

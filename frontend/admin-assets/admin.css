@@ -29,3 +29,4 @@ a { color:inherit; }
 .graph-panel-actions { display:flex; align-items:center; gap:14px; }
 .graph-fullscreen { white-space:nowrap; font-size:.68rem; }
 .graph-report-summary { order:2; margin:18px 0 0; background:transparent; border-left:0; border-top:1px solid var(--line); padding:12px 0 0; font-size:.68rem; }
+.graph-datapoint-count { color:var(--teal); font:700 .64rem ui-monospace,monospace; letter-spacing:.02em; }

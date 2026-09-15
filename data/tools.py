@@ -1063,22 +1063,17 @@ def _fallback_exclusion(finding: dict[str, Any], provenance: dict[str, Any], con
     """Return an auditable fallback rejection for automatic configured providers."""
     if provenance.get('submission_type') != 'automatic':
         return None
-    provider = fallback_provider_for_url(finding['url'])
-    if provider is None:
-        return None
-    source_provenance = " ".join(str(finding.get(field) or "") for field in (
-        "quoted_source", "quoted_source_url",
-    )).casefold()
-    if (str(provider["domain"]).casefold() == "ourworldindata.org"
-            and re.search(r"\b(?:united nations|world population prospects|wpp|un population division)\b",
-                          source_provenance)):
+    if finding.get('underlying_source') == 'wpp':
         return {
             "status": "excluded_un_derived_source",
             "reason": (
-                "Our World in Data page is attributed to United Nations / World Population "
-                "Prospects data and is not independent evidence."
+                "The extracted demographic figures are derived from United Nations "
+                "World Population Prospects and are not independent evidence."
             ),
         }
+    provider = fallback_provider_for_url(finding['url'])
+    if provider is None:
+        return None
     country_iso3 = finding.get('geography_iso3') or ''
     country_label = finding.get('geography') or country_iso3
     if country_iso3 and _has_recent_article_datapoint(

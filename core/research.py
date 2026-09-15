@@ -261,6 +261,7 @@ def tavily_links(category):
         raise ValueError('Tavily returned no results array.')
     return [{'url': row.get('url', ''), 'title': row.get('title', ''), 'snippet': row.get('content') or '',
              'source': 'tavily', 'category': category.name, 'query': category.query,
+             'topic': category.topic,
              'published_date': row.get('published_date'), 'score': row.get('score'),
             'time_range': category.time_range, 'raw': row}
             for row in data['results'][:category.max_results]]
@@ -808,7 +809,7 @@ class BossAgent:
                         retrieval_url = candidate['url']
                         analysis_candidate = candidate
                         store.update_candidate(candidate_id, status='fetching')
-                        yield run_id, f'Fetch and review full article: {retrieval_url}'
+                        yield run_id, f'Candidate #{candidate_id}: fetch and review full article: {retrieval_url}'
                         started = perf_counter()
                         page = tavily_pages.get(url)
                         content_transport = 'tavily_extract' if page else 'direct_fetch'
@@ -816,14 +817,26 @@ class BossAgent:
                             try:
                                 page = self.skills.fetch_article(retrieval_url)
                             except tools.PageAccessError as original_error:
-                                # A blocked/timeout page should not end the research
-                                # attempt before checking for a syndicated or original
-                                # release. Search once, then try at most three URLs.
+                                # Country-hunt pages are evidence requests, not news
+                                # leads: retain their original URL when blocked. Only
+                                # a non-country Tavily news result may be recovered
+                                # from a likely syndicated article.
+                                allow_news_recovery = (
+                                    candidate.get('topic') == 'news'
+                                    and not candidate.get('country_iso3')
+                                )
+                                if not allow_news_recovery:
+                                    yield run_id, (
+                                        f'Candidate #{candidate_id}: access blocked; '
+                                        f'no alternative-source recovery for this country/non-news hunt — '
+                                        f'{retrieval_url}'
+                                    )
+                                    raise original_error
                                 store.update_candidate(
                                     candidate_id, status='searching_alternative',
                                     original_access_error=str(original_error),
                                 )
-                                yield run_id, f'Access failed; searching for an alternative source: {retrieval_url}'
+                                yield run_id, f'Candidate #{candidate_id}: access failed; searching for an alternative news source: {retrieval_url}'
                                 try:
                                     alternatives = self.skills.find_alternative_sources(candidate)
                                     recovery_search_error = None
@@ -918,7 +931,7 @@ class BossAgent:
                             tavily_extract_seconds=tavily_seconds if content_transport == 'tavily_extract' else None,
                             tavily_extract_error=tavily_failures.get(url),
                         )
-                        yield run_id, f'Article retrieved via {content_transport} in {fetch_seconds}s ({len(page)} chars): {retrieval_url}'
+                        yield run_id, f'Candidate #{candidate_id}: article retrieved via {content_transport} in {fetch_seconds}s ({len(page)} chars): {retrieval_url}'
                         # A successful direct/Tavily reload restores normal
                         # historical duplicate handling. If recovery loaded a
                         # different page, the original remains eligible: it
@@ -942,25 +955,18 @@ class BossAgent:
                             candidate_id, full_decision=decision.decision, full_reason=decision.reason,
                             full_review_seconds=round(perf_counter() - started, 2),
                         )
-                        yield run_id, f'Full-text review finished in {round(perf_counter() - started, 2)}s: {decision.decision} — {retrieval_url}'
-                        if decision.decision != 'relevant':
-                            store.update_candidate(
-                                candidate_id,
-                                review_warning=(
-                                    f'Full-text review said {decision.decision}: {decision.reason}'
-                                ),
-                            )
-                        if candidate.get('force_review') and decision.decision == 'irrelevant':
+                        yield run_id, f'Candidate #{candidate_id}: full-text review finished in {round(perf_counter() - started, 2)}s: {decision.decision} — {retrieval_url}'
+                        if decision.decision == 'irrelevant':
                             store.update_candidate(
                                 candidate_id,
                                 status='excluded_full_review',
                                 full_reason=decision.reason or 'Excluded by the secondary review.',
                             )
                             record_outcome('excluded_full_review')
-                            yield run_id, f'Excluded after secondary review: {retrieval_url}'
+                            yield run_id, f'Candidate #{candidate_id}: excluded after full-text review — {retrieval_url}'
                             continue
                         store.update_candidate(candidate_id, status='extracting')
-                        yield run_id, f'Extract useful information (LLM structured extraction): {retrieval_url}'
+                        yield run_id, f'Candidate #{candidate_id}: extract useful information (LLM structured extraction): {retrieval_url}'
                         started = perf_counter()
                         state = self.skills.extract_useful_info(analysis_candidate, model_page, {
                             'submission_type': 'automatic', 'discovery_source': candidate['source'],
@@ -985,7 +991,7 @@ class BossAgent:
                             'status': storage_status,
                             'message': storage.get('reason') or extraction_payload.get('summary') or storage_status,
                         })
-                        yield run_id, f'Extraction finished in {extraction_seconds}s: {storage_status} — {retrieval_url}'
+                        yield run_id, f'Candidate #{candidate_id}: extraction finished in {extraction_seconds}s: {storage_status} — {retrieval_url}'
                         extraction_versions = {
                             'extraction_prompt_version': extraction_payload.get(
                                 'extraction_prompt_version', agents.EXTRACTION_PROMPT_VERSION),
@@ -1001,7 +1007,7 @@ class BossAgent:
                                 full_reason='No extractable demographic data points; finding was not saved.',
                             )
                             record_outcome('excluded_no_data')
-                            yield run_id, f'Excluded after extraction — no demographic data points: {retrieval_url}'
+                            yield run_id, f'Candidate #{candidate_id}: excluded after extraction — no demographic data points: {retrieval_url}'
                             continue
                         if storage.get('status') == 'excluded_un_bounds':
                             store.update_candidate(
@@ -1011,7 +1017,7 @@ class BossAgent:
                                 full_reason=storage.get('reason'),
                             )
                             record_outcome('excluded_un_bounds')
-                            yield run_id, f'Excluded after UN comparison — outside 25% bounds: {retrieval_url}'
+                            yield run_id, f'Candidate #{candidate_id}: excluded after UN comparison — outside 25% bounds: {retrieval_url}'
                             continue
                         if storage.get('status') == 'needs_review':
                             store.update_candidate(
@@ -1022,7 +1028,7 @@ class BossAgent:
                                 'Extraction evidence or scope requires manual review before storage.',
                             )
                             record_outcome('needs_review_extraction')
-                            yield run_id, f'Extraction needs review before storage: {retrieval_url}'
+                            yield run_id, f'Candidate #{candidate_id}: extraction needs review before storage: {retrieval_url}'
                             continue
                         if storage.get('status') in {'excluded_subnational', 'excluded_country_mismatch'}:
                             store.update_candidate(
@@ -1032,7 +1038,7 @@ class BossAgent:
                                 full_reason=storage.get('reason') or 'Geography is not a unique UN country.',
                             )
                             record_outcome(storage.get('status'))
-                            yield run_id, f'Excluded country geography: {retrieval_url}'
+                            yield run_id, f'Candidate #{candidate_id}: excluded country geography: {retrieval_url}'
                             continue
                         if storage.get('status') == 'excluded_source_rule':
                             store.update_candidate(
@@ -1042,7 +1048,7 @@ class BossAgent:
                                 full_reason=storage.get('reason') or 'Excluded by configured source rule.',
                             )
                             record_outcome('excluded_source_rule')
-                            yield run_id, f'EXCLUDED BY SOURCE RULE — {retrieval_url}'
+                            yield run_id, f'Candidate #{candidate_id}: EXCLUDED BY SOURCE RULE — {retrieval_url}'
                             continue
                         if storage.get('status') in {
                                 'excluded_fallback_not_needed', 'excluded_un_derived_source'}:
@@ -1054,7 +1060,7 @@ class BossAgent:
                                 full_reason=storage.get('reason'),
                             )
                             record_outcome(status)
-                            yield run_id, f'Excluded after source provenance check: {retrieval_url}'
+                            yield run_id, f'Candidate #{candidate_id}: excluded after source provenance check: {retrieval_url}'
                             continue
                         if storage.get('status') == 'excluded_duplicate_url':
                             duplicate_kind = 'the exact same article URL'
@@ -1071,7 +1077,7 @@ class BossAgent:
                                 full_reason=f'Duplicate of {duplicate_of}: {duplicate_kind}.',
                             )
                             record_outcome('duplicate')
-                            yield run_id, f'DUPLICATE — {retrieval_url} — matches {duplicate_of} ({duplicate_kind})'
+                            yield run_id, f'Candidate #{candidate_id}: DUPLICATE — {retrieval_url} — matches {duplicate_of} ({duplicate_kind})'
                             continue
                         store.update_candidate(
                             candidate_id, status='complete',
@@ -1097,7 +1103,7 @@ class BossAgent:
                             tavily_extract_error=tavily_failures.get(url),
                         )
                         record_outcome(status)
-                        yield run_id, f'Access blocked; retained for review: {url}'
+                        yield run_id, f'Candidate #{candidate_id}: access blocked; retained for review: {url}'
                     except Exception as exc:
                         errors += 1
                         timed_out = isinstance(exc, TimeoutError) or 'timeout' in str(exc).casefold()
@@ -1108,7 +1114,7 @@ class BossAgent:
                         })
                         store.update_candidate(candidate_id, status='error', error=str(exc))
                         record_outcome('error')
-                        yield run_id, f'Article failed; continuing: {exc}'
+                        yield run_id, f'Candidate #{candidate_id}: article failed; continuing: {exc}'
             status = 'completed_with_errors' if errors else 'complete'
             summary = ', '.join(f'{count} {name}' for name, count in sorted(outcomes.items())) or 'no candidates'
             store.log_event(run_id, {'outcomes': outcomes})

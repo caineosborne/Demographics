@@ -1,5 +1,5 @@
 import { ApiError, createApiClient } from "./api-client.js";
-import { GRAPH_METRICS, renderMetricGraph } from "./graph-renderer.js";
+import { GRAPH_METRICS, findingMetricValue, renderMetricGraph } from "./graph-renderer.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -204,6 +204,33 @@ function renderGraphs(payload) {
   metrics.forEach((metric) => renderMetricGraph(grid, payload, metric, { hiddenFindingIds: hidden, alternateRevisions, onFindingSelect: reviewGraphFinding }));
 }
 
+function graphDataPointCounts(payload, metrics, alternateRevisions) {
+  const countReferenceRows = (rows) => (rows || []).reduce((count, row) => (
+    count + metrics.filter((metric) => {
+      const value = row?.[GRAPH_METRICS[metric]?.column];
+      return value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value));
+    }).length
+  ), 0);
+  const reference = countReferenceRows(payload.historic) + countReferenceRows(payload.forecast);
+  const alternate = alternateRevisions.reduce((count, revision) => (
+    count + countReferenceRows(payload.alternate_releases?.[revision])
+  ), 0);
+  const article = (payload.findings || []).reduce((count, item) => (
+    count + metrics.filter((metric) => findingMetricValue(item.finding, metric) !== null).length
+  ), 0);
+  return { reference, alternate, article, total: reference + alternate + article };
+}
+
+function renderGraphDataPointCount(payload, metrics, alternateRevisions) {
+  const target = $(`[data-graph-datapoint-count]`);
+  if (!target) return;
+  const counts = graphDataPointCounts(payload, metrics, alternateRevisions);
+  const segments = [`${counts.reference.toLocaleString()} WPP current`];
+  if (counts.alternate) segments.push(`${counts.alternate.toLocaleString()} alternate`);
+  if (counts.article) segments.push(`${counts.article.toLocaleString()} article evidence`);
+  target.textContent = `${counts.total.toLocaleString()} selected datapoint${counts.total === 1 ? "" : "s"} · ${segments.join(" · ")}`;
+}
+
 async function loadGraphs({ force = false } = {}) {
   const state = $(`[data-graph-state]`);
   const iso3 = $(`[data-graph-country]`)?.value || "";
@@ -228,6 +255,7 @@ async function loadGraphs({ force = false } = {}) {
     graphState.payloadByCountry.set(iso3, payload);
     if (!graphState.hiddenByCountry.has(iso3)) graphState.hiddenByCountry.set(iso3, new Set());
     renderGraphs(payload);
+    renderGraphDataPointCount(payload, metrics, revisions);
     try {
       const findingsResult = await findingsPromise;
       if (requestNumber !== graphState.requestNumber) return;
