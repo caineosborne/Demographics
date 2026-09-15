@@ -115,9 +115,12 @@
         <section id="finding-edit" class="view" data-view-panel="finding-edit" hidden>
           <div class="section-intro"><p class="kicker">Evidence workspace</p><h2>Edit finding</h2><p>Update the stored evidence record, then save the change back to the research register.</p></div>
           <article class="card record-editor" data-record-editor hidden>
-            <div class="card-heading"><div><p class="kicker">Evidence workspace</p><h3 data-record-title>Finding</h3></div><span class="route-label">GET / PUT /api/v1/admin/findings/{id}</span></div>
+            <div class="card-heading"><div><p class="kicker">Evidence workspace</p><h3 data-record-title>Finding</h3><a class="record-country-link" data-record-country hidden></a></div><span class="route-label">GET / PUT /api/v1/admin/findings/{id}</span></div>
             <div class="safe-source" data-record-source></div>
-            <div class="record-metrics" data-record-metrics></div>
+            <section class="metric-coverage" aria-labelledby="metric-coverage-title">
+              <div class="metric-coverage-heading"><div><p class="kicker">Evidence coverage</p><h4 id="metric-coverage-title">Statistics on this finding</h4></div><div class="run-tools"><span class="help">Present values and missing measures</span><button class="quiet-button" type="button" data-record-refresh>Refresh</button></div></div>
+              <div class="table-wrap"><table class="metric-coverage-table"><thead><tr><th>Statistic</th><th>State</th><th>Reported value</th><th>Period</th></tr></thead><tbody data-record-metrics></tbody></table></div>
+            </section>
             <div class="comparison-list" data-record-comparison></div>
             <label class="field">Editable evidence JSON <textarea data-record-json rows="18" spellcheck="false"></textarea></label>
             <div class="review-actions"><button class="primary-button" type="button" data-record-save>Save evidence</button><button class="quiet-button" type="button" data-record-rerun data-record-action>Remove and allow rerun</button><button class="quiet-button danger-button" type="button" data-record-delete data-record-action>Delete evidence</button><button class="quiet-button danger-button" type="button" data-record-block data-record-action>Delete and block source</button></div>

@@ -46,7 +46,12 @@
 .event-list,.candidate-list { max-height:240px; overflow:auto; margin-top:12px; padding:10px; background:#f4f7f1; font:.68rem/1.5 ui-monospace,monospace; color:#566761; }
 .event-list p,.candidate-list p { margin:0 0 6px; }
 .candidate-row { display:flex; flex-direction:column; align-items:flex-start; width:100%; margin:0 0 6px; padding:6px 8px; border:1px solid var(--line); background:#f8fbf6; color:var(--ink); text-align:left; cursor:pointer; font:inherit; }
-.candidate-row-wrap { display:flex; flex-direction:column; align-items:flex-start; gap:4px; margin:0 0 8px; }
+.candidate-row-wrap { position:relative; display:flex; flex-direction:column; align-items:flex-start; margin:0 0 8px; }
+.candidate-row .has-force-action { margin-left:22px; }
+.force-candidate-button { position:absolute; z-index:1; top:8px; left:7px; width:18px; height:18px; padding:0; border:0; border-radius:50%; background:#d3a329; color:#17231e; font:700 .72rem/18px system-ui,sans-serif; cursor:pointer; }
+.force-candidate-button:hover { background:#b9870d; color:#fff; }
+.force-candidate-button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
+.force-candidate-button:disabled { cursor:wait; opacity:.8; }
 .candidate-row a { max-width:100%; overflow:hidden; color:var(--teal); text-decoration:underline; text-overflow:ellipsis; white-space:nowrap; }
 .button-row { display:flex; flex-wrap:wrap; align-items:end; gap:8px; }
 .run-tools { display:flex; flex-wrap:wrap; gap:10px; margin-top:12px; }

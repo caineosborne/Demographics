@@ -483,22 +483,25 @@ function renderResearchRunDetail(run, { resetLogVisibility = false, target = "cu
     if (url) { const link = document.createElement("a"); link.href = url; link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = url; link.addEventListener("click", (event) => event.stopPropagation()); button.append(link); }
     button.addEventListener("click", () => loadCandidateDetail(candidate.id, target));
     const forceable = Boolean(candidate.url) && !["complete", "reviewing_summary", "fetching", "searching_alternative", "reviewing_full_text", "extracting", "comparing"].includes(candidate.status);
-    row.append(button);
     if (forceable) {
       const force = document.createElement("button");
-      force.className = "quiet-button"; force.type = "button"; force.textContent = "Force process";
+      force.className = "force-candidate-button"; force.type = "button"; force.textContent = "⚡";
+      force.setAttribute("aria-label", `Force process candidate #${candidate.id}`);
       force.title = "Ignore duplicate, deterministic, and summary checks; send this URL to secondary review.";
+      label.classList.add("has-force-action");
       force.addEventListener("click", async (event) => {
         event.stopPropagation();
-        force.disabled = true; force.textContent = "Queueing…";
+        force.disabled = true; force.textContent = "…";
         try {
           const job = await api.request(`/api/v1/research/candidates/${encodeURIComponent(candidate.id)}/force-process`, { method: "POST" });
-          force.textContent = `Queued run ${job.run_id || job.id || ""}`;
+          force.textContent = "✓";
+          force.title = `Queued forced run ${job.run_id || job.id || ""}`;
           if (job.run_id || job.id) loadRunDetail(job.run_id || job.id, "current");
-        } catch (error) { force.disabled = false; force.textContent = "Force process"; showGlobalError(error); }
+        } catch (error) { force.disabled = false; force.textContent = "⚡"; showGlobalError(error); }
       });
       row.append(force);
     }
+    row.append(button);
     candidates.append(row);
   });
   const copyText = (text, button, done) => copyToClipboard(text).then(() => showCopied(button, done)).catch(showGlobalError);
@@ -937,6 +940,17 @@ const findingMetricLabels = {
   total_fertility_rate: "Total fertility rate",
 };
 
+const findingCoverageMetrics = [
+  ["population", "Population"],
+  ["births", "Births"],
+  ["deaths", "Deaths"],
+  ["natural_change", "Natural change"],
+  ["migration_arrivals", "Migration arrivals"],
+  ["migration_departures", "Migration departures"],
+  ["net_overseas_migration", "Net migration"],
+  ["total_fertility_rate", "Total fertility rate"],
+];
+
 function safeSourceLink(url, label = "Open source ↗") {
   try {
     const parsed = new URL(String(url || ""));
@@ -1064,17 +1078,36 @@ async function loadRecord(findingId) {
     const finding = await api.request(`/api/v1/admin/findings/${encodeURIComponent(findingId)}`);
     editor.hidden = false; editor.dataset.findingId = String(findingId);
     $(`[data-record-title]`, editor).textContent = `Finding #${findingId} · ${finding.source_classification || finding.source || "stored record"}`;
+    const countryLink = $(`[data-record-country]`, editor);
+    const country = finding.geography || finding.country || finding.geography_iso3 || finding.iso3;
+    const iso3 = finding.geography_iso3 || finding.iso3;
+    if (country && iso3) {
+      countryLink.hidden = false;
+      countryLink.href = `#graphs?iso3=${encodeURIComponent(iso3)}`;
+      countryLink.textContent = `${country} · View visualisation →`;
+      countryLink.title = `Open the ${country} visualisation`;
+      countryLink.onclick = (event) => { event.preventDefault(); openGraphForCountry(iso3); };
+    } else {
+      countryLink.hidden = true;
+      countryLink.removeAttribute("href");
+      countryLink.textContent = "";
+      countryLink.onclick = null;
+    }
     $(`[data-record-json]`, editor).value = JSON.stringify(finding, null, 2);
     const source = $(`[data-record-source]`, editor); source.replaceChildren();
     source.append(safeSourceLink(finding.url), document.createTextNode(` · ${finding.url || "No source URL"}`));
     const metrics = $(`[data-record-metrics]`, editor); metrics.replaceChildren();
-    Object.entries(finding.statistics || {}).forEach(([metric, value]) => {
-      if (!value || value.value === null || value.value === undefined) return;
-      const line = document.createElement("p");
-      line.textContent = `${findingMetricLabels[metric] || metric.replaceAll("_", " ")}: ${value.value}${value.unit ? ` ${value.unit}` : ""}${value.measured_period || value.time_period ? ` · ${value.measured_period || value.time_period}` : ""}`;
-      metrics.append(line);
+    const statistics = finding.statistics || {};
+    findingCoverageMetrics.forEach(([metric, label]) => {
+      const value = statistics[metric];
+      const reportedValue = value?.value ?? value?.source_value;
+      const present = reportedValue !== null && reportedValue !== undefined && reportedValue !== "";
+      const row = document.createElement("tr");
+      const period = value?.measured_period || value?.time_period || value?.cadence || "—";
+      const displayValue = present ? `${reportedValue}${value?.unit ? ` ${value.unit}` : ""}` : "—";
+      row.innerHTML = `<th scope="row">${escapeHtml(label)}</th><td><span class="metric-state metric-state-${present ? "present" : "na"}">${present ? "Present" : "NA"}</span></td><td>${escapeHtml(String(displayValue))}</td><td>${escapeHtml(String(period))}</td>`;
+      metrics.append(row);
     });
-    if (!metrics.children.length) metrics.textContent = "No numeric metrics stored.";
     renderPersistedComparison($(`[data-record-comparison]`, editor), finding);
     setState(state, "completed", "Record loaded. Review JSON before saving.");
     await loadFindingActions(findingId);
@@ -1194,6 +1227,10 @@ function wire() {
   $(`[data-refresh-runs]`)?.addEventListener("click", loadRunHistory);
   $(`[data-refresh-findings]`)?.addEventListener("click", loadFindings);
   $(`[data-refresh-coverage]`)?.addEventListener("click", loadCoverage);
+  $(`[data-record-refresh]`)?.addEventListener("click", () => {
+    const findingId = $(`[data-record-editor]`)?.dataset.findingId;
+    if (findingId) loadRecord(findingId);
+  });
   $(`[data-findings-country]`)?.addEventListener("change", loadFindings);
   $(`[data-coverage-country]`)?.addEventListener("change", loadCoverage);
   $(`[data-findings-metric]`)?.addEventListener("change", loadFindings);

@@ -86,6 +86,23 @@ def test_browser_renderer_applies_population_subgroup_guard_to_the_claim_clause(
     assert completed.returncode == 0, completed.stderr or completed.stdout
 
 
+def test_browser_renderer_does_not_plot_missing_values_as_zero():
+    source = (ROOT / "frontend/admin-assets/graph-renderer.js").read_bytes()
+    encoded = base64.b64encode(source).decode("ascii")
+    script = f'''
+      const renderer = await import("data:text/javascript;base64,{encoded}");
+      const missing = {{ statistics: {{ total_fertility_rate: {{ value: null }} }} }};
+      if (renderer.findingMetricValue(missing, "total_fertility_rate") !== null) throw new Error("missing value was plotted");
+      const genuineZero = {{ statistics: {{ total_fertility_rate: {{ value: 0 }} }} }};
+      if (renderer.findingMetricValue(genuineZero, "total_fertility_rate") !== 0) throw new Error("genuine zero was hidden");
+    '''
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+
+
 def test_release_series_falls_back_to_country_name_for_blank_iso3_vintages():
     with tempfile.TemporaryDirectory() as directory:
         db_path = Path(directory) / "wpp.sqlite"
