@@ -10,7 +10,13 @@ wheels/
 .venv
 
 # Offline source data; keep only the importer code tracked.
-data/
+# Local source data is ignored, while the tracked data-access package remains visible.
+data/*
+!data/__init__.py
+!data/tools.py
+!data/database_config.py
+!data/database_maintenance.py
+data/source_data/
 Data_Files/*
 !Data_Files/import_wpp_vintages.py
 

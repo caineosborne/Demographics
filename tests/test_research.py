@@ -7,9 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import tools
-import research_store as store
-from research import (BossAgent, ResearchSkills, ResearchStopRequested, ReviewDecision, SearchSettings,
+from data import tools
+from core import research_store as store
+from core.research import (BossAgent, ResearchSkills, ResearchStopRequested, ReviewDecision, SearchSettings,
                       canonical_url, compact_article_text, discovery_issue, publisher_domain,
                       recommended_categories, reddit_links, tavily_extract_articles, tavily_links,
                       SearchCategory, SummaryReview)
@@ -609,7 +609,7 @@ class ResearchTests(unittest.TestCase):
         response = MagicMock()
         response.__enter__.return_value = response
         response.json.return_value = {'results': [{'url': 'https://example.test', 'content': 'Snippet', 'score': .8}]}
-        with patch.dict(os.environ, {'TAVILY_API_KEY': 'fake'}), patch('research.requests.post', return_value=response) as post:
+        with patch.dict(os.environ, {'TAVILY_API_KEY': 'fake'}), patch('core.research.requests.post', return_value=response) as post:
             rows = tavily_links(SearchCategory(name='Custom', query='custom query', topic='news', max_results=4, time_range='all', include_domains=['example.test']))
         payload = post.call_args.kwargs['json']
         self.assertNotIn('time_range', payload)
@@ -624,7 +624,7 @@ class ResearchTests(unittest.TestCase):
             'results': [{'url': 'https://www.example.test/article', 'raw_content': 'Verified article text'}],
             'failed_results': [{'url': 'https://blocked.test/article', 'error': 'Access denied'}],
         }
-        with patch.dict(os.environ, {'TAVILY_API_KEY': 'fake'}), patch('research.requests.post', return_value=response) as post:
+        with patch.dict(os.environ, {'TAVILY_API_KEY': 'fake'}), patch('core.research.requests.post', return_value=response) as post:
             pages, failures = tavily_extract_articles(['https://example.test/article', 'https://blocked.test/article'])
         self.assertEqual(pages[canonical_url('https://example.test/article')], 'Verified article text')
         self.assertEqual(failures[canonical_url('https://blocked.test/article')], 'Access denied')
@@ -650,7 +650,7 @@ class ResearchTests(unittest.TestCase):
             {'data': {'title': 'Text', 'is_self': True, 'selftext_html': '<p><a href="https://official.test/release">Release</a></p>', 'permalink': '/r/Natalism/comments/2/title/'}},
             {'data': {'title': 'Discussion', 'is_self': True, 'permalink': '/r/Natalism/comments/3/title/'}},
         ]}}
-        with patch('research.requests.get', return_value=response):
+        with patch('core.research.requests.get', return_value=response):
             rows = reddit_links(3)
         self.assertEqual(rows[0]['url'], 'https://publisher.test/story')
         self.assertIn('/comments/1/', rows[0]['submission_url'])
@@ -665,7 +665,7 @@ class ResearchTests(unittest.TestCase):
 
     def test_prefetched_extraction_does_not_fetch_again(self):
         with patch('dotenv.load_dotenv'), patch.dict(os.environ, {'OPENROUTER_API_KEY': 'test-key'}):
-            import agents
+            from core import agents
         result = agents.RelevantResult(
             title='Article', url='https://example.test', source='Example', site_seen='example.test',
             statistics=agents.Statistics(population=agents.Statistic(
@@ -689,7 +689,7 @@ class ResearchTests(unittest.TestCase):
             <content type="html">&lt;a href="https://publisher.test/report"&gt;[link]&lt;/a&gt;
             &lt;a href="https://reddit.com/r/Natalism/comments/1"&gt;[comments]&lt;/a&gt;</content>
             </entry></feed>'''
-        with patch('research.requests.get', side_effect=[requests.HTTPError('403'), response]):
+        with patch('core.research.requests.get', side_effect=[requests.HTTPError('403'), response]):
             rows = reddit_links(3)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]['url'], 'https://publisher.test/report')

@@ -8,10 +8,10 @@ from datetime import datetime, timedelta, timezone
 import gradio as gr
 import pandas as pd
 
-from research import BossAgent, CRITERIA, DEFAULT_SETTINGS, ResearchStopRequested, SearchSettings, recommended_categories
-import research_store as store
-from tools import list_country_names, list_webpage_findings
-import tools
+from core.research import BossAgent, CRITERIA, DEFAULT_SETTINGS, ResearchStopRequested, SearchSettings, recommended_categories
+from core import research_store as store
+from data.tools import list_country_names, list_webpage_findings
+from data import tools
 
 
 HEADERS = ['Enabled', 'Category', 'Search terms', 'Max results',

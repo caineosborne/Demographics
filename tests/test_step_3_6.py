@@ -5,10 +5,10 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 import api
-import research_services
-import research_store
-import tools
-from research import BossAgent, ResearchSkills, ReviewDecision, SearchCategory, SearchSettings, SummaryReview
+from services import research_services
+from core import research_store
+from data import tools
+from core.research import BossAgent, ResearchSkills, ReviewDecision, SearchCategory, SearchSettings, SummaryReview
 
 
 class Step36ResearchControlsTests(unittest.TestCase):

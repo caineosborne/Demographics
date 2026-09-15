@@ -19,10 +19,10 @@ import threading
 from pathlib import Path
 from typing import Any
 
-import database_maintenance
-import research_store
-import research_services
-from research import BossAgent, SearchSettings
+from data import database_maintenance
+from core import research_store
+from services import research_services
+from core.research import BossAgent, SearchSettings
 
 
 def run_job(job_id: str) -> dict[str, Any]:

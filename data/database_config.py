@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATABASE_DIR = PROJECT_ROOT / "databases"
 RUNTIME_DATABASE_DIR = DATABASE_DIR / "runtime"
 DATABASE_FILENAME = "WPP2024_GEN_F01_DEMOGRAPHIC_INDICATORS_COMPACT.sqlite"

@@ -12,10 +12,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import gradio as gr
 import pandas as pd
 
-from agents import graph
+from core.agents import graph
 from research_ui import build_search_tabs
-import tools
-from tools import (
+from data import tools
+from data.tools import (
     PageAccessError, delete_and_block_webpage_finding, delete_finding_metric, delete_webpage_finding, get_webpage_finding,
     list_blocked_sources, list_country_names, list_webpage_findings, unblock_source_url, update_webpage_finding,
 )

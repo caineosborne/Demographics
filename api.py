@@ -16,9 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from urllib.parse import urlsplit
 
-import read_services
-import admin_services
-import research_services
+from services import read_services, admin_services, research_services
 
 
 @dataclass(frozen=True, slots=True)

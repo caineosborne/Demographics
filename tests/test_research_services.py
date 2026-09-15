@@ -3,9 +3,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import research_services
-import research_store
-import tools
+from services import research_services
+from core import research_store
+from data import tools
 
 
 class ResearchServiceTests(unittest.TestCase):

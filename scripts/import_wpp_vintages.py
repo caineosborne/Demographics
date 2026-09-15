@@ -27,7 +27,7 @@ import pandas as pd
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from database_maintenance import build_wpp_serving_database
+from data.database_maintenance import build_wpp_serving_database
 
 ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = ROOT.parent

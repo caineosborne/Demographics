@@ -10,9 +10,9 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 import api
-import research_store
-import research_services
-import tools
+from core import research_store
+from services import research_services
+from data import tools
 
 
 FINDING = {
@@ -107,7 +107,7 @@ class Step35ManualAnalysisTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.object(
             tools, 'DB_PATH', Path(directory) / 'db.sqlite'
         ):
-            draft = __import__('research_store').create_analysis_draft('job-1', finding=VALID_FINDING, validation={'status': 'validated'})
+            draft = __import__('core.research_store', fromlist=['create_analysis_draft']).create_analysis_draft('job-1', finding=VALID_FINDING, validation={'status': 'validated'})
             edited = {**VALID_FINDING, 'comments': 'Reviewed by analyst.'}
             result = research_services.edit_analysis_draft(draft['id'], edited, expected_revision=1)
             self.assertEqual(result['revision'], 2)

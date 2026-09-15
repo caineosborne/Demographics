@@ -1,6 +1,6 @@
 import unittest
 
-from agents import (RelevantResult, annualize_flow_statistics, has_useful_numeric_datapoint,
+from core.agents import (RelevantResult, annualize_flow_statistics, has_useful_numeric_datapoint,
                     mark_partial_periods)
 
 

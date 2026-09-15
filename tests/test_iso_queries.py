@@ -1,6 +1,6 @@
 import unittest
 
-from tools import get_list_of_countries, get_population_forecast, resolve_country_iso3
+from data.tools import get_list_of_countries, get_population_forecast, resolve_country_iso3
 
 
 class IsoQueryTests(unittest.TestCase):

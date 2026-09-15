@@ -19,7 +19,7 @@ from langchain_core.tools import tool
 from langgraph.config import get_stream_writer
 from pypdf import PdfReader
 
-from database_config import configured_database_path, configured_wpp_database_path
+from data.database_config import configured_database_path, configured_wpp_database_path
 
 
 DB_PATH = configured_database_path()

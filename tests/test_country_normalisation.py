@@ -1,6 +1,6 @@
 import unittest
 
-from tools import list_country_names, normalise_country_name
+from data.tools import list_country_names, normalise_country_name
 
 
 class CountryNormalisationTests(unittest.TestCase):

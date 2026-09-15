@@ -9,7 +9,7 @@ with patch('dotenv.load_dotenv'), patch.dict(os.environ, {'OPENROUTER_API_KEY': 
         delete_article_everywhere_simple, delete_metric_from_database,
         load_database_table_row, remove_database_metric, run_pipeline,
     )
-    from tools import PageAccessError
+    from data.tools import PageAccessError
 
 
 class PipelineTests(unittest.TestCase):

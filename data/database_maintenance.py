@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from database_config import BACKUP_DIR, DEFAULT_DB_PATH, DEFAULT_WPP_SERVING_PATH, WPP_ARCHIVE_PATH
+from data.database_config import BACKUP_DIR, DEFAULT_DB_PATH, DEFAULT_WPP_SERVING_PATH, WPP_ARCHIVE_PATH
 
 
 # Candidate audit data is operational evidence, not an article archive. Keep

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agents import (
+from core.agents import (
     EXTRACTION_PROMPT_VERSION,
     EXTRACTION_RULE_VERSION,
     LLMInvocationTimeout,
@@ -44,7 +44,7 @@ class Step34ExtractionTests(unittest.TestCase):
                 time.sleep(0.2)
                 return "too late"
 
-        with patch("agents._llm_timeout_seconds", return_value=0.01):
+        with patch("core.agents._llm_timeout_seconds", return_value=0.01):
             started = time.perf_counter()
             with self.assertRaises(LLMInvocationTimeout):
                 invoke_llm_with_timeout("extraction_low_effort", SlowRunnable(), [])
@@ -197,10 +197,10 @@ class Step34ExtractionTests(unittest.TestCase):
     def test_negative_extraction_is_not_sent_to_storage(self):
         negative = self.examples[0]["finding"]
         result = RelevantResult.model_validate(negative)
-        with patch("agents.research_llm") as model, patch("agents.research_llm_medium") as medium, patch("agents.store_webpage_finding") as store:
+        with patch("core.agents.research_llm") as model, patch("core.agents.research_llm_medium") as medium, patch("core.agents.store_webpage_finding") as store:
             model.invoke.return_value = result
             medium.invoke.return_value = result
-            response = __import__("agents").research_agent({
+            response = __import__("core.agents", fromlist=["research_agent"]).research_agent({
                 "messages": [], "article_url": negative["url"], "page_text": "scenario text",
                 "provenance": {"submission_type": "manual"},
             })
@@ -221,10 +221,10 @@ class Step34ExtractionTests(unittest.TestCase):
                 'metric_type': 'population', 'measured_period': '2023',
             }},
         )
-        with patch('agents.research_llm') as low, patch('agents.research_llm_medium') as medium:
+        with patch('core.agents.research_llm') as low, patch('core.agents.research_llm_medium') as medium:
             low.invoke.return_value = empty
             medium.invoke.return_value = recovered
-            response = __import__('agents').extract_from_page_text(
+            response = __import__('core.agents', fromlist=['extract_from_page_text']).extract_from_page_text(
                 'Japan population was 124.6 million in 2023.', empty.url,
                 {'submission_type': 'manual'},
             )
@@ -257,10 +257,10 @@ class Step34ExtractionTests(unittest.TestCase):
                 'metric_type': 'population', 'measured_period': '2023',
             }},
         )
-        with patch('agents.research_llm') as low, patch('agents.research_llm_medium') as medium:
+        with patch('core.agents.research_llm') as low, patch('core.agents.research_llm_medium') as medium:
             low.invoke.return_value = partial
             medium.invoke.return_value = recovered
-            response = __import__('agents').extract_from_page_text(
+            response = __import__('core.agents', fromlist=['extract_from_page_text']).extract_from_page_text(
                 'Japan population was 124.6 million in 2023.', partial.url,
                 {'submission_type': 'manual'},
             )
@@ -270,10 +270,10 @@ class Step34ExtractionTests(unittest.TestCase):
     def test_valid_observation_reaches_storage_with_versions(self):
         positive = self.examples[-1]["finding"]
         result = RelevantResult.model_validate(positive)
-        with patch("agents.research_llm") as model, patch(
-                "agents.store_webpage_finding", return_value={"status": "stored", "id": 9}) as store:
+        with patch("core.agents.research_llm") as model, patch(
+                "core.agents.store_webpage_finding", return_value={"status": "stored", "id": 9}) as store:
             model.invoke.return_value = result
-            response = __import__("agents").research_agent({
+            response = __import__("core.agents", fromlist=["research_agent"]).research_agent({
                 "messages": [], "article_url": positive["url"], "page_text": "national observations",
                 "provenance": {"submission_type": "manual"},
             })

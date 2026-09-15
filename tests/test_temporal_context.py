@@ -6,14 +6,14 @@ from unittest.mock import MagicMock, patch
 from langchain_core.messages import AIMessage
 
 with patch('dotenv.load_dotenv'), patch.dict(os.environ, {'OPENROUTER_API_KEY': 'test-key'}):
-    import agents
+    from core import agents
 
-from temporal_context import temporal_context
+from core.temporal_context import temporal_context
 
 
 class TemporalContextTests(unittest.TestCase):
     def test_date_refreshes_without_restarting(self):
-        with patch('temporal_context.date') as clock:
+        with patch('core.temporal_context.date') as clock:
             clock.today.return_value = date(2026, 9, 10)
             self.assertIn('2026-09-10', temporal_context())
             clock.today.return_value = date(2027, 1, 1)
@@ -30,7 +30,7 @@ class TemporalContextTests(unittest.TestCase):
             )),
         )
         with (
-            patch('temporal_context.date') as clock,
+            patch('core.temporal_context.date') as clock,
             patch.object(agents, 'web_llm') as web,
             patch.object(agents, 'research_llm') as extraction,
             patch.object(agents, 'get_population_forecast') as un_lookup,

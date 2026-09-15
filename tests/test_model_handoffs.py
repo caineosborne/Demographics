@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 with patch('dotenv.load_dotenv'), patch.dict(os.environ, {'OPENROUTER_API_KEY': 'test-key'}):
-    import agents
+    from core import agents
 
 
 class ModelHandoffTests(unittest.TestCase):

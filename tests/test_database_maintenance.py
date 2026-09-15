@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from database_config import DEFAULT_DB_PATH
-from database_maintenance import (
+from data.database_config import DEFAULT_DB_PATH
+from data.database_maintenance import (
     build_wpp_serving_database, compact_candidate_audit, inventory_database, preserve_database,
     remove_embedded_wpp_tables,
 )
@@ -135,7 +135,7 @@ class DatabaseMaintenanceTests(unittest.TestCase):
             connection.execute('CREATE TABLE medium_variant (Country TEXT, "ISO3 Alpha-code" TEXT, Year TEXT, extra TEXT)')
             connection.execute("INSERT INTO estimates VALUES ('Japan', 'JPN', '2023', 'kept exactly')")
             connection.execute("INSERT INTO medium_variant VALUES ('Japan', 'JPN', '2024', 'kept exactly')")
-        from database_maintenance import build_wpp_archive
+        from data.database_maintenance import build_wpp_archive
         archive = self.root / "wpp_full_archive.sqlite"
         report = build_wpp_archive(self.source, archive)
         self.assertEqual(report["table_counts"], {"estimates": 1, "medium_variant": 1})

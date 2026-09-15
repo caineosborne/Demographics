@@ -23,10 +23,10 @@ from pydantic import BaseModel, Field, field_validator
 import requests
 import tldextract
 
-import agents
-import research_store as store
-import tools
-from temporal_context import temporal_context
+from core import agents
+from core import research_store as store
+from data import tools
+from core.temporal_context import temporal_context
 
 
 class SearchCategory(BaseModel):
@@ -422,7 +422,7 @@ def reddit_json_links(limit):
 
 
 def review_link(candidate, criteria, page_text=None):
-    from agents import llm
+    from core.agents import llm
     stage = 'full article' if page_text is not None else 'search summary'
     content = {'title': candidate.get('title'), 'url': candidate['url'],
                'published_date': candidate.get('published_date'), 'text': page_text if page_text is not None else candidate.get('snippet', '')}
@@ -453,7 +453,7 @@ def review_link(candidate, criteria, page_text=None):
 
 def review_summaries(candidates: list[tuple[int, dict]], criteria: str) -> list[SummaryReview]:
     """Classify up to 20 search snippets in one auditable structured call."""
-    from agents import llm
+    from core.agents import llm
     if len(candidates) > 20:
         raise ValueError('A summary-review batch may contain at most 20 candidates.')
     source = [
@@ -492,7 +492,7 @@ def review_summaries(candidates: list[tuple[int, dict]], criteria: str) -> list[
 
 
 def extract_useful_info(candidate, page_text, provenance):
-    from agents import research_agent
+    from core.agents import research_agent
     state = {'messages': [HumanMessage(content='Extract demographic facts from ' + candidate['url'])],
              'page_text': page_text, 'article_url': candidate['url'], 'provenance': provenance}
     # The hunt country is search/audit context only. Extraction must allocate
@@ -501,7 +501,7 @@ def extract_useful_info(candidate, page_text, provenance):
 
 
 def compare_finding(state):
-    from agents import compare_to_un
+    from core.agents import compare_to_un
     return compare_to_un({'messages': [], **state})
 
 

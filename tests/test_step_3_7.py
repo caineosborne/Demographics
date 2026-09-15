@@ -4,9 +4,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import admin_services
-import read_services
-import tools
+from services import admin_services, read_services
+from data import tools
 from api import create_app
 from fastapi.testclient import TestClient
 

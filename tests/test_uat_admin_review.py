@@ -5,7 +5,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from api import create_app
-import read_services
+from services import read_services
 
 
 ROOT = Path(__file__).resolve().parents[1]

@@ -8,10 +8,9 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import api
-import read_services
-import research_services
-import research_store
-import tools
+from services import read_services, research_services
+from core import research_store
+from data import tools
 import worker
 
 

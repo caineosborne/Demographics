@@ -13,12 +13,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
-import agents
-import admin_services
-import research_store
-import tools
+from core import agents
+from services import admin_services
+from core import research_store
+from data import tools
 from langchain_core.messages import HumanMessage
-from research import BossAgent, CRITERIA, DEFAULT_SETTINGS, SearchSettings
+from core.research import BossAgent, CRITERIA, DEFAULT_SETTINGS, SearchSettings
 
 
 HUNT_QUERY = ('"{country}" (population OR births OR deaths OR fertility OR migration) '

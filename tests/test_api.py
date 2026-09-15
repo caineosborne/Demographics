@@ -5,8 +5,8 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from api import AuthContext, Settings, create_app, get_settings
-import read_services
-from read_services import graph_series
+from services import read_services
+from services.read_services import graph_series
 
 
 class ApiBoundaryTests(unittest.TestCase):
@@ -137,11 +137,11 @@ class ApiBoundaryTests(unittest.TestCase):
         service.assert_called_once_with("JPN", ["population"], [2022])
 
     def test_graph_service_returns_a_framework_independent_contract(self):
-        with patch("read_services.normalise_country_name", return_value="Japan"), \
-             patch("read_services.resolve_country_iso3", return_value="JPN"), \
-             patch("read_services._un_series", return_value=([{"Year": 2023}], [{"Year": 2024}])), \
-             patch("read_services._release_series", return_value={}), \
-             patch("read_services._finding_graph_rows", return_value=[]):
+        with patch("services.read_services.normalise_country_name", return_value="Japan"), \
+             patch("services.read_services.resolve_country_iso3", return_value="JPN"), \
+             patch("services.read_services._un_series", return_value=([{"Year": 2023}], [{"Year": 2024}])), \
+             patch("services.read_services._release_series", return_value={}), \
+             patch("services.read_services._finding_graph_rows", return_value=[]):
             result = graph_series("JPN", ["population"])
 
         self.assertEqual(result["country"], "Japan")

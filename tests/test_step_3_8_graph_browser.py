@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-import read_services
+from services import read_services
 
 
 ROOT = Path(__file__).resolve().parents[1]

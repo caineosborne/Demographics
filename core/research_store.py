@@ -3,8 +3,8 @@ import json
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-import tools
-from database_maintenance import compact_candidate_details
+from data import tools
+from data.database_maintenance import compact_candidate_details
 
 
 # A worker is considered alive for a deliberately generous period.  The

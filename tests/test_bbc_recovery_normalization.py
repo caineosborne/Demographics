@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from agents import (
+from core.agents import (
     RelevantResult,
     extract_from_page_text,
     normalize_extracted_result,
@@ -101,14 +101,14 @@ class BbcRecoveryNormalizationTests(unittest.TestCase):
         comparison = MagicMock()
         comparison.model_dump.return_value = {"overall_assessment": "Compared"}
         calls = []
-        with patch("agents.tools.blocked_source_urls", return_value=set()), \
-                patch("agents.tools.find_webpage_finding_by_url", return_value=None), \
-                patch("agents.research_llm") as model, \
-                patch("agents.research_llm_medium") as medium, \
-                patch("agents.compare_to_un", side_effect=lambda state: (
+        with patch("core.agents.tools.blocked_source_urls", return_value=set()), \
+                patch("core.agents.tools.find_webpage_finding_by_url", return_value=None), \
+                patch("core.agents.research_llm") as model, \
+                patch("core.agents.research_llm_medium") as medium, \
+                patch("core.agents.compare_to_un", side_effect=lambda state: (
                     calls.append("compare"), {"comparison": comparison, "un_data": []}
                 )[1]), \
-                patch("agents.store_webpage_finding", side_effect=lambda *args, **kwargs: (
+                patch("core.agents.store_webpage_finding", side_effect=lambda *args, **kwargs: (
                     calls.append("store"), {"status": "stored", "id": 21}
                 )[1]) as store:
             model.invoke.return_value = result
@@ -129,8 +129,8 @@ class BbcRecoveryNormalizationTests(unittest.TestCase):
 
     def test_manual_extraction_keeps_valid_metrics_and_removes_rate_counts(self):
         result = RelevantResult.model_validate(json.loads(FIXTURE.read_text()))
-        with patch("agents.research_llm") as model, \
-                patch("agents.research_llm_medium") as medium:
+        with patch("core.agents.research_llm") as model, \
+                patch("core.agents.research_llm_medium") as medium:
             model.invoke.return_value = result
             medium.invoke.return_value = result
             response = extract_from_page_text(

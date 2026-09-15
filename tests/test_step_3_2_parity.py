@@ -10,12 +10,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import admin_services
+from services import admin_services
 import main
-import read_services
-import research_services
+from services import read_services, research_services
 import research_ui
-import tools
+from data import tools
 import visualisation
 
 

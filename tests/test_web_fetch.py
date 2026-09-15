@@ -5,7 +5,7 @@ from typing import TypedDict
 import requests
 from langgraph.graph import StateGraph, START, END
 
-from tools import PageAccessError, get_page_text, get_pdf_text, fetch_with_playwright
+from data.tools import PageAccessError, get_page_text, get_pdf_text, fetch_with_playwright
 
 
 class FetchTests(unittest.TestCase):
@@ -17,36 +17,36 @@ class FetchTests(unittest.TestCase):
         return response
 
     def test_requests_success_skips_browser(self):
-        with patch('tools.requests.get', return_value=self.response(
+        with patch('data.tools.requests.get', return_value=self.response(
             b'<body><nav>Menu</nav><main>Population 100<script>ignore</script></main></body>'
-        )), patch('tools.fetch_with_playwright') as browser:
+        )), patch('data.tools.fetch_with_playwright') as browser:
             self.assertEqual(get_page_text.invoke({'url': 'https://example.test'}), 'Population 100')
             browser.assert_not_called()
 
     def test_requests_keeps_article_text_outside_main(self):
         html = b'<body><main>Navigation shell</main><section><article>National births were 100.</article></section></body>'
-        with patch('tools.requests.get', return_value=self.response(html)), patch('tools.fetch_with_playwright') as browser:
+        with patch('data.tools.requests.get', return_value=self.response(html)), patch('data.tools.fetch_with_playwright') as browser:
             self.assertIn('National births were 100.', get_page_text.invoke({'url': 'https://example.test'}))
             browser.assert_not_called()
 
     def test_request_errors_fall_back(self):
         for error in (requests.Timeout('timeout'), requests.ConnectionError('offline'), requests.HTTPError('403')):
-            with self.subTest(error=error), patch('tools.requests.get', side_effect=error), patch(
-                'tools.fetch_with_playwright', return_value='Rendered population 100'
+            with self.subTest(error=error), patch('data.tools.requests.get', side_effect=error), patch(
+                'data.tools.fetch_with_playwright', return_value='Rendered population 100'
             ) as browser:
                 self.assertEqual(get_page_text.invoke({'url': 'https://example.test'}), 'Rendered population 100')
                 browser.assert_called_once_with('https://example.test')
 
     def test_unusable_html_falls_back(self):
         for html in (b'', b'<body><script>render()</script></body>', b'<body>Enable JavaScript</body>', b'<body>Access denied</body>'):
-            with self.subTest(html=html), patch('tools.requests.get', return_value=self.response(html)), patch(
-                'tools.fetch_with_playwright', return_value='Rendered text'
+            with self.subTest(html=html), patch('data.tools.requests.get', return_value=self.response(html)), patch(
+                'data.tools.fetch_with_playwright', return_value='Rendered text'
             ):
                 self.assertEqual(get_page_text.invoke({'url': 'https://example.test'}), 'Rendered text')
 
     def test_both_fail(self):
-        with patch('tools.requests.get', side_effect=requests.Timeout('request timeout')), patch(
-            'tools.fetch_with_playwright', side_effect=RuntimeError('browser unavailable')
+        with patch('data.tools.requests.get', side_effect=requests.Timeout('request timeout')), patch(
+            'data.tools.fetch_with_playwright', side_effect=RuntimeError('browser unavailable')
         ), self.assertRaisesRegex(PageAccessError, 'request timeout.*browser unavailable'):
             get_page_text.invoke({'url': 'https://example.test'})
 
@@ -57,8 +57,8 @@ class FetchTests(unittest.TestCase):
         builder.add_node('fetch', lambda state: {'text': get_page_text.invoke({'url': 'https://example.test'})})
         builder.add_edge(START, 'fetch')
         builder.add_edge('fetch', END)
-        with patch('tools.requests.get', side_effect=requests.Timeout('timeout')), patch(
-            'tools.fetch_with_playwright', return_value='Rendered text'
+        with patch('data.tools.requests.get', side_effect=requests.Timeout('timeout')), patch(
+            'data.tools.fetch_with_playwright', return_value='Rendered text'
         ):
             stream = builder.compile().stream({'text': ''}, stream_mode=['custom', 'values'])
             events = list(stream)
@@ -81,7 +81,7 @@ class FetchTests(unittest.TestCase):
         reader = MagicMock()
         reader.is_encrypted = False
         reader.pages = [page]
-        with patch('tools.requests.get', return_value=response), patch('tools.PdfReader', return_value=reader), patch('tools.fetch_with_playwright') as browser:
+        with patch('data.tools.requests.get', return_value=response), patch('data.tools.PdfReader', return_value=reader), patch('data.tools.fetch_with_playwright') as browser:
             self.assertEqual(get_page_text.invoke({'url': 'https://example.test/report.pdf'}), 'Japan population report')
             browser.assert_not_called()
 
@@ -92,7 +92,7 @@ class FetchTests(unittest.TestCase):
         reader = MagicMock()
         reader.is_encrypted = False
         reader.pages = [page]
-        with patch('tools.requests.get', return_value=response), patch('tools.PdfReader', return_value=reader):
+        with patch('data.tools.requests.get', return_value=response), patch('data.tools.PdfReader', return_value=reader):
             self.assertEqual(get_pdf_text.invoke({'url': 'https://example.test/report.pdf'}), 'Monthly demographic report')
 
 
