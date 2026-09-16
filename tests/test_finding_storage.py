@@ -84,6 +84,35 @@ class FindingStorageTests(unittest.TestCase):
         duplicate = {**self.finding, "url": "https://mirror.test/report"}
         self.assertEqual(tools.store_webpage_finding(duplicate)["status"], "stored")
 
+    def test_repeated_figure_is_stored_and_linked_without_source_ranking(self):
+        first = {
+            **self.finding,
+            "geography": "Japan",
+            "geography_iso3": "JPN",
+            "statistics": {
+                "total_fertility_rate": {
+                    "value": 1.14,
+                    "measured_period": "2025",
+                },
+            },
+        }
+        original = tools.store_webpage_finding(first)
+        repeated = tools.store_webpage_finding({**first, "url": "https://mirror.test/report"})
+
+        self.assertEqual(repeated["status"], "stored")
+        self.assertEqual(repeated["duplicate_figures"], [{
+            "metric": "total_fertility_rate",
+            "observation_period": "2025",
+            "value": 1.14,
+            "canonical_finding_id": original["id"],
+        }])
+        with tools.get_connection() as conn:
+            row = conn.execute(
+                "SELECT finding_id, canonical_finding_id, metric, observation_period, value "
+                "FROM finding_figure_duplicates"
+            ).fetchone()
+        self.assertEqual(row, (repeated["id"], original["id"], "total_fertility_rate", "2025", 1.14))
+
     def test_missing_population_does_not_exclude_different_url(self):
         finding = {**self.finding, "statistics": {"population": {"value": None}}}
         tools.store_webpage_finding(finding)

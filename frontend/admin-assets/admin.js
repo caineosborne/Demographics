@@ -1073,14 +1073,61 @@ function renderPersistedComparison(container, finding) {
     container.textContent = "No persisted WPP comparison on this finding.";
     return;
   }
-  const heading = document.createElement("p");
-  heading.textContent = "Persisted WPP comparison";
+  const heading = document.createElement("div");
+  heading.className = "comparison-heading";
+  heading.innerHTML = '<div><p class="kicker">Reference check</p><h4>Persisted WPP comparison</h4></div>';
   container.append(heading);
-  Object.entries(comparison).forEach(([metric, value]) => {
-    const line = document.createElement("p");
-    line.textContent = `${metric.replaceAll("_", " ")}: ${typeof value === "object" ? JSON.stringify(value) : value}`;
-    container.append(line);
-  });
+
+  const metadata = document.createElement("dl");
+  metadata.className = "comparison-meta";
+  [["Country", comparison.country], ["ISO3", comparison.country_iso3], ["Year", comparison.year], ["Overall assessment", comparison.overall_assessment]]
+    .filter(([, value]) => value !== null && value !== undefined && value !== "")
+    .forEach(([label, value]) => {
+      const term = document.createElement("dt"); const description = document.createElement("dd");
+      term.textContent = label; description.textContent = String(value);
+      metadata.append(term, description);
+    });
+  if (metadata.children.length) container.append(metadata);
+
+  const tableWrap = document.createElement("div");
+  tableWrap.className = "table-wrap comparison-table-wrap";
+  const table = document.createElement("table");
+  table.className = "comparison-table";
+  table.innerHTML = "<thead><tr><th>Metric</th><th>Assessment</th><th>Reported</th><th>WPP reference</th><th>Difference</th><th>Difference %</th></tr></thead>";
+  const body = document.createElement("tbody");
+  const formatValue = (value) => value === null || value === undefined || value === "" ? "—" : typeof value === "number" ? value.toLocaleString(undefined, { maximumFractionDigits: 3 }) : String(value);
+  Object.entries(comparison)
+    .filter(([, value]) => value && typeof value === "object" && !Array.isArray(value)
+      && (value.assessment || value.reported !== null && value.reported !== undefined
+        || value.un_expected !== null && value.un_expected !== undefined
+        || value.outlier_excluded || value.period_excluded))
+    .forEach(([metric, value]) => {
+      const row = document.createElement("tr");
+      const label = findingMetricLabels[metric] || metric.replaceAll("_", " ");
+      [label, value.assessment || "Not compared", formatValue(value.reported), formatValue(value.un_expected), formatValue(value.difference), formatValue(value.percentage_difference)]
+        .forEach((cellValue, index) => {
+          const cell = document.createElement(index === 0 ? "th" : "td");
+          if (index === 0) cell.scope = "row";
+          cell.textContent = cellValue;
+          row.append(cell);
+        });
+      body.append(row);
+    });
+  if (body.children.length) {
+    table.append(body); tableWrap.append(table); container.append(tableWrap);
+  } else {
+    const empty = document.createElement("p");
+    empty.className = "comparison-notes";
+    empty.textContent = "No metric values were available for comparison.";
+    container.append(empty);
+  }
+
+  if (comparison.notes) {
+    const notes = document.createElement("p");
+    notes.className = "comparison-notes";
+    notes.textContent = `Notes: ${comparison.notes}`;
+    container.append(notes);
+  }
 }
 
 async function loadFindingActions(findingId) {

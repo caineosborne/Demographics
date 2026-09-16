@@ -502,6 +502,22 @@ def initialise_findings_table() -> None:
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS finding_figure_duplicates (
+                id INTEGER PRIMARY KEY,
+                finding_id INTEGER NOT NULL,
+                canonical_finding_id INTEGER NOT NULL,
+                metric TEXT NOT NULL,
+                observation_period TEXT NOT NULL,
+                value REAL NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(finding_id, canonical_finding_id, metric, observation_period, value)
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_finding_figure_duplicates_finding
+            ON finding_figure_duplicates(finding_id)
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS finding_actions (
                 id INTEGER PRIMARY KEY,
                 finding_id INTEGER,
@@ -1113,6 +1129,79 @@ def _fallback_exclusion(finding: dict[str, Any], provenance: dict[str, Any], con
     return None
 
 
+def _figure_keys(finding: dict[str, Any]) -> list[tuple[str, str, float]]:
+    """Return comparable observation identities from one extracted finding.
+
+    Figure identity deliberately has no source-quality component. Separate
+    publications remain separate evidence; this only records when they report
+    the same country, metric, period, and normalized value.
+    """
+    figures = []
+    for metric, statistic in (finding.get("statistics") or {}).items():
+        if not isinstance(statistic, dict) or statistic.get("value") is None:
+            continue
+        period = str(
+            statistic.get("measured_period")
+            or statistic.get("period_start")
+            or finding.get("effective_date")
+            or ""
+        ).strip()
+        if not period:
+            continue
+        try:
+            value = float(statistic["value"])
+        except (TypeError, ValueError):
+            continue
+        figures.append((str(metric), period, value))
+    return figures
+
+
+def _record_duplicate_figures(conn: sqlite3.Connection, finding_id: int,
+                              finding: dict[str, Any]) -> list[dict[str, Any]]:
+    """Link repeated observations to their earliest stored counterpart."""
+    country_iso3 = str(finding.get("geography_iso3") or "").strip().upper()
+    if not country_iso3:
+        return []
+    new_figures = _figure_keys(finding)
+    if not new_figures:
+        return []
+
+    prior_rows = conn.execute(
+        "SELECT id, finding_json FROM webpage_findings WHERE id < ? ORDER BY id",
+        (finding_id,),
+    ).fetchall()
+    prior_figures: dict[tuple[str, str, str, float], int] = {}
+    for prior_id, payload in prior_rows:
+        try:
+            prior = json.loads(payload)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if str(prior.get("geography_iso3") or "").strip().upper() != country_iso3:
+            continue
+        for metric, period, value in _figure_keys(prior):
+            prior_figures.setdefault((metric, period, country_iso3, value), prior_id)
+
+    duplicates = []
+    for metric, period, value in new_figures:
+        canonical_finding_id = prior_figures.get((metric, period, country_iso3, value))
+        if canonical_finding_id is None:
+            continue
+        conn.execute(
+            """INSERT OR IGNORE INTO finding_figure_duplicates (
+                   finding_id, canonical_finding_id, metric, observation_period, value, created_at
+               ) VALUES (?, ?, ?, ?, ?, ?)""",
+            (finding_id, canonical_finding_id, metric, period, value,
+             datetime.now(timezone.utc).isoformat()),
+        )
+        duplicates.append({
+            "metric": metric,
+            "observation_period": period,
+            "value": value,
+            "canonical_finding_id": canonical_finding_id,
+        })
+    return duplicates
+
+
 def store_webpage_finding(finding: dict[str, Any], provenance: dict | None = None) -> dict[str, str | int]:
     """Store an extracted finding unless its canonical URL already exists."""
     provenance = provenance or {"submission_type": "manual", "discovery_source": "manual"}
@@ -1187,8 +1276,10 @@ def store_webpage_finding(finding: dict[str, Any], provenance: dict | None = Non
                 classification,
             ),
         )
+        duplicate_figures = _record_duplicate_figures(conn, cursor.lastrowid, finding)
         return {"status": "stored", "id": cursor.lastrowid,
-                "source_classification": classification}
+                "source_classification": classification,
+                "duplicate_figures": duplicate_figures}
 
 
 def list_webpage_findings() -> list[dict[str, Any]]:

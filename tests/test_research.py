@@ -55,14 +55,14 @@ class ResearchTests(unittest.TestCase):
         updates = list(BossAgent(self.skills, providers or {'tavily': lambda c: rows}).run(self.settings))
         return store.list_candidates(updates[-1][0])
 
-    def test_reject_summary_is_advisory_and_article_is_still_processed(self):
+    def test_irrelevant_summary_stops_before_retrieval(self):
         self.summary_decision = ReviewDecision(decision='irrelevant', reason='Opinion only')
         row = self.run_boss([candidate()])[0]
-        self.assertEqual(row['status'], 'complete')
+        self.assertEqual(row['status'], 'excluded_summary')
         self.assertEqual(row['summary_reason'], 'Opinion only')
-        self.fetch.assert_called_once()
-        self.full_review.assert_called_once()
-        self.extract.assert_called_once()
+        self.fetch.assert_not_called()
+        self.full_review.assert_not_called()
+        self.extract.assert_not_called()
         self.compare.assert_not_called()
 
     def test_forced_url_reaches_secondary_review_and_stops_when_rejected(self):

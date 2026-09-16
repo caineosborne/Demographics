@@ -1419,7 +1419,11 @@ Retrieved page text:
                         request_size=len(str(extraction_messages)), error=exc, request=extraction_messages)
         raise
     if result is None:
-        report_activity("[Research agent] low-effort extraction returned no structured result; retrying medium")
+        # Automatic medium-effort retries are intentionally disabled.  They
+        # made the run slower and privileged repeated extraction over
+        # independent corroboration.  Preserve the no-data outcome instead.
+        report_activity("[Research agent] low-effort extraction returned no structured result; retries are disabled")
+        result = RelevantResult(title='', url=article_url, source='', site_seen='')
         validation = {'status': 'needs_review', 'issues': ['Low-effort extraction returned no structured result.']}
     else:
         if not isinstance(result, RelevantResult):
@@ -1431,41 +1435,6 @@ Retrieved page text:
         # when another useful metric remains. Explicit reviewer edits are handled
         # permissively by the manual draft service.
         validation = validate_extracted_result(result)
-    low_effort_result = result
-    low_effort_validation = validation
-    if (result is None or has_numeric_evidence_without_value(result.model_dump(mode="json"))
-            or has_demographic_summary_without_metrics(result.model_dump(mode="json"))
-            or (has_useful_numeric_datapoint(result.model_dump(mode="json"))
-            and validation.get("status") != "validated")):
-        report_activity("[Research agent] low-effort extraction found partial or unclear data; retrying medium")
-        started = perf_counter()
-        try:
-            retry_messages = extraction_retry_messages(extraction_messages, result)
-            report_llm_request('extraction_medium_retry', retry_messages)
-            result = invoke_llm_with_timeout('extraction_medium_retry', research_llm_medium, retry_messages)
-            report_llm_call('extraction_medium_retry', result, elapsed=perf_counter() - started,
-                            request_size=len(str(retry_messages)), request=retry_messages)
-        except Exception as exc:
-            report_llm_call('extraction_medium_retry', elapsed=perf_counter() - started,
-                            request_size=len(str(retry_messages)), error=exc, request=retry_messages)
-            raise
-        if result is None:
-            error = RuntimeError("Medium-effort extraction returned no structured result.")
-            report_llm_call('extraction_medium_retry', elapsed=perf_counter() - started,
-                            request_size=len(str(extraction_messages)), error=error, request=extraction_messages)
-            raise error
-        if not isinstance(result, RelevantResult):
-            result = RelevantResult.model_validate(result)
-        result.url = article_url
-        normalize_extracted_result(result, page_text, provenance)
-        validation = validate_extracted_result(result)
-        # A retry is allowed to improve a partial extraction, but it must not
-        # erase a usable low-effort result by returning an empty schema.
-        if (low_effort_result is not None
-                and has_useful_numeric_datapoint(low_effort_result.model_dump(mode="json"))
-                and not has_useful_numeric_datapoint(result.model_dump(mode="json"))):
-            result = low_effort_result
-            validation = low_effort_validation
     result.extraction_prompt_version = EXTRACTION_PROMPT_VERSION
     result.extraction_rule_version = EXTRACTION_RULE_VERSION
     provenance.update({
@@ -1611,7 +1580,11 @@ def research_agent(state: State):
                         request_size=len(str(extraction_messages)), error=exc, request=extraction_messages)
         raise
     if result is None:
-        report_activity("[Research agent] low-effort extraction returned no structured result; retrying medium")
+        # See ``extract_from_page_text``: retries are deliberately disabled
+        # so that independent sources, rather than repeated model passes,
+        # provide corroboration over time.
+        report_activity("[Research agent] low-effort extraction returned no structured result; retries are disabled")
+        result = RelevantResult(title='', url=requested_url or '', source='', site_seen='')
         validation = {'status': 'needs_review', 'issues': ['Low-effort extraction returned no structured result.']}
     else:
         if not isinstance(result, RelevantResult):
@@ -1624,44 +1597,6 @@ def research_agent(state: State):
         validation = validate_extracted_result(
             result, retain_rejected_metrics=bool(provenance.get('permission_first_bulk'))
         )
-    low_effort_result = result
-    low_effort_validation = validation
-    if (result is None or has_numeric_evidence_without_value(result.model_dump(mode="json"))
-            or has_demographic_summary_without_metrics(result.model_dump(mode="json"))
-            or (has_useful_numeric_datapoint(result.model_dump(mode="json"))
-            and validation.get("status") != "validated")):
-        report_activity("[Research agent] low-effort extraction found partial or unclear data; retrying medium")
-        started = perf_counter()
-        try:
-            retry_messages = extraction_retry_messages(extraction_messages, result)
-            report_llm_request('extraction_medium_retry', retry_messages)
-            result = invoke_llm_with_timeout('extraction_medium_retry', research_llm_medium, retry_messages)
-            report_llm_call('extraction_medium_retry', result, elapsed=perf_counter() - started,
-                            request_size=len(str(retry_messages)), request=retry_messages)
-        except Exception as exc:
-            report_llm_call('extraction_medium_retry', elapsed=perf_counter() - started,
-                            request_size=len(str(retry_messages)), error=exc, request=retry_messages)
-            raise
-        if result is None:
-            error = RuntimeError("Medium-effort extraction returned no structured result.")
-            report_llm_call('extraction_medium_retry', elapsed=perf_counter() - started,
-                            request_size=len(str(extraction_messages)), error=error, request=extraction_messages)
-            raise error
-        if not isinstance(result, RelevantResult):
-            result = RelevantResult.model_validate(result)
-        if fetched_urls:
-            result.url = fetched_urls[-1]
-        normalize_extracted_result(result, retrieved_page_text, provenance)
-        validation = validate_extracted_result(
-            result, retain_rejected_metrics=bool(provenance.get('permission_first_bulk'))
-        )
-        # Keep a usable low-effort extraction when the retry returns an empty
-        # schema. A retry should improve evidence, never discard it.
-        if (low_effort_result is not None
-                and has_useful_numeric_datapoint(low_effort_result.model_dump(mode="json"))
-                and not has_useful_numeric_datapoint(result.model_dump(mode="json"))):
-            result = low_effort_result
-            validation = low_effort_validation
     if isinstance(result, RelevantResult):
         # Keep versions in both the structured audit payload and provenance so
         # manual and automatic callers can compare later extraction runs.
@@ -1732,34 +1667,10 @@ def research_agent(state: State):
                 "reason": "No useful numeric demographic data points; finding was not saved.",
             },
         }
+    # Discovery stores source observations only.  WPP lookup and comparison
+    # happen in the graph/analysis layer when an observation is plotted.
     comparison = None
     un_data = []
-    if (state.get("provenance") or {}).get("submission_type") == "automatic":
-        # Automatic findings use the same deterministic UN comparison as the
-        # manual path, after geography/period normalization and before the
-        # finding is written.  A comparison-provider failure must not discard
-        # otherwise useful numeric source evidence.
-        try:
-            comparison_started = perf_counter()
-            compared = compare_to_un({"result": result, "storage": {"status": "validated"}})
-            report_activity(f"[Compare to UN] completed in {round(perf_counter() - comparison_started, 2)}s")
-            comparison = compared.get("comparison")
-            un_data = compared.get("un_data") or []
-            finding["comparison"] = comparison.model_dump(mode="json") if comparison else None
-            finding["un_data"] = un_data
-            bounds_issue = bulk_un_bounds_issue(comparison) if permission_first_bulk else None
-            if bounds_issue:
-                report_activity(f"[Compare to UN] excluded bulk article: {bounds_issue}")
-                return {
-                    "messages": new_messages,
-                    "result": result,
-                    "storage": {"status": "excluded_un_bounds", "reason": bounds_issue},
-                    "comparison": comparison,
-                    "un_data": un_data,
-                }
-        except Exception as exc:
-            report_activity(f"[Compare to UN] failed after {round(perf_counter() - comparison_started, 2)}s: {exc}")
-            report_activity(f"[Compare to UN] automatic comparison unavailable: {exc}")
     storage = store_webpage_finding(finding, provenance=state.get("provenance"))
     report_activity(f"[Research agent] finding storage: {storage['status']}")
     return {"messages": new_messages, "result": result, "storage": storage,

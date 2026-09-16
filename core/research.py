@@ -778,11 +778,19 @@ class BossAgent:
                         summary_batch_seconds=batch_seconds, summary_batch_size=len(batch),
                     )
                     yield run_id, f'Summary decision candidate #{candidate_id}: {decision.decision.upper()} — {decision.reason} — {url}'
-                    # Summary review is advisory. A snippet cannot reliably
-                    # establish source attribution, especially for secondary
-                    # publishers such as OWID. Every discovered article gets a
-                    # page review and structured extraction; definitive
-                    # exclusions happen after page evidence is available.
+                    # Summary review is the first retrieval gate.  An
+                    # ``unclear`` decision is deliberately retained for the
+                    # secondary page review; an explicit ``irrelevant``
+                    # decision is terminal for automatic discovery.
+                    if decision.decision == 'irrelevant' and not candidate.get('force_review'):
+                        store.update_candidate(
+                            candidate_id,
+                            status='excluded_summary',
+                            full_reason=decision.reason or 'Excluded by the summary review.',
+                        )
+                        record_outcome('excluded_summary')
+                        yield run_id, f'Candidate #{candidate_id}: excluded after summary review — {url}'
+                        continue
                     to_process.append((candidate_id, candidate, url, decision))
 
                 tavily_pages, tavily_failures, tavily_seconds = {}, {}, None
@@ -991,6 +999,19 @@ class BossAgent:
                             'status': storage_status,
                             'message': storage.get('reason') or extraction_payload.get('summary') or storage_status,
                         })
+                        duplicate_figures = storage.get('duplicate_figures') or []
+                        if duplicate_figures:
+                            store.log_event(run_id, {
+                                'event': 'duplicate_figures',
+                                'candidate_id': candidate_id,
+                                'url': retrieval_url,
+                                'duplicate_figures': duplicate_figures,
+                                'message': f'{len(duplicate_figures)} duplicate figure(s) retained as corroborating evidence.',
+                            })
+                            yield run_id, (
+                                f'Candidate #{candidate_id}: logged {len(duplicate_figures)} duplicate figure(s) '
+                                'as corroborating evidence'
+                            )
                         yield run_id, f'Candidate #{candidate_id}: extraction finished in {extraction_seconds}s: {storage_status} — {retrieval_url}'
                         extraction_versions = {
                             'extraction_prompt_version': extraction_payload.get(
