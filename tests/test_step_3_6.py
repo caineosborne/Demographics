@@ -59,6 +59,22 @@ class Step36ResearchControlsTests(unittest.TestCase):
         self.assertEqual(row['outcome'], 'error')
         self.assertEqual(row['next_eligible_at'], '2026-10-14T00:00:00+00:00')
 
+    def test_country_queue_accepts_per_country_retry_dates(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(tools, 'DB_PATH', Path(directory) / 'research.sqlite'):
+            research_store.upsert_country_hunt_queue([
+                {'iso3': 'JPN', 'label': 'Japan'}, {'iso3': 'AUS', 'label': 'Australia'},
+            ])
+            research_store.mark_country_hunt_run('run-1', ['JPN', 'AUS'])
+            research_store.finish_country_hunt_queue(
+                'run-1', outcomes_by_iso3={'JPN': 'finding_ready', 'AUS': 'error'},
+                successful_iso3s={'JPN'},
+                clear_successful_iso3s={'AUS'},
+                next_eligible_by_iso3={'JPN': '2026-10-14T00:00:00+00:00', 'AUS': '2026-09-15T00:00:00+00:00'},
+            )
+            rows = {row['iso3']: row for row in research_store.list_country_hunt_queue()}
+        self.assertEqual(rows['JPN']['next_eligible_at'], '2026-10-14T00:00:00+00:00')
+        self.assertEqual(rows['AUS']['next_eligible_at'], '2026-09-15T00:00:00+00:00')
+
     def test_recovering_orphaned_worker_interrupts_linked_country_queue(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(
             tools, 'DB_PATH', Path(directory) / 'research.sqlite'

@@ -517,6 +517,15 @@ def initialise_findings_table() -> None:
             CREATE INDEX IF NOT EXISTS idx_finding_figure_duplicates_finding
             ON finding_figure_duplicates(finding_id)
         """)
+        figure_duplicates_migrated = conn.execute(
+            "SELECT 1 FROM findings_schema_migrations WHERE name = 'figure_duplicate_audit_v1'"
+        ).fetchone()
+        if not figure_duplicates_migrated:
+            _backfill_duplicate_figures(conn)
+            conn.execute(
+                "INSERT INTO findings_schema_migrations(name, applied_at) VALUES (?, ?)",
+                ('figure_duplicate_audit_v1', datetime.now(timezone.utc).isoformat()),
+            )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS finding_actions (
                 id INTEGER PRIMARY KEY,
@@ -913,10 +922,15 @@ def source_rule_for_url(url: str) -> dict[str, Any] | None:
                AND match_value = ?""", (canonical_url,),
         ).fetchone()
         if row is None:
-            row = conn.execute(
+            domain_rules = conn.execute(
                 """SELECT * FROM source_rules WHERE enabled = 1 AND match_type = 'domain'
-                   AND match_value = ?""", (domain,),
-            ).fetchone()
+                   ORDER BY LENGTH(match_value) DESC"""
+            ).fetchall()
+            row = next(
+                (candidate for candidate in domain_rules
+                 if domain == candidate['match_value'] or domain.endswith('.' + candidate['match_value'])),
+                None,
+            )
     return dict(row) if row is not None else None
 
 
@@ -1140,12 +1154,17 @@ def _figure_keys(finding: dict[str, Any]) -> list[tuple[str, str, float]]:
     for metric, statistic in (finding.get("statistics") or {}).items():
         if not isinstance(statistic, dict) or statistic.get("value") is None:
             continue
-        period = str(
-            statistic.get("measured_period")
-            or statistic.get("period_start")
-            or finding.get("effective_date")
-            or ""
-        ).strip()
+        period_start = str(statistic.get("period_start") or "").strip()
+        period_end = str(statistic.get("period_end") or "").strip()
+        if period_start and period_end:
+            period = f"{period_start}/{period_end}"
+        else:
+            period = " ".join(str(
+                statistic.get("measured_period")
+                or period_start
+                or finding.get("effective_date")
+                or ""
+            ).split()).casefold()
         if not period:
             continue
         try:
@@ -1154,6 +1173,34 @@ def _figure_keys(finding: dict[str, Any]) -> list[tuple[str, str, float]]:
             continue
         figures.append((str(metric), period, value))
     return figures
+
+
+def _backfill_duplicate_figures(conn: sqlite3.Connection) -> None:
+    """Reconcile pre-audit findings into the duplicate-figure audit table."""
+    rows = conn.execute(
+        "SELECT id, finding_json FROM webpage_findings ORDER BY id"
+    ).fetchall()
+    prior_figures: dict[tuple[str, str, str, float], int] = {}
+    recorded_at = datetime.now(timezone.utc).isoformat()
+    for finding_id, payload in rows:
+        try:
+            finding = json.loads(payload)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        country_iso3 = str(finding.get("geography_iso3") or "").strip().upper()
+        if not country_iso3:
+            continue
+        for metric, period, value in _figure_keys(finding):
+            key = (metric, period, country_iso3, value)
+            canonical_finding_id = prior_figures.setdefault(key, finding_id)
+            if canonical_finding_id == finding_id:
+                continue
+            conn.execute(
+                """INSERT OR IGNORE INTO finding_figure_duplicates (
+                       finding_id, canonical_finding_id, metric, observation_period, value, created_at
+                   ) VALUES (?, ?, ?, ?, ?, ?)""",
+                (finding_id, canonical_finding_id, metric, period, value, recorded_at),
+            )
 
 
 def _record_duplicate_figures(conn: sqlite3.Connection, finding_id: int,

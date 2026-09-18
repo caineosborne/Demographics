@@ -9,6 +9,21 @@ from data import tools
 
 
 class ResearchServiceTests(unittest.TestCase):
+    def test_country_hunt_freshness_uses_the_reported_period_not_storage_time(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            tools, 'DB_PATH', Path(directory) / 'test.sqlite'
+        ):
+            stale = tools.store_webpage_finding({
+                'url': 'https://example.test/stale', 'geography': 'Anguilla', 'geography_iso3': 'AIA',
+                'statistics': {'population': {'value': 6_922, 'measured_period': '1991'}},
+            })
+            recent = tools.store_webpage_finding({
+                'url': 'https://example.test/recent', 'geography': 'Anguilla', 'geography_iso3': 'AIA',
+                'statistics': {'population': {'value': 16_000, 'measured_period': '2025'}},
+            })
+            self.assertFalse(research_services._country_hunt_finding_is_recent({'finding_id': stale['id']}))
+            self.assertTrue(research_services._country_hunt_finding_is_recent({'finding_id': recent['id']}))
+
     def test_orphaned_worker_job_is_interrupted_and_its_lock_is_released(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(
             tools, 'DB_PATH', Path(directory) / 'test.sqlite'
@@ -32,6 +47,8 @@ class ResearchServiceTests(unittest.TestCase):
         self.assertEqual(settings['categories'][0]['country_iso3'], 'JPN')
         self.assertIn('Japan', settings['categories'][0]['query'])
         self.assertEqual(settings['categories'][0]['topic'], 'general')
+        self.assertIn('ourworldindata.org', settings['categories'][0]['exclude_domains'])
+        self.assertNotIn('wikipedia.org', settings['categories'][0]['exclude_domains'])
 
     def test_country_hunt_allows_the_user_to_choose_news(self):
         with patch.object(research_services, '_country_context', return_value={'iso3': 'JPN', 'label': 'Japan'}), \

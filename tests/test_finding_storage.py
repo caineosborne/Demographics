@@ -79,6 +79,13 @@ class FindingStorageTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM webpage_findings").fetchone()[0], 2)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM finding_legacy_duplicates").fetchone()[0], 0)
 
+    def test_domain_source_rule_covers_subdomains(self):
+        tools.add_source_rule('domain', 'example.test', 'exclude', note='Publisher is out of scope')
+        self.assertEqual(
+            tools.source_rule_for_url('https://news.example.test/article')['action'],
+            'exclude',
+        )
+
     def test_same_effective_date_and_population_at_another_url_is_stored(self):
         tools.store_webpage_finding(self.finding)
         duplicate = {**self.finding, "url": "https://mirror.test/report"}
@@ -112,6 +119,24 @@ class FindingStorageTests(unittest.TestCase):
                 "FROM finding_figure_duplicates"
             ).fetchone()
         self.assertEqual(row, (repeated["id"], original["id"], "total_fertility_rate", "2025", 1.14))
+
+    def test_repeated_figure_matches_equivalent_period_wording(self):
+        first = {
+            **self.finding, "geography": "Australia", "geography_iso3": "AUS",
+            "statistics": {"net_overseas_migration": {
+                "value": 306000, "measured_period": "year ended June 30, 2025",
+                "period_start": "2024-07-01", "period_end": "2025-06-30",
+            }},
+        }
+        original = tools.store_webpage_finding(first)
+        repeated = tools.store_webpage_finding({
+            **first, "url": "https://mirror.test/report",
+            "statistics": {"net_overseas_migration": {
+                **first["statistics"]["net_overseas_migration"],
+                "measured_period": "Year ended June 30, 2025",
+            }},
+        })
+        self.assertEqual(repeated["duplicate_figures"][0]["canonical_finding_id"], original["id"])
 
     def test_missing_population_does_not_exclude_different_url(self):
         finding = {**self.finding, "statistics": {"population": {"value": None}}}

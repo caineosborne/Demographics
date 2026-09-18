@@ -520,21 +520,25 @@ def upsert_country_hunt_queue(items, *, job_id=None):
 
 
 def finish_country_hunt_queue(run_id, *, outcome='complete', outcomes_by_iso3=None,
-                              successful_iso3s=None, next_eligible_at=None):
+                              successful_iso3s=None, next_eligible_at=None,
+                              next_eligible_by_iso3=None, clear_successful_iso3s=None):
     """Close queue rows after a run, retaining the last successful finding."""
     initialise()
     successes = {str(value).upper() for value in (successful_iso3s or [])}
+    cleared_successes = {str(value).upper() for value in (clear_successful_iso3s or [])}
     timestamp = now()
     with tools.get_connection() as conn:
         rows = conn.execute('SELECT iso3 FROM country_hunt_queue WHERE last_run_id = ?',
                             (str(run_id),)).fetchall()
         for (iso3,) in rows:
             row_outcome = (outcomes_by_iso3 or {}).get(iso3, outcome)
+            row_next_eligible_at = (next_eligible_by_iso3 or {}).get(iso3, next_eligible_at)
             conn.execute(
                 '''UPDATE country_hunt_queue SET outcome=?, last_successful_finding_at=CASE
-                   WHEN ? THEN ? ELSE last_successful_finding_at END,
+                   WHEN ? THEN ? WHEN ? THEN NULL ELSE last_successful_finding_at END,
                    next_eligible_at=?, last_run_id=?, updated_at=? WHERE iso3=?''',
-                (row_outcome, iso3 in successes, timestamp, next_eligible_at, str(run_id), timestamp, iso3),
+                (row_outcome, iso3 in successes, timestamp, iso3 in cleared_successes,
+                 row_next_eligible_at, str(run_id), timestamp, iso3),
             )
 
 

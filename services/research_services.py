@@ -23,6 +23,17 @@ from core.research import BossAgent, CRITERIA, DEFAULT_SETTINGS, SearchSettings
 
 HUNT_QUERY = ('"{country}" (population OR births OR deaths OR fertility OR migration) '
               '("official statistics" OR "statistical office" census OR release)')
+COUNTRY_HUNT_SUCCESS_MAX_AGE_DAYS = 5 * 365
+COUNTRY_HUNT_RETRY_AFTER_ERROR_DAYS = 1
+COUNTRY_HUNT_RETRY_AFTER_NO_FINDING_DAYS = 7
+# These publishers were confirmed in the reviewed run as WPP/UN republishers.
+# Keep Wikipedia out: it remains eligible as a secondary, non-exclusive source.
+COUNTRY_HUNT_UN_REPUBLISHER_DOMAINS = (
+    'geofactbook.com',
+    'ourworldindata.org',
+    'populationpyramids.org',
+    'worldpopulationreview.com',
+)
 
 # Search providers benefit from the common article name as well as the WPP
 # canonical label. Keep this allow-list deliberately small and deterministic;
@@ -38,6 +49,36 @@ COUNTRY_HUNT_ALIASES = {
 def _country_hunt_query_name(label: str) -> str:
     aliases = COUNTRY_HUNT_ALIASES.get(label, ())
     return '" OR "'.join((label, *aliases))
+
+
+def _country_hunt_finding_is_recent(candidate: dict[str, Any]) -> bool:
+    """Return whether a stored hunt finding has a recent reported period."""
+    finding_id = candidate.get('finding_id')
+    if not finding_id:
+        return False
+    try:
+        finding = tools.get_webpage_finding(int(finding_id))
+    except (TypeError, ValueError):
+        return False
+    dates = [str(finding.get('effective_date') or '')]
+    for statistic in (finding.get('statistics') or {}).values():
+        if not isinstance(statistic, dict):
+            continue
+        dates.append(str(statistic.get('period_end') or ''))
+        dates.append(str(statistic.get('measured_period') or ''))
+    latest = None
+    for value in dates:
+        try:
+            if len(value) == 4:
+                observed = datetime(int(value), 12, 31, tzinfo=timezone.utc)
+            else:
+                observed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                if observed.tzinfo is None:
+                    observed = observed.replace(tzinfo=timezone.utc)
+            latest = max(latest, observed) if latest else observed
+        except (TypeError, ValueError):
+            continue
+    return bool(latest and latest >= _now_datetime() - timedelta(days=COUNTRY_HUNT_SUCCESS_MAX_AGE_DAYS))
 
 _jobs: dict[str, dict[str, Any]] = {}
 _jobs_lock = threading.RLock()
@@ -374,6 +415,7 @@ def country_hunt_settings(context: dict[str, str], max_results: int = 12,
             'query': HUNT_QUERY.format(country=_country_hunt_query_name(context['label'])),
             'topic': topic, 'max_results': int(max_results),
             'time_range': 'year', 'search_depth': 'advanced',
+            'exclude_domains': list(COUNTRY_HUNT_UN_REPUBLISHER_DOMAINS),
             'country_iso3': context['iso3'],
         }],
         reddit_enabled=False, max_candidates=int(max_results), max_per_domain=5,
@@ -396,6 +438,7 @@ def start_bulk_country_hunt(country_iso3s: list[str], *, max_results: int = 5,
         'query': HUNT_QUERY.format(country=_country_hunt_query_name(context['label'])),
         'topic': topic, 'max_results': int(max_results),
         'time_range': 'year', 'search_depth': 'advanced',
+        'exclude_domains': list(COUNTRY_HUNT_UN_REPUBLISHER_DOMAINS),
         'country_iso3': context['iso3'],
     } for context in contexts]
     settings = SearchSettings(
@@ -516,24 +559,40 @@ def _start_research(
                 successes = {
                     str(candidate.get('extracted_iso3') or '').upper()
                     for candidate in candidates
-                    if candidate.get('status') == 'complete' and candidate.get('extracted_iso3')
+                    if candidate.get('status') == 'complete'
+                    and candidate.get('extracted_iso3')
+                    and _country_hunt_finding_is_recent(candidate)
                 }
                 outcome_by_iso3 = {}
+                next_eligible_by_iso3 = {}
                 for iso3 in queue_iso3s:
                     scoped = [candidate for candidate in candidates
                               if str(candidate.get('country_iso3') or '').upper() == iso3]
                     if iso3 in successes:
                         outcome_by_iso3[iso3] = 'finding_ready'
+                        next_eligible_by_iso3[iso3] = (_now_datetime() + timedelta(days=31)).isoformat()
                     elif any(candidate.get('status') == 'error' for candidate in scoped):
                         outcome_by_iso3[iso3] = 'error'
+                        next_eligible_by_iso3[iso3] = (_now_datetime() + timedelta(
+                            days=COUNTRY_HUNT_RETRY_AFTER_ERROR_DAYS
+                        )).isoformat()
+                    elif any(candidate.get('status') == 'complete' for candidate in scoped):
+                        outcome_by_iso3[iso3] = 'stale_finding'
+                        next_eligible_by_iso3[iso3] = (_now_datetime() + timedelta(
+                            days=COUNTRY_HUNT_RETRY_AFTER_NO_FINDING_DAYS
+                        )).isoformat()
                     elif scoped:
                         outcome_by_iso3[iso3] = scoped[0].get('status') or job_status
+                        next_eligible_by_iso3[iso3] = (_now_datetime() + timedelta(
+                            days=COUNTRY_HUNT_RETRY_AFTER_NO_FINDING_DAYS
+                        )).isoformat()
                     else:
                         outcome_by_iso3[iso3] = 'no_candidate'
+                        next_eligible_by_iso3[iso3] = None
                 research_store.finish_country_hunt_queue(
                     holder['run_id'], outcomes_by_iso3=outcome_by_iso3,
                     successful_iso3s=successes,
-                    next_eligible_at=(_now_datetime() + timedelta(days=31)).isoformat(),
+                    next_eligible_by_iso3=next_eligible_by_iso3,
                 )
             research_store.update_job(lock_id, status=job_status, result={'run_id': holder['run_id']})
         except StopIteration:

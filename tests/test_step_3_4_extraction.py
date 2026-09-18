@@ -232,7 +232,7 @@ class Step34ExtractionTests(unittest.TestCase):
         medium.invoke.assert_not_called()
         self.assertIsNone(response['result'].statistics.population)
 
-    def test_medium_extraction_retries_for_partial_or_unclear_low_data(self):
+    def test_partial_or_unclear_low_data_does_not_use_medium_model_retry(self):
         partial = RelevantResult(
             title='Article', url='https://example.test/article', source='Example', site_seen='example.test',
             statistics={
@@ -264,8 +264,34 @@ class Step34ExtractionTests(unittest.TestCase):
                 'Japan population was 124.6 million in 2023.', partial.url,
                 {'submission_type': 'manual'},
             )
-        medium.invoke.assert_called_once()
+        medium.invoke.assert_not_called()
         self.assertEqual(response['result'].statistics.population.value, 124_600_000)
+
+    def test_summary_only_half_year_counts_receive_one_low_effort_correction(self):
+        incomplete = RelevantResult(
+            title='Japan vital statistics', url='https://example.test/japan', source='Example', site_seen='example.test',
+            geography='Japan', geography_iso3='JPN',
+            summary='Japan reported 342,068 births, 778,982 deaths, and a natural decrease of 436,914 in January to June 2026.',
+        )
+        corrected = RelevantResult(
+            title='Japan vital statistics', url='https://example.test/japan', source='Example', site_seen='example.test',
+            geography='Japan', geography_iso3='JPN',
+            statistics={'births': {
+                'value': 342_068, 'source_value': 342_068, 'metric_type': 'births',
+                'evidence_excerpt': '342,068 births in January to June 2026',
+                'measured_period': 'January to June 2026', 'time_period': 'six months',
+                'period_start': '2026-01-01', 'period_end': '2026-06-30',
+            }},
+        )
+        with patch('core.agents.research_llm') as low:
+            low.invoke.side_effect = [incomplete, corrected]
+            response = __import__('core.agents', fromlist=['extract_from_page_text']).extract_from_page_text(
+                'Japan reported 342,068 births in January to June 2026.', incomplete.url,
+                {'submission_type': 'manual'},
+            )
+        self.assertEqual(low.invoke.call_count, 2)
+        self.assertAlmostEqual(response['result'].statistics.births.value, 342_068 * 365 / 181)
+        self.assertEqual(response['result'].statistics.births.source_value, 342_068)
 
     def test_valid_observation_reaches_storage_with_versions(self):
         positive = self.examples[-1]["finding"]

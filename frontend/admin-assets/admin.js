@@ -999,7 +999,7 @@ function findingMetricValues(item) {
     const value = metricValues[metric] ?? metricValues[metric === "net_migration" ? "net_overseas_migration" : metric]
       ?? item[metric === "total_fertility_rate" ? "TFR" : (metric === "net_migration" ? "Net migration" : findingMetricFields[metric])];
     return `${label}: ${value === null || value === undefined || value === "" ? "value not returned" : value}`;
-  }).join("; ") || "—";
+  }) || [];
 }
 
 function appendFindingIdLink(cell, item) {
@@ -1017,7 +1017,7 @@ function renderFindingRows(body, items) {
   (items || []).forEach((item) => {
     const row = document.createElement("tr");
     row.tabIndex = 0;
-    row.innerHTML = `<td></td><th class="country-cell"></th><td>${escapeHtml(item["Effective date"] || "—")}</td><td>${escapeHtml(item["Processed date"] || item["Extracted at (UTC)"] || "—")}</td><td>${escapeHtml(findingMetricValues(item))}</td><td>${escapeHtml(item["Source classification"] || "—")}</td><td>${escapeHtml(item.Source || item["Quoted source"] || "—")}</td><td class="source-cell"></td><td><button class="quiet-button row-edit-button" type="button">Edit</button></td>`;
+    row.innerHTML = `<td></td><th class="country-cell"></th><td>${escapeHtml(item["Effective date"] || "—")}</td><td>${escapeHtml(item["Processed date"] || item["Extracted at (UTC)"] || "—")}</td><td class="finding-metrics"></td><td>${escapeHtml(item["Source classification"] || "—")}</td><td>${escapeHtml(item.Source || item["Quoted source"] || "—")}</td><td class="source-cell"></td><td><button class="quiet-button row-edit-button" type="button">Edit</button></td>`;
     const countryLink = document.createElement("a");
     countryLink.href = `#graphs?iso3=${encodeURIComponent(item.ISO3 || "")}`;
     countryLink.textContent = item.Country || item.ISO3 || "—";
@@ -1026,6 +1026,14 @@ function renderFindingRows(body, items) {
     row.querySelector(".country-cell").append(countryLink);
     const iso = document.createElement("small"); iso.textContent = item.ISO3 || ""; row.querySelector(".country-cell").append(iso);
     appendFindingIdLink(row.firstElementChild, item);
+    const metricCell = row.querySelector(".finding-metrics");
+    const metricValues = findingMetricValues(item);
+    if (!metricValues.length) metricCell.textContent = "—";
+    metricValues.forEach((value) => {
+      const line = document.createElement("span");
+      line.textContent = value;
+      metricCell.append(line);
+    });
     row.lastElementChild.append(safeSourceLink(item["Webpage URL"] || item["Canonical URL"] || item.url || item.canonical_url));
     row.querySelector(".row-edit-button").addEventListener("click", (event) => { event.stopPropagation(); openFindingEditor(item.ID ?? item.id); });
     body.append(row);

@@ -76,6 +76,13 @@ The measured_period is required for every populated metric. Resolve relative
 phrases such as "last year" using the article publication date. Never use the
 current date or search-run date. Do not mistake a year for the metric value.
 
+An explicit partial-period national count is still a usable metric. For example,
+January–June births, deaths, or natural change must be populated with the
+source-reported value, its date range, and its partial cadence; do not move it
+only into the summary or comments. The deterministic processing step will
+annualize a documented count-flow period for comparison and retain the original
+source value and period.
+
 Populate only whole-country figures that are observed, reported, estimated, or
 provisional. Leave a metric null when it is a projection or forecast, a subgroup
 or regional figure, ambiguous, or only a percentage, rate, change, currency
@@ -1435,6 +1442,18 @@ Retrieved page text:
         # when another useful metric remains. Explicit reviewer edits are handled
         # permissively by the manual draft service.
         validation = validate_extracted_result(result)
+        if has_demographic_summary_without_metrics(result.model_dump(mode='json')):
+            report_activity("[Research agent] correcting summary-only numeric extraction")
+            correction_messages = extraction_retry_messages(extraction_messages, result)
+            correction_started = perf_counter()
+            corrected = invoke_llm_with_timeout('extraction_correction', research_llm, correction_messages)
+            report_llm_call('extraction_correction', corrected, elapsed=perf_counter() - correction_started,
+                            request_size=len(str(correction_messages)), request=correction_messages)
+            if corrected is not None:
+                result = corrected if isinstance(corrected, RelevantResult) else RelevantResult.model_validate(corrected)
+                result.url = article_url
+                normalize_extracted_result(result, page_text, provenance)
+                validation = validate_extracted_result(result)
     result.extraction_prompt_version = EXTRACTION_PROMPT_VERSION
     result.extraction_rule_version = EXTRACTION_RULE_VERSION
     provenance.update({
@@ -1597,6 +1616,20 @@ def research_agent(state: State):
         validation = validate_extracted_result(
             result, retain_rejected_metrics=bool(provenance.get('permission_first_bulk'))
         )
+        if has_demographic_summary_without_metrics(result.model_dump(mode='json')):
+            report_activity("[Research agent] correcting summary-only numeric extraction")
+            correction_messages = extraction_retry_messages(extraction_messages, result)
+            correction_started = perf_counter()
+            corrected = invoke_llm_with_timeout('extraction_correction', research_llm, correction_messages)
+            report_llm_call('extraction_correction', corrected, elapsed=perf_counter() - correction_started,
+                            request_size=len(str(correction_messages)), request=correction_messages)
+            if corrected is not None:
+                result = corrected if isinstance(corrected, RelevantResult) else RelevantResult.model_validate(corrected)
+                result.url = fetched_urls[-1] if fetched_urls else (requested_url or result.url)
+                normalize_extracted_result(result, retrieved_page_text, provenance)
+                validation = validate_extracted_result(
+                    result, retain_rejected_metrics=bool(provenance.get('permission_first_bulk'))
+                )
     if isinstance(result, RelevantResult):
         # Keep versions in both the structured audit payload and provenance so
         # manual and automatic callers can compare later extraction runs.
