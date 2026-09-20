@@ -735,6 +735,7 @@ def _run_manual(job_id: str, url: str, context: dict[str, str] | None, compare: 
         if not review_before_store and isinstance(finding_for_storage, dict):
             stored = tools.store_webpage_finding(finding_for_storage, provenance={
                 'submission_type': 'manual', 'discovery_source': 'api',
+                **(extracted.get('provenance') or {}),
             })
             result['storage'] = stored
             finding_id = stored.get('id') or stored.get('existing_id')

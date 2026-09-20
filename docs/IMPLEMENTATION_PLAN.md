@@ -31,11 +31,13 @@
   - [x] **Step 3.8 — Rebuild the graphs and reporting**
   - [ ] **Step 3.9 — Cut over and retire Gradio**
   - [ ] **Step 3.10 — Simplify the post-Gradio codebase**
-- [ ] **Phase 4 — Add the claims and conflict framework**
-  - [ ] **Step 4.1 — Introduce source documents, claims, and observation groups**
-  - [ ] **Step 4.2 — Migrate legacy records and extend backend contracts**
-  - [ ] **Step 4.3 — Add conflict review and provenance views**
-  - [ ] **Step 4.4 — Verify claim and graph semantics**
+- [x] **Phase 4 — Add the claims and conflict framework**
+  - [x] **Step 4.1 — Introduce source documents, claims, and observation groups**
+  - [x] **Step 4.2 — Add automated source assessment and capped evidence scores**
+  - [x] **Step 4.3 — Migrate legacy records and extend backend contracts**
+  - [x] **Step 4.4 — Add primary-selection, graph, and provenance views**
+  - [x] **Step 4.5 — Add exceptional manual overrides and conflict review**
+  - [x] **Step 4.6 — Verify claim, score, and graph semantics**
 - [ ] **Phase 5 — Deploy the private admin application to Railway**
   - [ ] **Step 5.1 — Provision and migrate the Postgres application database**
   - [ ] **Step 5.2 — Package the filtered WPP database**
@@ -1137,7 +1139,18 @@ control flow is sufficient.
 
 ## Phase 4 — Add the claims and conflict framework
 
+**Completion note — 2026-09-20:** Phase 4 is complete. The application now
+stores source documents, claims, observation groups, and value clusters;
+assesses new sources automatically; applies deterministic 5/2/1/0 evidence
+points with class caps; preserves and migrates legacy findings; exposes the
+three graph modes with provenance and conflict state; and supports audited,
+reversible manual overrides. The Phase 4 acceptance tests cover scoring caps,
+legacy preservation, unit conversion and rounding, conflicts, graph filtering,
+metric removal, grouping actions, and override undo semantics.
+
 ### Step 4.1 — Introduce source documents, claims, and observation groups
+
+**Status: complete (2026-09-20).**
 
 Build this alongside retained legacy findings rather than changing their
 meaning in place:
@@ -1147,34 +1160,180 @@ meaning in place:
   definition.
 - **Observation group:** claims for the same country, metric, period, unit,
   and definition.
+- **Value cluster:** claims in one observation group whose values are equal or
+  differ only through an accepted rounding or unit conversion. Materially
+  different values remain separate clusters within the observation group and
+  constitute a conflict.
 
 Canonical URL uniqueness remains the only rule that rejects a source document
 outright. Different URLs create additional documents and claims. Do not invent
 missing legacy corroborating sources.
 
-### Step 4.2 — Migrate legacy records and extend backend contracts
+Keep source provenance separate from display disposition:
+
+- Source classification is `official_publisher`, `secondary_attributed`,
+  `secondary_unattributed`, or `legacy_unreviewed`.
+- Display disposition is `primary`, `approved_secondary`, or `rejected`.
+- Decision origin records whether the effective classification or disposition
+  came from automated assessment, a configured source rule, migration, or a
+  manual override.
+
+An official publisher is not automatically the primary value, and selecting a
+secondary source as primary does not relabel it as official.
+
+### Step 4.2 — Add automated source assessment and capped evidence scores
+
+**Status: complete (2026-09-20).**
+
+Automated assessment is the normal operating path. Most claims must become
+usable without waiting for a reviewer:
+
+- Apply an explicit source rule first when one matches. Otherwise have the LLM
+  propose the source classification, underlying named source where available,
+  value-cluster membership, and a concise reason.
+- Make a valid automated proposal effective immediately. Record the model,
+  prompt/rule version, proposed classification, reason, assessment timestamp,
+  and decision origin so the decision remains explainable.
+- Do not ask the LLM to invent an arbitrary numeric score. Map its effective
+  source classification deterministically to points: `official_publisher = 5`,
+  `secondary_attributed = 2`, `secondary_unattributed = 1`, and
+  `legacy_unreviewed = 0`.
+- If an automated classification cannot be produced safely, use
+  `secondary_unattributed` for an otherwise valid new source and retain the
+  reason. Do not hold normal ingestion open for routine human review.
+
+Every distinct canonical source document supporting a value cluster contributes
+points, including multiple news reports covering the same release. Preserve the
+number and identities of all supporting documents, but cap each evidence class
+so repeated secondary coverage cannot overwhelm stronger provenance:
+
+| Evidence class | Points per source document | Maximum contribution |
+|---|---:|---:|
+| Official publisher | 5 | 10 |
+| Attributed secondary | 2 | 4 |
+| Unattributed secondary or aggregator | 1 | 2 |
+| Legacy unreviewed | 0 | 0 |
+
+For each value cluster expose the uncapped `raw_points`, capped
+`effective_points`, and `supporting_document_count`. The effective score has a
+maximum of 16. Use supporting-document count as a deterministic tie-breaker
+after effective score, not as a way around the caps. Score competing value
+clusters separately; never add support for materially different values into one
+score. A score of at least 7 marks a cluster as strong evidence and makes it
+eligible for prominent display and automated primary selection, but does not
+erase or resolve a conflicting cluster.
+
+Store automated values and effective values separately, or retain equivalent
+audit metadata, so a later manual override never destroys the original
+assessment. Do not reuse the existing discovery-provider `score` field; that is
+a search relevance value with a different meaning.
+
+### Step 4.3 — Migrate legacy records and extend backend contracts
+
+**Status: complete (2026-09-20).**
 
 - Migrate retained Phase 1 findings without changing their source evidence.
-- Associate new claims with observation groups.
+- Create Phase 4 claims for existing links with classification
+  `legacy_unreviewed`, zero evidence points, migration decision origin, and an
+  active non-rejected disposition. They remain visible in the default graph
+  view and can be classified later, but migration must not manufacture an
+  automated historical assessment.
+- Leave every existing provider/search score and stored source field untouched.
+  The new evidence score is a separate field and meaning.
+- Associate new claims with observation groups and value clusters.
 - Retain materially different values as conflicts; harmless rounding and unit
   conversion are not conflicts.
 - Keep WPP divergence separate from disagreement between article claims.
 - Extend the FastAPI contracts without breaking the existing finding views.
+  Return stable source-document, claim, observation-group, and value-cluster
+  IDs together with raw points, effective points, supporting-document count,
+  effective classification, display disposition, decision origin, and conflict
+  state.
+- Reconcile migrated source, finding, claim, metric, and graph counts before
+  making the Phase 4 read path authoritative.
 
-### Step 4.3 — Add conflict review and provenance views
+### Step 4.4 — Add primary-selection, graph, and provenance views
 
-- Display corroborating sources under one observation.
-- Provide a conflict queue with values, periods, definitions, and source
-  classifications side by side.
-- Allow preferred-claim selection, equivalent/rounded marking, separation of
-  definitions, and claim rejection.
-- Add graph controls for corroboration and unresolved conflicts.
+**Status: complete (2026-09-20).**
 
-### Step 4.4 — Verify claim and graph semantics
+- Display one marker per value cluster and show all supporting source documents
+  when it is expanded.
+- Use the strongest contributing source class for marker shape/colour, one of
+  three bounded marker sizes for evidence bands (`0–4`, `5–6`, and `7+`), and
+  a visible halo or warning treatment for an unresolved conflict. Marker size
+  must not scale continuously with the raw score.
+- Include raw points, effective points, source counts, source links, automated
+  reasoning, decision origin, and conflict state in the accessible marker
+  detail and tooltip.
+- Select the automated primary within an observation group by effective score,
+  then supporting-document count, then a stable ID tie-break. A manually chosen
+  primary always takes precedence. A cluster below 7 may still be the best
+  available automated primary, but it must remain visibly labelled as limited
+  or supported rather than strong.
+- Keep materially conflicting clusters visible in the default graph even when
+  one scores at least 7. Equivalent claims collapse into their shared marker;
+  a reviewed rejection, not the score alone, removes a conflicting cluster
+  from ordinary graph views.
+
+Provide three graph modes:
+
+1. **Show all** is the default and displays every non-rejected primary,
+   approved-secondary, and automatically accepted cluster, including unresolved
+   conflicts.
+2. **Show primary** displays one effective primary per observation group,
+   whether it was selected automatically or manually.
+3. **Show primary + approved secondary** displays the effective primary plus
+   non-rejected secondary clusters with an approved disposition.
+
+Rejected claims remain stored and available in audit/review views but are not
+plotted in the three ordinary graph modes. WPP remains a separately labelled
+reference series and never contributes evidence points.
+
+### Step 4.5 — Add exceptional manual overrides and conflict review
+
+**Status: complete (2026-09-20).**
+
+The product must not require routine user review, but it must make intervention
+possible when automation is wrong or a conflict matters:
+
+- Provide a conflict queue with competing values, periods, definitions, source
+  classifications, score breakdowns, and automated reasons side by side.
+- Allow an administrator to change source classification, override effective
+  points, select a different primary, approve a secondary, mark claims as
+  equivalent/rounded, separate definitions, or reject a claim.
+- Manual confirmation of a claim does not automatically award 5 points. It
+  receives 5 only when its effective source classification is confirmed or
+  changed to `official_publisher`; primary selection and source provenance stay
+  independent.
+- Every override records the prior and new values, administrator, timestamp,
+  reason, and affected score/display result. Overrides remain reversible.
+- Recalculate the affected value cluster and graph response immediately after
+  an override without rewriting unrelated claims or their automated history.
+
+### Step 4.6 — Verify claim, score, and graph semantics
+
+**Status: complete (2026-09-20).**
+
+- Test deterministic 5/2/1/0 mapping, per-class caps, the maximum score of 16,
+  the threshold at exactly 7, tie-breaking, and recomputation after overrides.
+- Test that ten attributed reports are all retained and counted while their
+  class contribution remains capped at 4, and that adding a direct official
+  source produces an effective score of 9 rather than an uncapped total.
+- Test equivalent rounding/unit conversion, material conflicts, and separation
+  of claims with different periods or definitions.
+- Test all three graph modes, unresolved-conflict visibility, rejected-claim
+  exclusion, marker evidence bands, source expansion, and WPP separation.
+- Test that legacy claims begin at zero, remain visible in **Show all**, can be
+  manually classified later, and do not alter any pre-existing search score.
+- Reconcile source-document, claim, group, cluster, and graph counts against the
+  retained legacy findings and exercise rollback before retiring the legacy
+  graph response.
 
 **Complete when:** every claim is traceable to a source document, legacy data
-is preserved, and graphs distinguish corroboration, conflicts, and the WPP
-reference series correctly.
+and existing search scores are preserved, new claims are assessed and displayed
+without routine human review, capped evidence scores are reproducible, manual
+overrides are auditable, and graphs distinguish corroboration, conflicts,
+review dispositions, and the WPP reference series correctly.
 
 ## Phase 5 — Deploy the private admin application to Railway
 

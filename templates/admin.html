@@ -98,6 +98,7 @@
               <fieldset class="graph-metric-options"><legend>Metrics</legend><label><input type="checkbox" data-graph-metric="population" checked> Population</label><label><input type="checkbox" data-graph-metric="births" checked> Births</label><label><input type="checkbox" data-graph-metric="deaths" checked> Deaths</label><label><input type="checkbox" data-graph-metric="natural_change"> Natural change</label><label><input type="checkbox" data-graph-metric="net_migration"> Net migration</label><label><input type="checkbox" data-graph-metric="total_fertility_rate"> Total fertility rate</label></fieldset>
             </div>
             <fieldset class="graph-release-options"><legend>Datasets shown</legend><span class="dataset-option"><i class="dataset-bullet current" aria-hidden="true"></i> WPP 2024 (current)</span><label class="dataset-option"><input type="checkbox" data-graph-revision="2017" checked> <i class="dataset-bullet alternate" aria-hidden="true"></i> WPP 2017</label><input type="checkbox" data-graph-revision="2022" hidden aria-hidden="true"><input type="checkbox" data-graph-revision="2012" hidden aria-hidden="true"></fieldset>
+            <fieldset class="graph-evidence-options"><legend>Evidence shown</legend><label><input type="radio" name="graph_mode" value="show_all" data-graph-mode checked> Show all</label><label><input type="radio" name="graph_mode" value="primary" data-graph-mode> Show primary</label><label><input type="radio" name="graph_mode" value="primary_approved_secondary" data-graph-mode> Show primary + approved secondary</label><p class="help">Show all is the default. Rejected claims stay stored for audit but are never plotted.</p></fieldset>
             <div class="review-actions"><button class="primary-button" type="button" data-load-graphs>Draw graphs</button><button class="quiet-button" type="button" data-refresh-graphs>Refresh series</button><output class="graph-datapoint-count" data-graph-datapoint-count aria-live="polite">Choose a country to count selected datapoints.</output></div>
             <div class="inline-state" data-graph-state data-state="empty" role="status" aria-live="polite"><span class="state-pill">Empty</span><span data-state-message>Choose a country to load the reporting series.</span></div>
           </article>
@@ -109,6 +110,12 @@
             <div class="card-heading"><div><p class="kicker">Filtered evidence</p><h3 data-graph-findings-title>Country findings</h3></div><span class="help">Select a point, finding ID, or Edit to open the record.</span></div>
             <div class="table-wrap"><table class="audit-table findings-table"><thead><tr><th>ID</th><th>Country</th><th>Effective</th><th>Processed</th><th>Metrics &amp; values</th><th>Source class</th><th>Source</th><th>URL</th><th>Action</th></tr></thead><tbody data-graph-findings-body><tr><td colspan="9">Load a series to see findings for this country.</td></tr></tbody></table></div>
             <div class="coverage-note" data-graph-findings-status role="status">Load a series to see findings for this country.</div>
+          </article>
+          <article class="card graph-findings-card" data-claims-review-card hidden>
+            <div class="card-heading"><div><p class="kicker">Phase 4 review</p><h3>Evidence and conflict queue</h3></div><span class="help">Automation is effective immediately; use these controls only when an override is needed.</span></div>
+            <label class="check-field claim-audit-toggle"><input type="checkbox" data-claims-include-rejected> Include rejected claims in this audit view (never plotted)</label>
+            <div class="table-wrap"><table class="audit-table claims-table"><thead><tr><th>Claim</th><th>Value / period</th><th>Evidence</th><th>Classification</th><th>Disposition</th><th>Grouping</th><th>Override</th></tr></thead><tbody data-claims-body><tr><td colspan="7">Load a series to see claims.</td></tr></tbody></table></div>
+            <div class="coverage-note" data-claims-status role="status">Claims are loaded with the selected country.</div>
           </article>
         </section>
 

@@ -1,5 +1,5 @@
 import { ApiError, createApiClient } from "./api-client.js";
-import { GRAPH_METRICS, findingMetricValue, renderMetricGraph } from "./graph-renderer.js";
+import { GRAPH_METRICS, GRAPH_MODES, findingMetricValue, renderMetricGraph, graphValueClusters, visibleGraphClusters } from "./graph-renderer.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -169,6 +169,7 @@ const graphState = {
   payloadByCountry: new Map(),
   hiddenByCountry: new Map(),
   currentCountry: "",
+  mode: GRAPH_MODES.show_all,
   requestNumber: 0,
 };
 
@@ -210,7 +211,7 @@ function renderGraphs(payload) {
   const alternateRevisions = selectedGraphRevisions();
   const hidden = graphState.hiddenByCountry.get(payload.iso3) || new Set();
   grid.replaceChildren();
-  metrics.forEach((metric) => renderMetricGraph(grid, payload, metric, { hiddenFindingIds: hidden, alternateRevisions, onFindingSelect: reviewGraphFinding }));
+  metrics.forEach((metric) => renderMetricGraph(grid, payload, metric, { hiddenFindingIds: hidden, alternateRevisions, graphMode: graphState.mode, onFindingSelect: reviewGraphFinding }));
 }
 
 function graphDataPointCounts(payload, metrics, alternateRevisions) {
@@ -224,9 +225,10 @@ function graphDataPointCounts(payload, metrics, alternateRevisions) {
   const alternate = alternateRevisions.reduce((count, revision) => (
     count + countReferenceRows(payload.alternate_releases?.[revision])
   ), 0);
-  const article = (payload.findings || []).reduce((count, item) => (
-    count + metrics.filter((metric) => findingMetricValue(item.finding, metric) !== null).length
-  ), 0);
+  const clusters = graphValueClusters(payload);
+  const article = clusters.length
+    ? visibleGraphClusters(payload, graphState.mode).filter((cluster) => metrics.includes(cluster.metric)).length
+    : (payload.findings || []).reduce((count, item) => count + metrics.filter((metric) => findingMetricValue(item.finding, metric) !== null).length, 0);
   return { reference, alternate, article, total: reference + alternate + article };
 }
 
@@ -274,9 +276,12 @@ async function loadGraphs({ force = false } = {}) {
       if (requestNumber !== graphState.requestNumber) return;
       renderGraphFindingsError(error);
     }
+    loadClaimReview(iso3, Boolean($(`[data-claims-include-rejected]`)?.checked));
     const findingCount = (payload.findings || []).length;
     const releaseCount = selectedGraphRevisions().filter((revision) => Array.isArray(payload.alternate_releases?.[revision]) && payload.alternate_releases[revision].length).length;
-    $(`[data-graph-summary]`).textContent = `${payload.country || iso3}: ${payload.historic?.length || 0} WPP historical rows, ${payload.forecast?.length || 0} WPP forecast rows, ${findingCount} stored finding${findingCount === 1 ? "" : "s"}${releaseCount ? `, ${releaseCount} alternate release${releaseCount === 1 ? "" : "s"}` : ""}. Hidden points are browser-only; durable edits reload this series.`;
+    const clusterCount = graphValueClusters(payload).length;
+    const modeLabel = graphState.mode === GRAPH_MODES.primary ? "primary" : graphState.mode === GRAPH_MODES.primary_approved_secondary ? "primary + approved secondary" : "all evidence";
+    $(`[data-graph-summary]`).textContent = `${payload.country || iso3}: ${payload.historic?.length || 0} WPP historical rows, ${payload.forecast?.length || 0} WPP forecast rows, ${clusterCount || findingCount} evidence cluster${(clusterCount || findingCount) === 1 ? "" : "s"} (${modeLabel})${releaseCount ? `, ${releaseCount} alternate release${releaseCount === 1 ? "" : "s"}` : ""}. Rejected claims remain stored but are not plotted.`;
     setState(state, "completed", `Series ready for ${payload.country || iso3}.`);
   } catch (error) {
     if (requestNumber !== graphState.requestNumber) return;
@@ -1165,6 +1170,88 @@ function renderGraphFindingsError(error) {
   if (status) status.textContent = "The country findings table could not be loaded.";
 }
 
+function renderClaimReviewRows(items) {
+  const card = $(`[data-claims-review-card]`);
+  const body = $(`[data-claims-body]`);
+  if (!card || !body) return;
+  card.hidden = false;
+  body.replaceChildren();
+  if (!items.length) {
+    body.innerHTML = '<tr><td colspan="7" class="empty-cell">No Phase 4 claims are available for this country.</td></tr>';
+    return;
+  }
+  items.forEach((claim) => {
+    const row = document.createElement("tr");
+    if (claim.display_disposition === "rejected") row.className = "claim-rejected-row";
+    const identity = document.createElement("td");
+    identity.textContent = `#${claim.id} · ${claim.metric || "metric"}`;
+    if (Number(claim.conflicting_cluster_count || 0) > 0) { const conflict = document.createElement("span"); conflict.className = "status-pill failed"; conflict.textContent = " conflict"; identity.append(conflict); }
+    const value = document.createElement("td"); value.textContent = `${claim.value ?? "—"} · ${claim.observation_period || "period not specified"}`;
+    const evidence = document.createElement("td"); evidence.textContent = `${claim.effective_points ?? 0} effective · ${claim.raw_points ?? 0} raw · ${claim.supporting_document_count ?? 0} source${Number(claim.supporting_document_count) === 1 ? "" : "s"}`;
+    const classification = document.createElement("td");
+    const classSelect = document.createElement("select"); classSelect.className = "claim-review-select";
+    [["official_publisher", "Official publisher"], ["secondary_attributed", "Secondary · named source"], ["secondary_unattributed", "Secondary · unnamed source"], ["legacy_unreviewed", "Legacy · unreviewed"]].forEach(([valueOption, label]) => classSelect.append(new Option(label, valueOption)));
+    classSelect.value = claim.source_classification || "secondary_unattributed"; classification.append(classSelect);
+    const disposition = document.createElement("td");
+    const dispositionSelect = document.createElement("select"); dispositionSelect.className = "claim-review-select";
+    [["primary", "Primary"], ["approved_secondary", "Approved secondary"], ["rejected", "Rejected"]].forEach(([valueOption, label]) => dispositionSelect.append(new Option(label, valueOption)));
+    dispositionSelect.value = claim.display_disposition || "approved_secondary"; disposition.append(dispositionSelect);
+    const grouping = document.createElement("td");
+    const groupingSelect = document.createElement("select"); groupingSelect.className = "claim-review-select"; groupingSelect.setAttribute("aria-label", `Grouping action for claim ${claim.id}`);
+    [["", "No grouping change"], ["merge_equivalent", "Mark equivalent / rounded"], ["separate_definition", "Separate definition"]].forEach(([valueOption, label]) => groupingSelect.append(new Option(label, valueOption)));
+    const peerIds = document.createElement("input"); peerIds.type = "text"; peerIds.placeholder = "Peer claim IDs"; peerIds.className = "claim-review-peer-ids"; peerIds.setAttribute("aria-label", `Peer claim IDs for claim ${claim.id}`);
+    const definition = document.createElement("input"); definition.type = "text"; definition.placeholder = "Definition (if separate)"; definition.className = "claim-review-definition"; definition.setAttribute("aria-label", `Definition for claim ${claim.id}`);
+    grouping.append(groupingSelect, peerIds, definition);
+    const actions = document.createElement("td"); actions.className = "claim-review-actions";
+    const points = document.createElement("input"); points.type = "number"; points.min = "0"; points.max = "16"; points.step = "1"; points.value = claim.manual_points ?? ""; points.placeholder = "points"; points.className = "claim-review-points"; points.setAttribute("aria-label", `Manual points for claim ${claim.id}`);
+    const reason = document.createElement("input"); reason.type = "text"; reason.placeholder = "Reason (optional)"; reason.className = "claim-review-reason"; reason.setAttribute("aria-label", `Override reason for claim ${claim.id}`);
+    const save = document.createElement("button"); save.type = "button"; save.className = "quiet-button"; save.textContent = "Save";
+    save.addEventListener("click", async () => {
+      save.disabled = true;
+      try {
+        const selectedAction = groupingSelect.value || null;
+        const peers = peerIds.value.split(",").map((value) => Number(value.trim())).filter((value) => Number.isInteger(value) && value > 0);
+        if (selectedAction && !peers.length) throw new Error("Enter at least one peer claim ID for a grouping action.");
+        const reasonText = reason.value.trim() || null;
+        const body = { actor: "local", reason: reasonText };
+        if (selectedAction) {
+          body.action = selectedAction;
+          body.peer_claim_ids = peers;
+          if (selectedAction === "separate_definition" && definition.value.trim()) body.definition = definition.value.trim();
+        } else {
+          body.classification = classSelect.value;
+          body.disposition = dispositionSelect.value;
+          body.points = points.value === "" ? null : Number(points.value);
+        }
+        await api.request(`/api/v1/admin/claims/${encodeURIComponent(claim.id)}`, { method: "PUT", body });
+        if ($(`[data-graph-country]`)?.value) await loadGraphs({ force: true });
+      } catch (error) { showGlobalError(error); save.disabled = false; }
+    });
+    const undo = document.createElement("button"); undo.type = "button"; undo.className = "quiet-button"; undo.textContent = "Undo"; undo.disabled = claim.decision_origin !== "manual_override";
+    undo.addEventListener("click", async () => {
+      undo.disabled = true;
+      try { await api.request(`/api/v1/admin/claims/${encodeURIComponent(claim.id)}/undo`, { method: "POST", body: { actor: "local", reason: "Reverted in graph review." } }); await loadGraphs({ force: true }); }
+      catch (error) { showGlobalError(error); undo.disabled = false; }
+    });
+    actions.append(points, reason, save, undo);
+    row.append(identity, value, evidence, classification, disposition, grouping, actions); body.append(row);
+  });
+  const status = $(`[data-claims-status]`); if (status) status.textContent = `${items.length} claim${items.length === 1 ? "" : "s"} returned. Conflicts are marked inline; overrides are audited and reversible.`;
+}
+
+async function loadClaimReview(iso3, includeRejected = false) {
+  const card = $(`[data-claims-review-card]`);
+  if (!card || !iso3 || fixtureMode) return;
+  try {
+    const include = includeRejected ? "&include_rejected=true" : "";
+    const payload = await api.request(`/api/v1/claims?iso3=${encodeURIComponent(iso3)}&mode=all${include}`);
+    renderClaimReviewRows(payload.items || []);
+  } catch (error) {
+    card.hidden = false;
+    const status = $(`[data-claims-status]`); if (status) status.textContent = `Claims could not be loaded: ${error.message}`;
+  }
+}
+
 async function loadCoverage() {
   const body = $(`[data-coverage-body]`); if (!body) return;
   const emptyBody = $(`[data-coverage-empty-body]`); const emptyCount = $(`[data-coverage-empty-count]`);
@@ -1410,6 +1497,16 @@ function wire() {
   window.addEventListener("hashchange", selectViewFromLocation);
   $$(`[data-country-control]`).forEach((select) => select.addEventListener("change", () => updateSelected(select)));
   $$(`[data-graph-metric], [data-graph-revision]`).forEach((input) => input.addEventListener("change", () => loadGraphs({ force: true })));
+  $$(`[data-graph-mode]`).forEach((input) => input.addEventListener("change", () => {
+    if (!input.checked) return;
+    graphState.mode = input.value || GRAPH_MODES.show_all;
+    const payload = graphState.payloadByCountry.get(graphState.currentCountry);
+    if (payload) { renderGraphs(payload); renderGraphDataPointCount(payload, selectedGraphMetrics(), selectedGraphRevisions()); }
+  }));
+  $(`[data-claims-include-rejected]`)?.addEventListener("change", () => {
+    const iso3 = $(`[data-graph-country]`)?.value || "";
+    if (iso3) loadClaimReview(iso3, Boolean($(`[data-claims-include-rejected]`)?.checked));
+  });
   $(`[data-load-graphs]`)?.addEventListener("click", () => loadGraphs({ force: true }));
   $(`[data-refresh-graphs]`)?.addEventListener("click", () => loadGraphs({ force: true }));
   $(`[data-analysis-form]`)?.addEventListener("submit", (event) => { event.preventDefault(); submitJob(event.currentTarget, "analysis"); });

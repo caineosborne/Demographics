@@ -13,7 +13,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from core import research_store
+from data import phase4_claims
 from data.tools import (
+    get_connection,
+    initialise_findings_table,
     get_wpp_connection,
     list_webpage_findings,
     normalise_country_name,
@@ -242,10 +245,68 @@ def _finding_graph_rows(iso3: str) -> list[dict[str, Any]]:
     return rows
 
 
+def _phase4_graph_clusters(iso3: str) -> list[dict[str, Any]]:
+    """Return one additive graph record per value cluster with source expansion."""
+    with get_connection() as conn:
+        claims = phase4_claims.list_claims(conn, iso3=iso3)
+    grouped: dict[int, dict[str, Any]] = {}
+    for claim in claims:
+        cluster_id = int(claim["value_cluster_id"])
+        cluster = grouped.setdefault(cluster_id, {
+            "id": cluster_id,
+            "observation_group_id": claim["observation_group_id"],
+            # The stored extraction key is historical; the graph API uses the
+            # public metric name consumed by the renderer.
+            "metric": "net_migration" if claim["metric"] == "net_overseas_migration" else claim["metric"],
+            "source_metric": claim["metric"],
+            # Graph coordinates use the canonical base-unit value.  The raw
+            # extraction value/unit remain present for provenance and tooltip
+            # rendering so a "1 million" claim plots at 1,000,000.
+            "value": claim["normalized_value"],
+            "graph_value": claim["normalized_value"],
+            "raw_value": claim["value"],
+            "period": claim["observation_period"],
+            "unit": claim["unit"],
+            "definition": claim["definition"],
+            "raw_points": claim["raw_points"],
+            "effective_points": claim["effective_points"],
+            "supporting_document_count": claim["supporting_document_count"],
+            "display_disposition": claim["display_disposition"],
+            "decision_origin": claim["decision_origin"],
+            "automated_reason": claim["automated_reason"],
+            "effective_classification": claim["source_classification"],
+            "conflicting_cluster_count": claim["conflicting_cluster_count"],
+            "source_documents": [],
+            "claim_ids": [],
+        })
+        cluster["claim_ids"].append(claim["id"])
+        cluster["source_documents"].append({
+            "id": claim["source_document_id"],
+            "url": claim["source_url"],
+            "canonical_url": claim["canonical_url"],
+            "classification": claim["source_classification"],
+            "display_disposition": claim["display_disposition"],
+        })
+        # Preserve the strongest classification and the effective disposition
+        # when multiple documents support one cluster.
+        rank = {"official_publisher": 4, "secondary_attributed": 3,
+                "secondary_unattributed": 2, "legacy_unreviewed": 1}
+        if rank.get(claim["source_classification"], 0) > rank.get(cluster["effective_classification"], 0):
+            cluster["effective_classification"] = claim["source_classification"]
+        if claim["display_disposition"] == "primary":
+            cluster["display_disposition"] = "primary"
+    for cluster in grouped.values():
+        cluster["unresolved_conflict"] = cluster["conflicting_cluster_count"] > 0
+    return sorted(grouped.values(), key=lambda row: (row["metric"], row["period"], row["id"]))
+
+
 def graph_series(iso3: str, metrics: list[str] | None = None, revisions: list[int] | None = None) -> dict[str, Any]:
     """Assemble the raw series consumed by the current graph renderer."""
 
     iso3 = _strict_iso3(iso3)
+    # The graph endpoint may be the first process touching a fresh local DB;
+    # initialise the additive claim projection before opening its read path.
+    initialise_findings_table()
     canonical = normalise_country_name(iso3)
     selected = list(metrics or sorted(GRAPH_METRICS))
     invalid = sorted(set(selected) - GRAPH_METRICS)
@@ -260,6 +321,7 @@ def graph_series(iso3: str, metrics: list[str] | None = None, revisions: list[in
         "forecast": forecast,
         "alternate_releases": _release_series(iso3, revisions),
         "findings": _finding_graph_rows(iso3),
+        "value_clusters": _phase4_graph_clusters(iso3),
     }
 
 

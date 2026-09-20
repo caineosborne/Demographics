@@ -43,6 +43,151 @@ const SOURCE_CLASS_MARKERS = Object.freeze({
   legacy_unreviewed: "star",
 });
 
+// Evidence is deliberately shown in bounded bands.  A score is not a second
+// quantitative axis and must never make a marker appear infinitely more
+// important than another one.
+export const EVIDENCE_BANDS = Object.freeze({
+  limited: { label: "Limited evidence", min: 0, max: 4, size: 7 },
+  supported: { label: "Supported evidence", min: 5, max: 6, size: 9 },
+  strong: { label: "Strong evidence", min: 7, max: Infinity, size: 11 },
+});
+
+export const GRAPH_MODES = Object.freeze({
+  show_all: "show_all",
+  primary: "primary",
+  primary_approved_secondary: "primary_approved_secondary",
+});
+
+const SOURCE_CLASS_ORDER = Object.freeze({
+  official_publisher: 4,
+  secondary_attributed: 3,
+  secondary_unattributed: 2,
+  legacy_unreviewed: 1,
+});
+
+function sourceClassWeight(sourceClass) {
+  return SOURCE_CLASS_ORDER[sourceClass] || 0;
+}
+
+export function evidenceBand(points) {
+  const score = number(points) ?? 0;
+  if (score >= EVIDENCE_BANDS.strong.min) return EVIDENCE_BANDS.strong;
+  if (score >= EVIDENCE_BANDS.supported.min) return EVIDENCE_BANDS.supported;
+  return EVIDENCE_BANDS.limited;
+}
+
+function clusterId(cluster, index) {
+  return String(cluster?.id ?? cluster?.value_cluster_id ?? cluster?.cluster_id ?? `cluster-${index}`);
+}
+
+function clusterObservationId(cluster) {
+  return String(cluster?.observation_group_id ?? cluster?.observation_id ?? cluster?.group_id ?? cluster?.observation_group?.id ?? "ungrouped");
+}
+
+function clusterValue(cluster, metric) {
+  const metricValue = cluster?.values?.[metric] ?? cluster?.metrics?.[metric];
+  const candidate = metricValue && typeof metricValue === "object" ? metricValue.value : metricValue;
+  return number(cluster?.value ?? cluster?.claim_value ?? cluster?.metric_value ?? candidate ?? cluster?.claim?.value);
+}
+
+function clusterDate(cluster) {
+  return cluster?.effective_date || cluster?.date || cluster?.period_start || cluster?.period || cluster?.observation_date
+    || cluster?.claim?.effective_date || cluster?.claim?.period || cluster?.observation_group?.period;
+}
+
+function clusterDocuments(cluster) {
+  const documents = cluster?.source_documents || cluster?.documents || cluster?.sources || cluster?.supporting_documents;
+  if (Array.isArray(documents)) return documents;
+  if (Array.isArray(cluster?.claims)) return cluster.claims;
+  return [];
+}
+
+function strongestClusterSourceClass(cluster) {
+  const direct = cluster?.effective_classification || cluster?.source_class || cluster?.source_type || cluster?.classification;
+  const classes = [direct, ...clusterDocuments(cluster).map((document) => document?.effective_classification || document?.source_class || document?.source_type || document?.classification)]
+    .filter(Boolean);
+  return classes.sort((left, right) => sourceClassWeight(right) - sourceClassWeight(left))[0] || "legacy_unreviewed";
+}
+
+function clusterEvidencePoints(cluster) {
+  return number(cluster?.effective_points ?? cluster?.evidence_points ?? cluster?.score) ?? 0;
+}
+
+function clusterRawPoints(cluster) {
+  return number(cluster?.raw_points ?? cluster?.raw_evidence_points ?? cluster?.evidence_points ?? cluster?.effective_points) ?? 0;
+}
+
+function clusterSourceCount(cluster) {
+  return number(cluster?.supporting_document_count ?? cluster?.source_count ?? clusterDocuments(cluster).length) ?? 0;
+}
+
+function clusterIsRejected(cluster) {
+  return String(cluster?.display_disposition || cluster?.disposition || "").toLowerCase() === "rejected"
+    || String(cluster?.status || "").toLowerCase() === "rejected";
+}
+
+function clusterIsPrimary(cluster) {
+  return cluster?.is_primary === true || cluster?.primary === true || String(cluster?.display_disposition || cluster?.disposition || "").toLowerCase() === "primary";
+}
+
+function clusterIsApprovedSecondary(cluster) {
+  return String(cluster?.display_disposition || cluster?.disposition || "").toLowerCase() === "approved_secondary";
+}
+
+function clusterSortKey(cluster, index) {
+  return String(clusterId(cluster, index));
+}
+
+/**
+ * Flatten both the Phase 4 graph contract and the legacy findings contract.
+ * The adapter is intentionally permissive while API deployments roll forward:
+ * old fixtures continue to render one marker per finding.
+ */
+export function graphValueClusters(payload) {
+  const direct = payload?.value_clusters || payload?.clusters;
+  if (Array.isArray(direct)) return direct;
+  const groups = payload?.observation_groups || payload?.observations;
+  if (Array.isArray(groups)) return groups.flatMap((group) => (group?.value_clusters || group?.clusters || []).map((cluster) => ({ ...cluster, observation_group_id: cluster.observation_group_id ?? group.id, observation_group: cluster.observation_group || group })));
+  return [];
+}
+
+function choosePrimaryCluster(clusters) {
+  return [...clusters].filter((cluster) => !clusterIsRejected(cluster)).sort((left, right) => {
+    const primaryDelta = Number(clusterIsPrimary(right)) - Number(clusterIsPrimary(left));
+    if (primaryDelta) return primaryDelta;
+    const scoreDelta = clusterEvidencePoints(right) - clusterEvidencePoints(left);
+    if (scoreDelta) return scoreDelta;
+    const countDelta = clusterSourceCount(right) - clusterSourceCount(left);
+    if (countDelta) return countDelta;
+    return clusterSortKey(left, 0).localeCompare(clusterSortKey(right, 0));
+  })[0];
+}
+
+function visibleClusters(clusters, mode) {
+  const usable = clusters.filter((cluster) => !clusterIsRejected(cluster));
+  if (!mode || mode === GRAPH_MODES.show_all) return usable;
+  const byGroup = new Map();
+  usable.forEach((cluster) => {
+    const group = clusterObservationId(cluster);
+    if (!byGroup.has(group)) byGroup.set(group, []);
+    byGroup.get(group).push(cluster);
+  });
+  const primaryByGroup = new Map([...byGroup.entries()].map(([group, groupClusters]) => [group, choosePrimaryCluster(groupClusters)]));
+  if (mode === GRAPH_MODES.primary) return [...primaryByGroup.values()].filter(Boolean);
+  return usable.filter((cluster) => cluster === primaryByGroup.get(clusterObservationId(cluster)) || clusterIsApprovedSecondary(cluster));
+}
+
+export function visibleGraphClusters(payload, mode = GRAPH_MODES.show_all) {
+  return visibleClusters(graphValueClusters(payload), mode);
+}
+
+function clusterSourceSummary(cluster) {
+  return clusterDocuments(cluster).map((document) => ({
+    label: document?.title || document?.source || document?.publisher || document?.name || document?.url || document?.source_url || "Source document",
+    url: document?.url || document?.source_url || document?.canonical_url || document?.canonicalUrl || "",
+  }));
+}
+
 const WPP_REVISION_COLORS = Object.freeze({ 2022: "#6f4e9b", 2017: "#3a8d7d", 2012: "#8b6f47" });
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -147,6 +292,36 @@ function findingPoints(findings, metric, hiddenFindingIds) {
   });
 }
 
+function clusterPoints(payload, metric, mode, hiddenFindingIds) {
+  const clusters = visibleGraphClusters(payload, mode);
+  return clusters.flatMap((cluster, index) => {
+    if (cluster?.metric && String(cluster.metric) !== metric) return [];
+    const id = clusterId(cluster, index);
+    const sourceClaimId = Number(cluster?.finding_id ?? cluster?.claim_id ?? cluster?.claim?.finding_id);
+    const x = dateYearPosition(clusterDate(cluster));
+    const value = clusterValue(cluster, metric);
+    if (hiddenFindingIds.has(sourceClaimId) || x === null || value === null) return [];
+    return [{
+      x,
+      y: value * GRAPH_METRICS[metric].scale,
+      id,
+      cluster,
+      sourceClaimId: Number.isFinite(sourceClaimId) ? sourceClaimId : null,
+      sourceType: strongestClusterSourceClass(cluster),
+      rawPoints: clusterRawPoints(cluster),
+      effectivePoints: clusterEvidencePoints(cluster),
+      sourceCount: clusterSourceCount(cluster),
+      documents: clusterSourceSummary(cluster),
+      observationGroupId: clusterObservationId(cluster),
+      isPrimary: clusterIsPrimary(cluster),
+      disposition: cluster?.display_disposition || cluster?.disposition || "automatic",
+      conflict: cluster?.unresolved_conflict !== undefined
+        ? Boolean(cluster.unresolved_conflict)
+        : Boolean(cluster?.conflict || cluster?.conflicting_cluster_count > 0 || cluster?.conflict_state === "unresolved"),
+    }];
+  });
+}
+
 function formatValue(value, metric) {
   return GRAPH_METRICS[metric].scale === 1
     ? value.toLocaleString(undefined, { maximumFractionDigits: 2 })
@@ -183,7 +358,35 @@ function findingTooltipDetails(point, metric) {
   return `Finding #${point.id}\nMetric: ${GRAPH_METRICS[metric].label}\nValue: ${formatValue(point.y, metric)}\nEffective date: ${point.item.effective_date || "No effective date"}\nPeriod: ${period}\nSource: ${sourceName}\nClassification: ${classification}${finding.url || point.item.source_url ? `\nURL: ${finding.url || point.item.source_url}` : ""}`;
 }
 
-function marker(chart, point, markerType, color, metric) {
+function clusterTooltipDetails(point, metric) {
+  const cluster = point.cluster || {};
+  const documents = point.documents.length ? point.documents.map((document) => `${document.label}${document.url ? `\n${document.url}` : ""}`).join("\n") : "No supporting source links returned";
+  const reason = cluster.automated_reason || cluster.assessment_reason || cluster.reason || "No automated reasoning returned";
+  const decisionOrigin = cluster.decision_origin || cluster.source_decision_origin || "automated_assessment";
+  const conflict = point.conflict ? "\nConflict: unresolved" : "\nConflict: none";
+  return `Value cluster ${point.id}\nMetric: ${GRAPH_METRICS[metric].label}\nValue: ${formatValue(point.y, metric)}\nEvidence: ${point.effectivePoints} effective (${point.rawPoints} raw)\nSupporting documents: ${point.sourceCount}\nClassification: ${SOURCE_CLASS_LABELS[point.sourceType] || point.sourceType}\nDisposition: ${point.disposition}\nDecision origin: ${decisionOrigin}${conflict}\nReason: ${reason}\nSources:\n${documents}`;
+}
+
+function marker(chart, point, markerType, color, metric, { onClusterToggle = () => {} } = {}) {
+  if (point.cluster) {
+    const band = evidenceBand(point.effectivePoints);
+    const scale = band.size / 7;
+    const conflictHalo = point.conflict ? svgElement("circle", { cx: 0, cy: 0, r: 11, fill: "none", stroke: "#c44f3f", "stroke-width": 2.5, "stroke-dasharray": "3 2", class: "graph-conflict-halo" }) : null;
+    const markerGroup = svgElement("g", { class: `graph-cluster-marker marker-${markerType} evidence-${band === EVIDENCE_BANDS.strong ? "strong" : band === EVIDENCE_BANDS.supported ? "supported" : "limited"}${point.conflict ? " conflict" : ""}`, tabindex: "0", "data-cluster-id": point.id, role: "button", "aria-label": clusterTooltipDetails(point, metric).replaceAll("\n", " · ") });
+    if (conflictHalo) markerGroup.append(conflictHalo);
+    const content = svgElement("g", { transform: `scale(${scale})` });
+    if (markerType === "diamond") content.append(svgElement("path", { d: "M 0 -7 L 7 0 L 0 7 L -7 0 Z", fill: color, stroke: color, "stroke-width": 1.5 }));
+    else if (markerType === "circle-open") content.append(svgElement("circle", { cx: 0, cy: 0, r: 6, fill: "#fcfdf9", stroke: color, "stroke-width": 2 }));
+    else if (markerType === "star") content.append(svgElement("path", { d: "M 0 -8 L 2.2 -2.5 L 8 -2.5 L 3.2 1 L 5 7 L 0 3.5 L -5 7 L -3.2 1 L -8 -2.5 L -2.2 -2.5 Z", fill: color, stroke: color, "stroke-width": 1.25 }));
+    else content.append(svgElement("path", { d: "M -6 -6 L 6 6 M 6 -6 L -6 6", stroke: color, "stroke-width": 2.25, "stroke-linecap": "round" }));
+    markerGroup.append(content);
+    const title = svgElement("title"); title.textContent = clusterTooltipDetails(point, metric); markerGroup.append(title);
+    markerGroup.setAttribute("transform", `translate(${point.px} ${point.py})`);
+    addTooltipInteractions(markerGroup, chart, clusterTooltipDetails(point, metric));
+    markerGroup.addEventListener("click", () => onClusterToggle(point.id));
+    markerGroup.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onClusterToggle(point.id); } });
+    return markerGroup;
+  }
   const finding = point.item.finding || {};
   const statistic = articleStatistic(finding, metric);
   const sourceName = finding.source || finding.quoted_source || "Source not named";
@@ -269,7 +472,7 @@ export function calculateYAxisExtent(values, scale = 1000) {
 }
 
 /** Render one metric as an accessible, responsive SVG chart. */
-export function renderMetricGraph(container, payload, metric, { hiddenFindingIds = new Set(), alternateRevisions = [], onFindingSelect = () => {} } = {}) {
+export function renderMetricGraph(container, payload, metric, { hiddenFindingIds = new Set(), alternateRevisions = [], graphMode = GRAPH_MODES.show_all, onFindingSelect = () => {} } = {}) {
   const config = GRAPH_METRICS[metric];
   if (!container || !config) return;
   const chart = document.createElement("article"); chart.className = "graph-panel";
@@ -294,8 +497,12 @@ export function renderMetricGraph(container, payload, metric, { hiddenFindingIds
   const alternate = Object.entries(payload.alternate_releases || {})
     .filter(([revision]) => alternateRevisions.includes(revision))
     .flatMap(([revision, rows]) => [{ revision, points: rowPoints(rows, metric) }]);
-  const findings = findingPoints(payload.findings, metric, hiddenFindingIds);
-  const allPoints = [...historic, ...forecast, ...alternate.flatMap((item) => item.points), ...findings];
+  const clusters = clusterPoints(payload, metric, graphMode, hiddenFindingIds);
+  // Once the additive Phase 4 projection is present it is authoritative for
+  // article evidence.  Falling back to findings is kept for old deployments
+  // and fixtures that have not started returning value clusters yet.
+  const findings = graphValueClusters(payload).length ? [] : findingPoints(payload.findings, metric, hiddenFindingIds);
+  const allPoints = [...historic, ...forecast, ...alternate.flatMap((item) => item.points), ...findings, ...clusters];
   if (!allPoints.length) {
     const empty = document.createElement("p"); empty.className = "graph-empty"; empty.textContent = "No observations are available for this metric."; chart.append(empty); container.append(chart); return;
   }
@@ -338,8 +545,30 @@ export function renderMetricGraph(container, payload, metric, { hiddenFindingIds
     const pathTitle = svgElement("title"); pathTitle.textContent = label; path.append(pathTitle); svg.append(path);
     positioned.forEach((point) => referencePoint(svg, chart, point, label, color, metric));
   });
+  const detailId = `graph-sources-${String(payload.iso3 || payload.country || "country").replace(/[^a-z0-9_-]/gi, "-")}-${metric}`;
+  const sourceDetails = document.createElement("div"); sourceDetails.className = "graph-source-details"; sourceDetails.id = detailId;
+  const toggleCluster = (clusterIdValue) => {
+    const detail = [...sourceDetails.querySelectorAll("[data-cluster-details]")].find((item) => item.dataset.clusterDetails === String(clusterIdValue));
+    if (detail) { detail.open = !detail.open; if (detail.open) detail.scrollIntoView({ block: "nearest" }); }
+  };
+  clusters.forEach((point) => {
+    const positioned = { ...point, px: xPosition(point.x), py: yPosition(point.y) };
+    const className = SOURCE_CLASS_MARKERS[point.sourceType] || "cross";
+    const color = SOURCE_CLASS_COLORS[point.sourceType] || SOURCE_CLASS_COLORS.secondary_unattributed;
+    svg.append(marker(chart, positioned, className, color, metric, { onClusterToggle: toggleCluster }));
+    const details = document.createElement("details"); details.className = "graph-cluster-details"; details.dataset.clusterDetails = point.id;
+    const summary = document.createElement("summary"); summary.textContent = `${formatValue(point.y, metric)} · ${point.effectivePoints} evidence points · ${point.sourceCount} source${point.sourceCount === 1 ? "" : "s"}${point.conflict ? " · unresolved conflict" : ""}`; details.append(summary);
+    const metadata = document.createElement("p"); metadata.className = "graph-cluster-metadata"; metadata.textContent = `${SOURCE_CLASS_LABELS[point.sourceType] || point.sourceType} · ${point.disposition} · raw ${point.rawPoints} · ${point.cluster?.decision_origin || "automated_assessment"}`; details.append(metadata);
+    const reason = point.cluster?.automated_reason || point.cluster?.assessment_reason || point.cluster?.reason;
+    if (reason) { const reasonNode = document.createElement("p"); reasonNode.className = "graph-cluster-reason"; reasonNode.textContent = `Assessment: ${reason}`; details.append(reasonNode); }
+    const sources = document.createElement("ul"); sources.className = "graph-source-list";
+    if (point.documents.length) point.documents.forEach((source) => { const item = document.createElement("li"); if (source.url) { const link = document.createElement("a"); link.href = source.url; link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = source.label; item.append(link); } else item.textContent = source.label; sources.append(item); });
+    else { const item = document.createElement("li"); item.textContent = "No supporting source documents returned."; sources.append(item); }
+    details.append(sources); sourceDetails.append(details);
+  });
   findings.forEach((point) => { const positioned = { ...point, px: xPosition(point.x), py: yPosition(point.y) }; const className = SOURCE_CLASS_MARKERS[point.item.source_type] || "cross"; const color = SOURCE_CLASS_COLORS[point.item.source_type] || SOURCE_CLASS_COLORS.secondary_unattributed; const node = marker(chart, positioned, className, color, metric); node.addEventListener("click", () => onFindingSelect(point.id)); node.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onFindingSelect(point.id); } }); svg.append(node); });
   chart.append(svg); container.append(chart);
+  if (clusters.length) chart.append(sourceDetails);
   addLegend(chart, alternate.filter((item) => item.points.length).map((item) => item.revision));
 }
 

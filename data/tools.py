@@ -20,6 +20,9 @@ from langgraph.config import get_stream_writer
 from pypdf import PdfReader
 
 from data.database_config import configured_database_path, configured_wpp_database_path
+from data.phase4_claims import (ensure_schema as ensure_phase4_schema,
+                                 reject_finding_claims, reject_finding_metric_claims,
+                                 sync_finding_claims)
 
 
 DB_PATH = configured_database_path()
@@ -559,6 +562,10 @@ def initialise_findings_table() -> None:
             ON webpage_findings(source_url)
         """)
         _purge_legacy_partial_period_metrics(conn)
+        # Phase 4 is an additive projection.  Keep the extraction table and
+        # its provider/search score untouched while ensuring retained rows have
+        # traceable source documents and zero-point legacy claims.
+        ensure_phase4_schema(conn)
 
 
 def _backfill_canonical_urls(conn: sqlite3.Connection) -> None:
@@ -843,6 +850,7 @@ def delete_and_block_webpage_finding(finding_id: int) -> str:
             (canonical_url,),
         )
         conn.execute("DELETE FROM webpage_findings WHERE id = ?", (finding_id,))
+        reject_finding_claims(conn, finding_id, reason="Underlying finding was removed and blocked.")
         _record_finding_action(conn, finding_id, canonical_url, "removed_and_suppressed")
     return canonical_url
 
@@ -1296,6 +1304,15 @@ def store_webpage_finding(finding: dict[str, Any], provenance: dict | None = Non
             }
 
         classification = source_classification(finding)
+        # A validated LLM assessment is the normal automated path for newly
+        # ingested sources.  Configured rules remain authoritative and are
+        # resolved above; malformed proposals fall back to the deterministic
+        # extraction provenance classifier.
+        proposed = provenance.get("source_assessment")
+        if not (rule and rule.get("action") == "classify") and isinstance(proposed, dict):
+            proposal_classification = proposed.get("classification")
+            if proposal_classification in SOURCE_CLASSES - {"legacy_unreviewed"}:
+                classification = proposal_classification
         finding = {**finding, 'source_classification': classification}
         if classification == 'official_publisher':
             finding['official_source'] = True
@@ -1324,9 +1341,16 @@ def store_webpage_finding(finding: dict[str, Any], provenance: dict | None = Non
             ),
         )
         duplicate_figures = _record_duplicate_figures(conn, cursor.lastrowid, finding)
+        claim_ids = sync_finding_claims(
+            conn, cursor.lastrowid, finding,
+            classification=classification,
+            provenance=provenance,
+            decision_origin='configured_rule' if rule and rule.get('action') == 'classify' else 'automated_assessment',
+        )
         return {"status": "stored", "id": cursor.lastrowid,
                 "source_classification": classification,
-                "duplicate_figures": duplicate_figures}
+                "duplicate_figures": duplicate_figures,
+                "claim_ids": claim_ids}
 
 
 def list_webpage_findings() -> list[dict[str, Any]]:
@@ -1478,6 +1502,7 @@ def delete_webpage_finding(finding_id: int) -> None:
             raise ValueError(f"No stored finding exists with ID {finding_id}.")
         canonical_url = row[1] or canonicalise_source_url(row[0])
         conn.execute("DELETE FROM webpage_findings WHERE id = ?", (finding_id,))
+        reject_finding_claims(conn, finding_id, reason="Underlying finding was removed.")
         _request_automatic_recheck(conn, canonical_url, finding_id)
         _record_finding_action(conn, finding_id, canonical_url, "removed_allow_rerun")
 
@@ -1515,6 +1540,10 @@ def delete_finding_metric(finding_id: int, metric: str) -> None:
         ).fetchone()
         if row is None:
             raise ValueError(f"No stored finding exists with ID {finding_id}.")
+        reject_finding_metric_claims(
+            conn, finding_id, key,
+            reason=f"Metric {metric} was removed from the underlying finding.",
+        )
         _record_finding_action(
             conn, finding_id, row[0] or canonicalise_source_url(row[1]), "metric_removed", metric
         )

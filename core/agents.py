@@ -883,6 +883,35 @@ class RelevantResult(BaseModel):
     extraction_rule_version: Optional[str] = None
 
 
+def source_assessment_from_result(result: RelevantResult, *, stage: str = "extraction_low_effort") -> dict[str, object]:
+    """Convert the extraction model's provenance fields into a scored proposal.
+
+    The extraction LLM already determines whether the page is the producing
+    authority and whether it names an underlying publisher.  Persist that
+    structured judgment as the Phase 4 assessment proposal; the backend maps
+    the class to points deterministically and safely falls back when fields
+    are absent or malformed.
+    """
+    if result.official_source:
+        classification = "official_publisher"
+        reason = "The extraction model identified the page as published by the authority producing the figures."
+    elif result.quoted_source or result.quoted_source_url:
+        classification = "secondary_attributed"
+        reason = "The extraction model identified an explicitly named underlying source."
+    else:
+        classification = "secondary_unattributed"
+        reason = "The extraction model found no producing authority or named underlying source."
+    return {
+        "classification": classification,
+        "reason": reason,
+        "model": _model_for_stage(stage),
+        "prompt_version": EXTRACTION_PROMPT_VERSION,
+        "rule_version": EXTRACTION_RULE_VERSION,
+        "assessment_stage": stage,
+        "assessed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 class MetricComparison(BaseModel):
     reported: Optional[float] = None
     un_expected: Optional[float] = None
@@ -1459,6 +1488,7 @@ Retrieved page text:
     provenance.update({
         'extraction_prompt_version': EXTRACTION_PROMPT_VERSION,
         'extraction_rule_version': EXTRACTION_RULE_VERSION,
+        'source_assessment': source_assessment_from_result(result),
     })
     model_iso3 = str(result.geography_iso3 or '').strip().upper()
     model_geography = str(result.geography or '').strip()
@@ -1638,6 +1668,7 @@ def research_agent(state: State):
         provenance.update({
             "extraction_prompt_version": EXTRACTION_PROMPT_VERSION,
             "extraction_rule_version": EXTRACTION_RULE_VERSION,
+            "source_assessment": source_assessment_from_result(result),
         })
         # Research/Tavily extraction is also an intake path. Keep validation
         # diagnostics for later quality work, but do not block a source merely

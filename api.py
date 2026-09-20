@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from urllib.parse import urlsplit
 
-from services import read_services, admin_services, research_services
+from services import read_services, admin_services, research_services, claim_services
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +105,7 @@ class GraphSeriesResponse(BaseModel):
     forecast: list[JsonObjectResponse]
     alternate_releases: dict[str, list[JsonObjectResponse]]
     findings: list[JsonObjectResponse]
+    value_clusters: list[JsonObjectResponse] = Field(default_factory=list)
 
 
 class ResearchHistoryResponse(BaseModel):
@@ -218,6 +219,17 @@ class FindingMutationRequest(BaseModel):
 
 class MetricDeleteRequest(BaseModel):
     metric: str
+
+
+class ClaimOverrideRequest(BaseModel):
+    action: str | None = None
+    peer_claim_ids: list[int] = Field(default_factory=list)
+    definition: str | None = None
+    classification: str | None = None
+    points: int | None = None
+    disposition: str | None = None
+    reason: str | None = None
+    actor: str = "local"
 
 
 class SourceUnblockRequest(BaseModel):
@@ -380,6 +392,16 @@ def create_app(
     ) -> FindingsResponse:
         return FindingsResponse(items=_read_call(read_services.list_findings, iso3, metric))
 
+    @app.get("/api/v1/claims", response_model=ResearchHistoryResponse, tags=["read"])
+    def claims(iso3: str | None = None, metric: str | None = None, mode: str = "all",
+               include_rejected: bool = False,
+               _auth: AuthContext = Depends(auth_dependency)) -> ResearchHistoryResponse:
+        if include_rejected:
+            items = _read_call(claim_services.list_claims, iso3, metric, mode, True)
+        else:
+            items = _read_call(claim_services.list_claims, iso3, metric, mode)
+        return ResearchHistoryResponse(items=items)
+
     @app.get("/api/v1/admin/findings/coverage", response_model=ResearchHistoryResponse, tags=["administration"])
     def finding_coverage(
         iso3: str | None = None,
@@ -445,6 +467,25 @@ def create_app(
     @app.post("/api/v1/admin/findings/{finding_id}/delete-and-block", response_model_exclude_none=True, tags=["administration"])
     def remove_and_block(finding_id: int, _auth: AuthContext = Depends(auth_dependency)) -> MutationResponse:
         return MutationResponse(**_admin_call(admin_services.delete_and_block, finding_id))
+
+    @app.put("/api/v1/admin/claims/{claim_id}", response_model_exclude_none=True, tags=["administration"])
+    def edit_claim(claim_id: int, request: ClaimOverrideRequest,
+                   _auth: AuthContext = Depends(auth_dependency)) -> MutationResponse:
+        return MutationResponse(**_admin_call(
+            claim_services.override_claim, claim_id, actor=request.actor,
+            classification=request.classification, points=request.points,
+            disposition=request.disposition, reason=request.reason,
+            action=request.action, peer_claim_ids=request.peer_claim_ids,
+            definition=request.definition,
+        ))
+
+    @app.post("/api/v1/admin/claims/{claim_id}/undo", response_model_exclude_none=True, tags=["administration"])
+    def undo_claim(claim_id: int, request: ClaimOverrideRequest | None = None,
+                   _auth: AuthContext = Depends(auth_dependency)) -> MutationResponse:
+        request = request or ClaimOverrideRequest()
+        return MutationResponse(**_admin_call(
+            claim_services.undo_claim_override, claim_id, actor=request.actor, reason=request.reason,
+        ))
 
     @app.get("/api/v1/admin/blocked-sources", tags=["administration"])
     def blocked_sources(_auth: AuthContext = Depends(auth_dependency)) -> ResearchHistoryResponse:
