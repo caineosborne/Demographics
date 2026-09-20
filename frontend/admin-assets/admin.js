@@ -108,9 +108,18 @@ const fixtureFetch = async (path, options = {}) => {
 };
 
 const api = createApiClient({ fetchImpl: fixtureMode ? fixtureFetch : window.fetch.bind(window) });
+let countryChoices = [];
+let findingsSort = { key: "id", direction: "descending" };
 
 const RESEARCH_POLL_INTERVAL_MS = 5000;
 const RESEARCH_POLL_MAX_ATTEMPTS = 180;
+const ACTIVE_RESEARCH_STATES = new Set(["running", "stopping"]);
+const FINAL_CANDIDATE_STATES = new Set([
+  "complete", "duplicate", "discovery_only", "relevant_access_blocked", "unclear_access_blocked",
+  "deferred_budget", "failed", "stopped", "cancelled", "interrupted",
+]);
+let historicRunId = "";
+let runHistoryRefreshTimer = null;
 
 function elapsedLabel(startedAt) {
   const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
@@ -359,10 +368,54 @@ async function loadRunHistory() {
     const payload = await api.request("/api/v1/research/runs");
     list.replaceChildren();
     const runs = payload?.items || [];
-    runs.forEach((run) => { const button = document.createElement("button"); button.className = "run-row"; button.type = "button"; button.innerHTML = `<strong>Run ${escapeHtml(run.id)}</strong><span>${escapeHtml(run.status)} · ${escapeHtml(run.started_at || "")}</span>`; button.addEventListener("click", () => loadRunDetail(run.id, "historic")); list.append(button); });
+    const entries = new Map();
+    runs.forEach((run) => {
+      const entry = document.createElement("div");
+      entry.className = "run-history-entry";
+      entry.dataset.runId = run.id;
+      const button = document.createElement("button");
+      button.className = "run-row";
+      button.type = "button";
+      button.setAttribute("aria-expanded", String(historicRunId === run.id));
+      button.innerHTML = `<strong>Run ${escapeHtml(run.id)}</strong><span>${escapeHtml(run.status)} · ${escapeHtml(run.started_at || "")}</span>`;
+      button.addEventListener("click", () => selectHistoricRun(run.id));
+      entry.append(button);
+      entries.set(run.id, entry);
+      list.append(entry);
+    });
     if (!list.children.length) list.innerHTML = '<p class="help">No research runs yet.</p>';
+    const historicDetail = $(`[data-historic-run-detail]`);
+    if (historicRunId && entries.has(historicRunId) && historicDetail) {
+      entries.get(historicRunId).append(historicDetail);
+      historicDetail.hidden = false;
+      await loadRunDetail(historicRunId, "historic", { resetLogVisibility: false });
+    } else {
+      historicRunId = "";
+      if (historicDetail) historicDetail.hidden = true;
+    }
     if (runs.length) await loadRunDetail(runs[0].id, "current");
+    scheduleRunHistoryRefresh(runs);
   } catch (error) { list.innerHTML = `<p class="help">${escapeHtml(error.message)}</p>`; showGlobalError(error); }
+}
+
+function scheduleRunHistoryRefresh(runs) {
+  window.clearTimeout(runHistoryRefreshTimer);
+  runHistoryRefreshTimer = null;
+  if (!(runs || []).some((run) => ACTIVE_RESEARCH_STATES.has(run.status))) return;
+  runHistoryRefreshTimer = window.setTimeout(() => { loadRunHistory(); }, RESEARCH_POLL_INTERVAL_MS);
+}
+
+function selectHistoricRun(runId) {
+  historicRunId = runId;
+  const list = $(`[data-run-history]`);
+  const detail = $(`[data-historic-run-detail]`);
+  const entry = $$(`[data-run-id]`, list).find((item) => item.dataset.runId === runId);
+  if (entry && detail) {
+    entry.append(detail);
+    detail.hidden = false;
+  }
+  $$(`.run-row`, list).forEach((button) => button.setAttribute("aria-expanded", String(button.parentElement?.dataset.runId === runId)));
+  loadRunDetail(runId, "historic");
 }
 
 async function stopActiveRun(button) {
@@ -372,7 +425,7 @@ async function stopActiveRun(button) {
   button.textContent = "Finding active run…";
   try {
     const payload = await api.request("/api/v1/research/runs");
-    const active = (payload?.items || []).find((run) => ["running", "stopping"].includes(run.status));
+    const active = (payload?.items || []).find((run) => ACTIVE_RESEARCH_STATES.has(run.status));
     if (!active) { button.textContent = "No active run"; return; }
     button.textContent = "Stopping…";
     await api.request(`/api/v1/research/jobs/${encodeURIComponent(active.id)}/stop`, { method: "POST" });
@@ -391,7 +444,7 @@ async function stopAllResearch(button) {
   button.textContent = "Stopping research…";
   try {
     const payload = await api.request("/api/v1/research/runs");
-    const active = (payload?.items || []).filter((run) => ["running", "stopping"].includes(run.status));
+    const active = (payload?.items || []).filter((run) => ACTIVE_RESEARCH_STATES.has(run.status));
     if (!active.length) { button.textContent = "No active research"; return; }
     await Promise.all(active.map((run) => api.request(`/api/v1/research/jobs/${encodeURIComponent(run.id)}/stop`, { method: "POST" })));
     button.textContent = `Stop requested (${active.length})`;
@@ -411,7 +464,16 @@ function renderResearchRunDetail(run, { resetLogVisibility = false, target = "cu
   const events = run.events || run.progress?.logs || [];
   const activityEvents = events.filter((event) => event.event !== "llm_full");
   const llmEvents = events.filter((event) => event.event === "llm_full");
-  $(`[data-run-detail-summary]`, detail).textContent = `${run.candidates?.length || 0} candidates · ${activityEvents.length} activity log entr${activityEvents.length === 1 ? "y" : "ies"} · ${llmEvents.length} full LLM entr${llmEvents.length === 1 ? "y" : "ies"}.`;
+  const runCandidates = run.candidates || [];
+  const confirmedIn = runCandidates.filter((candidate) => candidate.status === "complete" && Boolean(candidate.finding_id)).length;
+  const confirmedOut = runCandidates.filter((candidate) => {
+    if (candidate.status === "complete" && Boolean(candidate.finding_id)) return false;
+    return FINAL_CANDIDATE_STATES.has(candidate.status) || candidate.status?.startsWith("excluded_");
+  }).length;
+  const underReview = runCandidates.length - confirmedIn - confirmedOut;
+  const confirmedPercentage = runCandidates.length ? Math.round((confirmedIn / runCandidates.length) * 100) : 0;
+  $(`[data-run-detail-summary]`, detail).textContent =
+    `${runCandidates.length} candidates · ${confirmedIn} confirmed in · ${confirmedOut} confirmed out · ${underReview} under review · ${confirmedPercentage}% confirmed · ${activityEvents.length} activity log entr${activityEvents.length === 1 ? "y" : "ies"} · ${llmEvents.length} full LLM entr${llmEvents.length === 1 ? "y" : "ies"}.`;
   const stopButton = $(`[data-run-stop]`, detail);
   if (stopButton) {
     if (!stopButton.dataset.bound) {
@@ -524,7 +586,7 @@ function renderResearchRunDetail(run, { resetLogVisibility = false, target = "cu
           const job = await api.request(`/api/v1/research/candidates/${encodeURIComponent(candidate.id)}/force-process`, { method: "POST" });
           force.textContent = "✓";
           force.title = `Queued forced run ${job.run_id || job.id || ""}`;
-          if (job.run_id || job.id) loadRunDetail(job.run_id || job.id, "current");
+          if (job.run_id || job.id) await loadRunHistory();
         } catch (error) { force.disabled = false; force.textContent = "⚡"; showGlobalError(error); }
       });
       row.append(force);
@@ -543,10 +605,10 @@ function renderResearchRunDetail(run, { resetLogVisibility = false, target = "cu
   if (fullscreen && !fullscreen.dataset.bound) { fullscreen.dataset.bound = "true"; fullscreen.addEventListener("click", () => candidates.requestFullscreen?.()); }
 }
 
-async function loadRunDetail(runId, target = "current") {
+async function loadRunDetail(runId, target = "current", { resetLogVisibility = target === "historic" } = {}) {
   try {
     const run = await api.request(`/api/v1/research/jobs/${encodeURIComponent(runId)}`);
-    renderResearchRunDetail(run, { resetLogVisibility: target === "historic", target });
+    renderResearchRunDetail(run, { resetLogVisibility, target });
   } catch (error) { showGlobalError(error); }
 }
 
@@ -676,6 +738,7 @@ function showGlobalError(error) {
 }
 
 function populateCountries(items) {
+  countryChoices = items;
   $$(`[data-country-control]`).forEach((select) => {
     const previous = select.value;
     const findingsFilter = select.hasAttribute("data-findings-country");
@@ -715,6 +778,9 @@ async function loadCountries() {
     const payload = await api.request("/api/v1/countries");
     const items = Array.isArray(payload?.items) ? payload.items : [];
     populateCountries(items);
+    // Coverage and countries load independently at startup; refresh this panel
+    // once the full country register is available for its no-data comparison.
+    if ($(`[data-coverage-body]`)) loadCoverage();
     $("[data-country-count]").textContent = String(items.length);
     if (!items.length) setState(state, "empty", "No country choices are available.");
     else {
@@ -1002,6 +1068,35 @@ function findingMetricValues(item) {
   }) || [];
 }
 
+function findingSortValue(item, key) {
+  if (key === "id") return Number(item.ID ?? item.id ?? 0);
+  if (key === "country") return item.Country || item.ISO3 || "";
+  if (key === "effective") return item["Effective date"] || "";
+  if (key === "processed") return item["Processed date"] || item["Extracted at (UTC)"] || "";
+  if (key === "metrics") return findingMetricValues(item).join(" · ");
+  if (key === "source-class") return item["Source classification"] || "";
+  if (key === "source") return item.Source || item["Quoted source"] || "";
+  return "";
+}
+
+function sortedFindings(items) {
+  const multiplier = findingsSort.direction === "ascending" ? 1 : -1;
+  return [...items].sort((left, right) => {
+    const leftValue = findingSortValue(left, findingsSort.key);
+    const rightValue = findingSortValue(right, findingsSort.key);
+    if (typeof leftValue === "number" && typeof rightValue === "number") return multiplier * (leftValue - rightValue);
+    return multiplier * String(leftValue).localeCompare(String(rightValue), undefined, { numeric: true, sensitivity: "base" });
+  });
+}
+
+function updateFindingsSortHeaders() {
+  $$(`[data-findings-sort]`).forEach((button) => {
+    const active = button.dataset.findingsSort === findingsSort.key;
+    button.dataset.sortDirection = active ? findingsSort.direction : "";
+    button.closest("th").setAttribute("aria-sort", active ? findingsSort.direction : "none");
+  });
+}
+
 function appendFindingIdLink(cell, item) {
   const id = item.ID ?? item.id;
   const link = document.createElement("a");
@@ -1047,7 +1142,8 @@ async function loadFindings() {
     const query = new URLSearchParams(); const iso3 = $(`[data-findings-country]`)?.value; const metric = $(`[data-findings-metric]`)?.value;
     if (iso3) query.set("iso3", iso3); if (metric) query.set("metric", metric);
     const payload = await api.request(`/api/v1/findings${query.toString() ? `?${query}` : ""}`);
-    renderFindingRows(body, payload.items || []);
+    renderFindingRows(body, sortedFindings(payload.items || []));
+    updateFindingsSortHeaders();
     $(`[data-findings-status]`).textContent = `${(payload.items || []).length} finding${(payload.items || []).length === 1 ? "" : "s"} returned.`;
   } catch (error) { body.innerHTML = `<tr><td colspan="7">${escapeHtml(error.message)}</td></tr>`; showGlobalError(error); }
 }
@@ -1071,7 +1167,33 @@ function renderGraphFindingsError(error) {
 
 async function loadCoverage() {
   const body = $(`[data-coverage-body]`); if (!body) return;
-  try { const iso3 = $(`[data-coverage-country]`)?.value; const payload = await api.request(`/api/v1/admin/findings/coverage${iso3 ? `?iso3=${encodeURIComponent(iso3)}` : ""}`); body.replaceChildren(); (payload.items || []).forEach((item) => { const row = document.createElement("tr"); row.innerHTML = `<th>${escapeHtml(item.country)} <small>${escapeHtml(item.iso3)}</small></th><td>${item.findings || 0}</td><td>${item.population || 0}</td><td>${item.births || 0}</td><td>${item.deaths || 0}</td><td>${item.natural_change || 0}</td><td>${item.net_migration || 0}</td><td>${item.total_fertility_rate || 0}</td>`; body.append(row); }); if (!body.children.length) body.innerHTML = '<tr><td colspan="8" class="empty-cell">No coverage data.</td></tr>'; } catch (error) { body.innerHTML = `<tr><td colspan="8">${escapeHtml(error.message)}</td></tr>`; showGlobalError(error); }
+  const emptyBody = $(`[data-coverage-empty-body]`); const emptyCount = $(`[data-coverage-empty-count]`);
+  try {
+    const iso3 = $(`[data-coverage-country]`)?.value;
+    const payload = await api.request(`/api/v1/admin/findings/coverage${iso3 ? `?iso3=${encodeURIComponent(iso3)}` : ""}`);
+    const coverage = payload.items || [];
+    body.replaceChildren();
+    coverage.forEach((item) => { const row = document.createElement("tr"); row.innerHTML = `<th>${escapeHtml(item.country)} <small>${escapeHtml(item.iso3)}</small></th><td>${item.findings || 0}</td><td>${item.population || 0}</td><td>${item.births || 0}</td><td>${item.deaths || 0}</td><td>${item.natural_change || 0}</td><td>${item.net_migration || 0}</td><td>${item.total_fertility_rate || 0}</td>`; body.append(row); });
+    if (!body.children.length) body.innerHTML = '<tr><td colspan="8" class="empty-cell">No coverage data.</td></tr>';
+
+    const coverageByIso3 = new Map(coverage.map((item) => [item.iso3, item]));
+    const countriesInView = iso3 ? countryChoices.filter((country) => country.iso3 === iso3) : countryChoices;
+    const noData = countriesInView.filter((country) => {
+      const item = coverageByIso3.get(country.iso3);
+      return !item || ["population", "births", "deaths", "natural_change", "net_migration", "total_fertility_rate"].every((metric) => !Number(item[metric] || 0));
+    });
+    if (emptyCount) emptyCount.textContent = `${noData.length} countr${noData.length === 1 ? "y" : "ies"}`;
+    if (emptyBody) {
+      emptyBody.replaceChildren();
+      noData.forEach((country) => { const item = document.createElement("li"); item.textContent = country.name; const code = document.createElement("small"); code.textContent = country.iso3; item.append(code); emptyBody.append(item); });
+      if (!noData.length) emptyBody.innerHTML = '<li class="empty-cell">Every country in this view has at least one data point.</li>';
+    }
+  } catch (error) {
+    body.innerHTML = `<tr><td colspan="8">${escapeHtml(error.message)}</td></tr>`;
+    if (emptyCount) emptyCount.textContent = "Unavailable";
+    if (emptyBody) emptyBody.innerHTML = `<li>${escapeHtml(error.message)}</li>`;
+    showGlobalError(error);
+  }
 }
 
 function renderPersistedComparison(container, finding) {
@@ -1310,6 +1432,14 @@ function wire() {
   $(`[data-refresh-runs]`)?.addEventListener("click", loadRunHistory);
   $(`[data-refresh-findings]`)?.addEventListener("click", loadFindings);
   $(`[data-refresh-coverage]`)?.addEventListener("click", loadCoverage);
+  $$(`[data-findings-sort]`).forEach((button) => button.addEventListener("click", () => {
+    const key = button.dataset.findingsSort;
+    findingsSort = {
+      key,
+      direction: findingsSort.key === key && findingsSort.direction === "ascending" ? "descending" : "ascending",
+    };
+    loadFindings();
+  }));
   $(`[data-record-refresh]`)?.addEventListener("click", () => {
     const findingId = $(`[data-record-editor]`)?.dataset.findingId;
     if (findingId) loadRecord(findingId);

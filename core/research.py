@@ -198,6 +198,17 @@ LOW_VALUE_DOMAINS = {
     'facebook.com', 'web.archive.org', 'youtube.com', 'youtu.be', 'wikipedia.org',
     'worldpopulationclock.net', 'populationpyramid.net', 'datareportal.com',
 }
+# These are excluded at the Tavily request itself, rather than spending a
+# search result, retrieval, or model review on a publisher that cannot be an
+# independent demographic source.  Page-level WPP provenance checks remain
+# necessary for every other publisher.
+TAVILY_EXCLUDED_DOMAINS = (
+    'findeasy.in',
+    'georank.org',
+    'macrotrends.net',
+    'statspanda.com',
+    'worldpopulationclock.net',
+)
 LOW_VALUE_TERMS = {
     'methodology', 'understanding', 'explainer', 'what is', 'faq', 'frequently asked',
     'job growth', 'employment report', 'wages', 'waterfowl', 'margins of error',
@@ -251,6 +262,9 @@ def tavily_links(category):
     if not key:
         raise ValueError('Set TAVILY_API_KEY in .env to enable Tavily search.')
     payload = category.model_dump(exclude={'name', 'enabled'})
+    payload['exclude_domains'] = sorted({
+        *payload.get('exclude_domains', []), *TAVILY_EXCLUDED_DOMAINS,
+    })
     if payload['time_range'] == 'all':
         payload.pop('time_range')
     with requests.post('https://api.tavily.com/search', headers={'Authorization': f'Bearer {key}'},
@@ -324,6 +338,7 @@ def tavily_alternative_sources(candidate: dict, limit: int = 3) -> list[dict]:
         json={
             'query': f'"{title[:300]}"', 'topic': 'news', 'search_depth': 'basic',
             'max_results': limit, 'include_raw_content': False, 'include_answer': False,
+            'exclude_domains': list(TAVILY_EXCLUDED_DOMAINS),
         },
         timeout=60,
     ) as response:

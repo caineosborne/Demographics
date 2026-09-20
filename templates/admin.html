@@ -205,11 +205,18 @@
 
         <section id="coverage" class="view" data-view-panel="coverage" hidden>
           <div class="section-intro"><p class="kicker">Record health</p><h2>Country coverage</h2><p>Counts show stored findings containing a non-null value. Use the coverage selector to inspect one country, or leave it on all countries.</p></div>
+          <div class="coverage-grid">
           <article class="card findings-card">
             <div class="card-heading"><div><p class="kicker">Coverage summary</p><h3>Countries and metrics</h3></div><button class="quiet-button" type="button" data-refresh-coverage>Refresh</button></div>
             <label class="field">Country <select data-coverage-country data-country-control><option value="">All countries</option></select></label>
             <div class="table-wrap"><table class="audit-table"><thead><tr><th>Country</th><th>Findings</th><th>Population</th><th>Births</th><th>Deaths</th><th>Natural change</th><th>Migration</th><th>TFR</th></tr></thead><tbody data-coverage-body><tr><td colspan="8">Loading coverage…</td></tr></tbody></table></div>
           </article>
+          <article class="card no-data-card">
+            <div class="card-heading"><div><p class="kicker">Coverage gap</p><h3>Countries with no data points</h3></div><output class="coverage-gap-count" data-coverage-empty-count>Loading…</output></div>
+            <p class="help">A country appears here when it has no non-null values across the metrics in this coverage view. Stored records without a numeric metric still count as no data points.</p>
+            <ul class="no-data-list" data-coverage-empty-body><li>Loading country coverage…</li></ul>
+          </article>
+          </div>
         </section>
 
         <section id="findings" class="view" data-view-panel="findings" hidden>
@@ -217,7 +224,7 @@
           <article class="card findings-card">
             <div class="card-heading"><div><p class="kicker">Stored record</p><h3>Finding table</h3></div><button class="quiet-button" type="button" data-refresh-findings>Refresh</button></div>
             <div class="filter-grid"><label class="field">Country <select data-findings-country data-country-control><option value="">All countries</option></select></label><label class="field">Metric <select data-findings-metric><option value="">Any metric</option><option value="population">Population</option><option value="births">Births</option><option value="deaths">Deaths</option><option value="natural_change">Natural change</option><option value="net_migration">Net migration</option><option value="total_fertility_rate">Total fertility rate</option></select></label></div>
-            <div class="table-wrap"><table class="audit-table findings-table"><thead><tr><th>ID</th><th>Country</th><th>Effective</th><th>Processed</th><th>Metrics &amp; values</th><th>Source class</th><th>Source</th><th>URL</th><th>Action</th></tr></thead><tbody data-findings-body><tr><td colspan="9">Loading findings…</td></tr></tbody></table></div>
+            <div class="table-wrap"><table class="audit-table findings-table"><thead><tr><th aria-sort="descending"><button class="table-sort" type="button" data-findings-sort="id">ID</button></th><th aria-sort="none"><button class="table-sort" type="button" data-findings-sort="country">Country</button></th><th aria-sort="none"><button class="table-sort" type="button" data-findings-sort="effective">Effective</button></th><th aria-sort="none"><button class="table-sort" type="button" data-findings-sort="processed">Processed</button></th><th aria-sort="none"><button class="table-sort" type="button" data-findings-sort="metrics">Metrics &amp; values</button></th><th aria-sort="none"><button class="table-sort" type="button" data-findings-sort="source-class">Source class</button></th><th aria-sort="none"><button class="table-sort" type="button" data-findings-sort="source">Source</button></th><th>URL</th><th>Action</th></tr></thead><tbody data-findings-body><tr><td colspan="9">Loading findings…</td></tr></tbody></table></div>
             <div class="coverage-note" data-findings-status role="status">Choose a row to load its complete record.</div>
           </article>
         </section>

@@ -630,7 +630,10 @@ class ResearchTests(unittest.TestCase):
         self.assertNotIn('time_range', payload)
         self.assertEqual(payload['max_results'], 4)
         self.assertEqual(payload['query'], 'custom query')
-        self.assertEqual(payload['exclude_domains'], [])
+        self.assertEqual(payload['exclude_domains'], [
+            'findeasy.in', 'georank.org', 'macrotrends.net', 'statspanda.com',
+            'worldpopulationclock.net',
+        ])
         self.assertEqual(rows[0]['snippet'], 'Snippet')
 
     def test_tavily_extract_returns_pages_and_failed_urls(self):

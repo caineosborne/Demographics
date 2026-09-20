@@ -46,6 +46,10 @@ def test_research_uses_core_searches_and_opens_batch_results_in_findings():
     assert "data-analysis-copy-log" in TestClient(create_app()).get("/admin/").text
     assert "navigator.clipboard.writeText" in script
     assert "maxAttempts: 60" in script
+    assert "confirmed in" in script
+    assert "confirmed out" in script
+    assert "under review" in script
+    assert "FINAL_CANDIDATE_STATES" in script
 
 
 def test_admin_topbar_stays_visible_when_anchor_navigation_scrolls():
