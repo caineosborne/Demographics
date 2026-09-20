@@ -84,15 +84,59 @@ function clusterObservationId(cluster) {
   return String(cluster?.observation_group_id ?? cluster?.observation_id ?? cluster?.group_id ?? cluster?.observation_group?.id ?? "ungrouped");
 }
 
-function clusterValue(cluster, metric) {
+function clusterMetricValue(cluster, metric) {
   const metricValue = cluster?.values?.[metric] ?? cluster?.metrics?.[metric];
   const candidate = metricValue && typeof metricValue === "object" ? metricValue.value : metricValue;
   return number(cluster?.value ?? cluster?.claim_value ?? cluster?.metric_value ?? candidate ?? cluster?.claim?.value);
 }
 
+/**
+ * Phase 4 graph values are canonical base units (for example, people rather
+ * than millions of people).  Keep the old value fallback for deployments
+ * that have not started returning graph_value yet, where values were in the
+ * WPP chart unit and therefore need the metric scale below.
+ */
+function clusterGraphValue(cluster, metric) {
+  const metricValue = cluster?.values?.[metric] ?? cluster?.metrics?.[metric];
+  const candidate = metricValue && typeof metricValue === "object" ? metricValue.graph_value ?? metricValue.normalized_value ?? metricValue.value : metricValue;
+  const explicit = cluster?.graph_value ?? cluster?.graphValue ?? cluster?.canonical_value ?? cluster?.normalized_value ?? candidate;
+  return number(explicit ?? clusterMetricValue(cluster, metric));
+}
+
+function clusterComparisonValue(cluster, metric) {
+  const metricValue = cluster?.values?.[metric] ?? cluster?.metrics?.[metric];
+  const candidate = metricValue && typeof metricValue === "object" ? metricValue.comparison_value ?? metricValue.rounded_value ?? metricValue.normalized_value : null;
+  return number(cluster?.comparison_value ?? cluster?.comparisonValue ?? cluster?.rounded_value ?? cluster?.display_value ?? candidate ?? cluster?.normalized_value ?? clusterGraphValue(cluster, metric));
+}
+
+function clusterRawValue(cluster, metric) {
+  const metricValue = cluster?.values?.[metric] ?? cluster?.metrics?.[metric];
+  const candidate = metricValue && typeof metricValue === "object" ? metricValue.raw_value ?? metricValue.value : metricValue;
+  return number(cluster?.raw_value ?? cluster?.rawValue ?? cluster?.claim_value ?? cluster?.claim?.value ?? candidate ?? clusterMetricValue(cluster, metric));
+}
+
 function clusterDate(cluster) {
-  return cluster?.effective_date || cluster?.date || cluster?.period_start || cluster?.period || cluster?.observation_date
+  const explicitRange = cluster?.period_start && cluster?.period_end ? `${cluster.period_start}/${cluster.period_end}` : null;
+  // The measured period controls the x coordinate. Publication/effective
+  // dates are metadata and must not move a claim between monthly observations.
+  return cluster?.comparison_period || cluster?.normalized_period || cluster?.observation_period || cluster?.period || explicitRange || cluster?.period_start || cluster?.date || cluster?.effective_date || cluster?.observation_date
     || cluster?.claim?.effective_date || cluster?.claim?.period || cluster?.observation_group?.period;
+}
+
+function clusterRawPeriod(cluster) {
+  return cluster?.raw_period || cluster?.raw_observation_period || cluster?.reported_period || cluster?.source_period || cluster?.claim?.raw_period || cluster?.claim?.raw_observation_period || cluster?.claim?.period || cluster?.period || "Period not specified";
+}
+
+function clusterComparisonPeriod(cluster) {
+  return cluster?.comparison_period || cluster?.normalized_period || cluster?.observation_period || cluster?.period || "Period not specified";
+}
+
+function clusterRawUnit(cluster) {
+  return cluster?.raw_unit || cluster?.reported_unit || cluster?.claim?.unit || cluster?.unit || "unit not specified";
+}
+
+function clusterComparisonUnit(cluster) {
+  return cluster?.comparison_unit || cluster?.normalized_unit || cluster?.canonical_unit || cluster?.unit || "unit not specified";
 }
 
 function clusterDocuments(cluster) {
@@ -263,12 +307,26 @@ export function observationYearPosition(value) {
 
 /** Return a decimal year while retaining an article's actual effective date. */
 export function dateYearPosition(value) {
-  const match = String(value || "").match(/^(\d{4})(?:-(\d{1,2})-(\d{1,2}))?/);
+  const textValue = String(value || "").trim();
+  // Ranges are used for quarterly, annual, and year-to-date claims. Plot at
+  // the period midpoint while retaining the complete range in tooltips.
+  const range = textValue.split(/\s*(?:\/|\s+to\s+)\s*/i);
+  if (range.length > 1) {
+    const starts = range.map((part) => dateYearPosition(part)).filter((part) => part !== null);
+    return starts.length === range.length ? starts.reduce((sum, part) => sum + part, 0) / starts.length : null;
+  }
+  const match = textValue.match(/^(\d{4})(?:-(\d{1,2})(?:-(\d{1,2}))?)?/);
   if (!match) return null;
   const year = Number(match[1]);
   if (!match[2]) return observationYearPosition(year);
+  const month = Number(match[2]);
+  if (month < 1 || month > 12) return null;
+  // A month-only observation is represented by its midpoint. This preserves
+  // month-level ordering without pretending an exact day was reported.
+  const day = match[3] ? Number(match[3]) : 15;
+  if (match[3] && (day < 1 || day > 31)) return null;
   const start = Date.UTC(year, 0, 1);
-  const date = Date.UTC(year, Number(match[2]) - 1, Number(match[3]));
+  const date = Date.UTC(year, month - 1, day);
   const next = Date.UTC(year + 1, 0, 1);
   return year + (date - start) / (next - start);
 }
@@ -299,13 +357,30 @@ function clusterPoints(payload, metric, mode, hiddenFindingIds) {
     const id = clusterId(cluster, index);
     const sourceClaimId = Number(cluster?.finding_id ?? cluster?.claim_id ?? cluster?.claim?.finding_id);
     const x = dateYearPosition(clusterDate(cluster));
-    const value = clusterValue(cluster, metric);
-    if (hiddenFindingIds.has(sourceClaimId) || x === null || value === null) return [];
+    const graphValue = clusterGraphValue(cluster, metric);
+    const comparisonValue = clusterComparisonValue(cluster, metric);
+    const rawValue = clusterRawValue(cluster, metric);
+    if (hiddenFindingIds.has(sourceClaimId) || x === null || graphValue === null) return [];
+    const hasCanonicalGraphValue = cluster?.graph_value !== undefined
+      || cluster?.graphValue !== undefined
+      || cluster?.canonical_value !== undefined
+      || cluster?.normalized_value !== undefined
+      || cluster?.values?.[metric]?.graph_value !== undefined
+      || cluster?.values?.[metric]?.normalized_value !== undefined;
     return [{
       x,
-      y: value * GRAPH_METRICS[metric].scale,
+      // WPP rows are stored in chart units (thousands for people), while the
+      // Phase 4 graph contract returns canonical base units.  Only legacy
+      // cluster payloads should receive the chart scale.
+      y: hasCanonicalGraphValue ? graphValue : graphValue * GRAPH_METRICS[metric].scale,
       id,
       cluster,
+      rawValue,
+      comparisonValue,
+      rawPeriod: clusterRawPeriod(cluster),
+      comparisonPeriod: clusterComparisonPeriod(cluster),
+      rawUnit: clusterRawUnit(cluster),
+      comparisonUnit: clusterComparisonUnit(cluster),
       sourceClaimId: Number.isFinite(sourceClaimId) ? sourceClaimId : null,
       sourceType: strongestClusterSourceClass(cluster),
       rawPoints: clusterRawPoints(cluster),
@@ -364,7 +439,9 @@ function clusterTooltipDetails(point, metric) {
   const reason = cluster.automated_reason || cluster.assessment_reason || cluster.reason || "No automated reasoning returned";
   const decisionOrigin = cluster.decision_origin || cluster.source_decision_origin || "automated_assessment";
   const conflict = point.conflict ? "\nConflict: unresolved" : "\nConflict: none";
-  return `Value cluster ${point.id}\nMetric: ${GRAPH_METRICS[metric].label}\nValue: ${formatValue(point.y, metric)}\nEvidence: ${point.effectivePoints} effective (${point.rawPoints} raw)\nSupporting documents: ${point.sourceCount}\nClassification: ${SOURCE_CLASS_LABELS[point.sourceType] || point.sourceType}\nDisposition: ${point.disposition}\nDecision origin: ${decisionOrigin}${conflict}\nReason: ${reason}\nSources:\n${documents}`;
+  const rawValue = point.rawValue === null ? "not returned" : `${point.rawValue.toLocaleString()} ${point.rawUnit}`;
+  const comparisonValue = point.comparisonValue === null ? formatValue(point.y, metric) : `${point.comparisonValue.toLocaleString()} ${point.comparisonUnit}`;
+  return `Value cluster ${point.id}\nMetric: ${GRAPH_METRICS[metric].label}\nReported value: ${rawValue}\nComparison value: ${comparisonValue}\nReported period: ${point.rawPeriod}\nComparison period: ${point.comparisonPeriod}\nEvidence: ${point.effectivePoints} effective (${point.rawPoints} raw)\nSupporting documents: ${point.sourceCount}\nClassification: ${SOURCE_CLASS_LABELS[point.sourceType] || point.sourceType}\nDisposition: ${point.disposition}\nDecision origin: ${decisionOrigin}${conflict}\nReason: ${reason}\nSources:\n${documents}`;
 }
 
 function marker(chart, point, markerType, color, metric, { onClusterToggle = () => {} } = {}) {
@@ -531,7 +608,7 @@ export function renderMetricGraph(container, payload, metric, { hiddenFindingIds
   }
   svg.append(svgElement("line", { x1: margin.left, x2: width - margin.right, y1: margin.top + plotHeight, y2: margin.top + plotHeight, class: "graph-axis" }));
   svg.append(svgElement("line", { x1: margin.left, x2: margin.left, y1: margin.top, y2: margin.top + plotHeight, class: "graph-axis" }));
-  text(svg, "Observation year", { x: margin.left + plotWidth / 2, y: height - 3, "text-anchor": "middle", class: "graph-axis-title" });
+  text(svg, "Observation period (monthly comparison)", { x: margin.left + plotWidth / 2, y: height - 3, "text-anchor": "middle", class: "graph-axis-title" });
   text(svg, config.unit, { x: 17, y: margin.top + plotHeight / 2, "text-anchor": "middle", transform: `rotate(-90 17 ${margin.top + plotHeight / 2})`, class: "graph-axis-title" });
 
   const series = [
@@ -557,7 +634,7 @@ export function renderMetricGraph(container, payload, metric, { hiddenFindingIds
     const color = SOURCE_CLASS_COLORS[point.sourceType] || SOURCE_CLASS_COLORS.secondary_unattributed;
     svg.append(marker(chart, positioned, className, color, metric, { onClusterToggle: toggleCluster }));
     const details = document.createElement("details"); details.className = "graph-cluster-details"; details.dataset.clusterDetails = point.id;
-    const summary = document.createElement("summary"); summary.textContent = `${formatValue(point.y, metric)} · ${point.effectivePoints} evidence points · ${point.sourceCount} source${point.sourceCount === 1 ? "" : "s"}${point.conflict ? " · unresolved conflict" : ""}`; details.append(summary);
+    const summary = document.createElement("summary"); summary.textContent = `${point.comparisonValue === null ? formatValue(point.y, metric) : point.comparisonValue.toLocaleString()} · ${point.comparisonPeriod} · ${point.effectivePoints} evidence points · ${point.sourceCount} source${point.sourceCount === 1 ? "" : "s"}${point.conflict ? " · unresolved conflict" : ""}`; details.append(summary);
     const metadata = document.createElement("p"); metadata.className = "graph-cluster-metadata"; metadata.textContent = `${SOURCE_CLASS_LABELS[point.sourceType] || point.sourceType} · ${point.disposition} · raw ${point.rawPoints} · ${point.cluster?.decision_origin || "automated_assessment"}`; details.append(metadata);
     const reason = point.cluster?.automated_reason || point.cluster?.assessment_reason || point.cluster?.reason;
     if (reason) { const reasonNode = document.createElement("p"); reasonNode.className = "graph-cluster-reason"; reasonNode.textContent = `Assessment: ${reason}`; details.append(reasonNode); }

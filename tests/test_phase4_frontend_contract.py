@@ -48,3 +48,35 @@ def test_phase4_frontend_cluster_modes_keep_rejected_claims_out_of_graphs():
         check=False,
     )
     assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_phase4_frontend_preserves_month_resolution_and_raw_comparison_context():
+    renderer = (ROOT / "frontend/admin-assets/graph-renderer.js").read_text()
+    admin = (ROOT / "frontend/admin-assets/admin.js").read_text()
+    template = (ROOT / "templates/admin.html").read_text()
+    assert "comparison_period" in renderer
+    assert "Reported value:" in renderer
+    assert "Comparison value:" in renderer
+    assert "Observation period (monthly comparison)" in renderer
+    assert "claim.normalized_value" in admin
+    assert "Reported / comparison value and period" in template
+
+    source = renderer.encode("utf-8")
+    encoded = base64.b64encode(source).decode("ascii")
+    script = f'''
+      const renderer = await import("data:text/javascript;base64,{encoded}");
+      const june = renderer.dateYearPosition("2025-06");
+      const july = renderer.dateYearPosition("2025-07");
+      const quarter = renderer.dateYearPosition("2025-07/2025-09");
+      const august = renderer.dateYearPosition("2025-08");
+      if (!(july > june)) throw new Error("month-only periods are not ordered by month");
+      if (Math.abs(quarter - august) > 0.01) throw new Error("range period was not plotted at its midpoint");
+    '''
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout

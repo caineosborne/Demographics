@@ -9,9 +9,9 @@ the Phase 4 graph and review APIs.
 from __future__ import annotations
 
 import json
-import math
 import sqlite3
 import re
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -33,10 +33,18 @@ SOURCE_CLASSES = frozenset(SOURCE_POINTS)
 DISPLAY_DISPOSITIONS = frozenset({"primary", "approved_secondary", "rejected"})
 DECISION_ORIGINS = frozenset({"automated_assessment", "configured_rule", "migration", "manual_override"})
 STRONG_EVIDENCE_THRESHOLD = 7
-# Values within half a percent are treated as harmless publisher rounding.
-# Unit conversion is applied before this comparison; materially different
-# values remain separate conflict clusters.
-ROUNDING_RELATIVE_TOLERANCE = 0.005
+# Comparison values are rounded by metric after unit conversion.  The raw
+# extracted value remains in ``metric_claims.value`` and is never overwritten.
+ROUNDING_RULE_VERSION = "phase4-period-monthly-value-v2"
+ROUNDING_METRICS = {
+    "births": Decimal("1000"),
+    "deaths": Decimal("1000"),
+    "natural_change": Decimal("1000"),
+    "net_overseas_migration": Decimal("1000"),
+    "net_migration": Decimal("1000"),
+    "tfr": Decimal("0.1"),
+    "total_fertility_rate": Decimal("0.1"),
+}
 
 
 def _now() -> str:
@@ -63,6 +71,8 @@ def ensure_schema(conn: sqlite3.Connection, *, migrate_legacy: bool = True) -> N
             iso3 TEXT NOT NULL,
             metric TEXT NOT NULL,
             observation_period TEXT NOT NULL,
+            raw_observation_period TEXT,
+            normalized_period TEXT,
             unit TEXT NOT NULL DEFAULT '',
             definition TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
@@ -85,9 +95,13 @@ def ensure_schema(conn: sqlite3.Connection, *, migrate_legacy: bool = True) -> N
             iso3 TEXT NOT NULL,
             metric TEXT NOT NULL,
             observation_period TEXT NOT NULL,
+            raw_observation_period TEXT,
+            normalized_period TEXT,
             unit TEXT NOT NULL DEFAULT '',
             definition TEXT NOT NULL DEFAULT '',
             value REAL NOT NULL,
+            raw_value REAL,
+            normalized_value REAL,
             underlying_source TEXT NOT NULL DEFAULT 'other',
             source_classification TEXT NOT NULL CHECK(source_classification IN
                 ('official_publisher','secondary_attributed','secondary_unattributed','legacy_unreviewed')),
@@ -125,10 +139,44 @@ def ensure_schema(conn: sqlite3.Connection, *, migrate_legacy: bool = True) -> N
         """
     )
     claim_columns = {row[1] for row in conn.execute("PRAGMA table_info(metric_claims)")}
+    # Older local Phase 4 databases may have the first projection tables but
+    # not the later scoring/review columns.  Add each column independently so
+    # startup migration remains safe and repeatable.
+    legacy_columns = {
+        "source_classification": "TEXT NOT NULL DEFAULT 'legacy_unreviewed'",
+        "automated_classification": "TEXT",
+        "automated_reason": "TEXT",
+        "assessment_model": "TEXT",
+        "assessment_prompt_version": "TEXT",
+        "assessed_at": "TEXT",
+        "evidence_points": "INTEGER NOT NULL DEFAULT 0",
+        "raw_points": "INTEGER NOT NULL DEFAULT 0",
+        "effective_points": "INTEGER NOT NULL DEFAULT 0",
+        "display_disposition": "TEXT NOT NULL DEFAULT 'approved_secondary'",
+        "decision_origin": "TEXT NOT NULL DEFAULT 'migration'",
+        "manual_points": "INTEGER",
+        "manual_override_json": "TEXT",
+    }
+    for column, definition in legacy_columns.items():
+        if column not in claim_columns:
+            conn.execute(f"ALTER TABLE metric_claims ADD COLUMN {column} {definition}")
     if "assessment_rule_version" not in claim_columns:
         conn.execute("ALTER TABLE metric_claims ADD COLUMN assessment_rule_version TEXT")
     if "underlying_source" not in claim_columns:
         conn.execute("ALTER TABLE metric_claims ADD COLUMN underlying_source TEXT NOT NULL DEFAULT 'other'")
+    if "raw_observation_period" not in claim_columns:
+        conn.execute("ALTER TABLE metric_claims ADD COLUMN raw_observation_period TEXT")
+    if "normalized_period" not in claim_columns:
+        conn.execute("ALTER TABLE metric_claims ADD COLUMN normalized_period TEXT")
+    if "raw_value" not in claim_columns:
+        conn.execute("ALTER TABLE metric_claims ADD COLUMN raw_value REAL")
+    if "normalized_value" not in claim_columns:
+        conn.execute("ALTER TABLE metric_claims ADD COLUMN normalized_value REAL")
+    group_columns = {row[1] for row in conn.execute("PRAGMA table_info(observation_groups)")}
+    if "raw_observation_period" not in group_columns:
+        conn.execute("ALTER TABLE observation_groups ADD COLUMN raw_observation_period TEXT")
+    if "normalized_period" not in group_columns:
+        conn.execute("ALTER TABLE observation_groups ADD COLUMN normalized_period TEXT")
     if migrate_legacy:
         _migrate_legacy_findings(conn)
     _reconcile_normalized_groups(conn)
@@ -144,11 +192,142 @@ def _canonical_url(url: str) -> str:
                        parts.path.rstrip("/") or "/", urlencode(query), ""))
 
 
-def _period(statistic: dict[str, Any], fallback: Any) -> str:
-    start, end = str(statistic.get("period_start") or "").strip(), str(statistic.get("period_end") or "").strip()
+_MONTHS = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2,
+    "mar": 3, "march": 3, "apr": 4, "april": 4,
+    "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
+}
+
+
+def _month_text(year: str | int, month: str | int) -> str:
+    return f"{int(year):04d}-{int(month):02d}"
+
+
+def _period_endpoint(value: Any, *, end: bool = False) -> str | None:
+    """Return the month containing a date/month/year endpoint."""
+    text = " ".join(str(value or "").strip().split()).casefold()
+    if not text:
+        return None
+    match = re.fullmatch(r"(\d{4})[-/]?(\d{1,2})[-/]?(\d{1,2})?", text)
+    if match:
+        year, month = int(match.group(1)), int(match.group(2))
+        if 1 <= month <= 12:
+            return _month_text(year, month)
+    match = re.fullmatch(r"(\d{4})[-/]?(\d{1,2})", text)
+    if match and 1 <= int(match.group(2)) <= 12:
+        return _month_text(match.group(1), match.group(2))
+    match = re.fullmatch(r"(\d{4})", text)
+    if match:
+        return _month_text(match.group(1), 12 if end else 1)
+    match = re.fullmatch(r"([a-z]+)\s+(\d{4})", text)
+    if match and match.group(1) in _MONTHS:
+        return _month_text(match.group(2), _MONTHS[match.group(1)])
+    match = re.fullmatch(r"(\d{1,2})\s+([a-z]+)\s+(\d{4})", text)
+    if match and match.group(2) in _MONTHS:
+        return _month_text(match.group(3), _MONTHS[match.group(2)])
+    return None
+
+
+def _canonical_period_text(raw_period: Any, metric: str = "") -> str:
+    """Normalize measured periods to monthly comparison resolution.
+
+    A publication date is deliberately not passed here.  A year-only
+    population claim is retained as ``YYYY-unknown`` because assigning July
+    without explicit mid-year semantics would invent a measurement date.
+    """
+    raw = " ".join(str(raw_period or "").strip().split())
+    text = raw.casefold()
+    if not text:
+        return ""
+
+    # Explicit slash/range dates are common in stored extraction output.
+    parts = [part.strip() for part in re.split(r"\s*/\s*", text)]
+    if len(parts) == 2:
+        start, end = _period_endpoint(parts[0]), _period_endpoint(parts[1], end=True)
+        if start and end:
+            return start if start == end else f"{start}/{end}"
+
+    # ISO month/date forms are already unambiguous and should not fall
+    # through to the year-only handling below.
+    if re.fullmatch(r"\d{4}[-/]\d{1,2}(?:[-/]\d{1,2})?", text):
+        endpoint = _period_endpoint(text)
+        if endpoint:
+            return endpoint
+
+    iso_range = re.search(
+        r"(\d{4}[-/]\d{1,2}(?:[-/]\d{1,2})?)\s+(?:to|through|until)\s+"
+        r"(\d{4}[-/]\d{1,2}(?:[-/]\d{1,2})?)",
+        text,
+    )
+    if iso_range:
+        start, end = _period_endpoint(iso_range.group(1)), _period_endpoint(iso_range.group(2), end=True)
+        if start and end:
+            return start if start == end else f"{start}/{end}"
+
+    quarter = re.search(r"(?:q\s*([1-4])|([1-4])(?:st|nd|rd|th)?\s+quarter)\s*(?:(?:of|/)\s*)?(\d{4})", text)
+    if quarter:
+        number = int(quarter.group(1) or quarter.group(2))
+        year = int(quarter.group(3))
+        start_month = (number - 1) * 3 + 1
+        return f"{_month_text(year, start_month)}/{_month_text(year, start_month + 2)}"
+
+    year_match = re.search(r"\b(\d{4})\b", text)
+    if year_match:
+        year = year_match.group(1)
+        month_names = "jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+        range_match = re.search(
+            rf"\b({month_names})\b\s*(?:to|through|until|[-–])\s*\b({month_names})\b\s*(?:,|of\s+)?{year}\b",
+            text,
+        )
+        if not range_match:
+            range_match = re.search(
+                rf"\b({month_names})\s+\d{{4}}\b\s*(?:to|through|until|[-–])\s*"
+                rf"\b({month_names})\s+{year}\b",
+                text,
+            )
+        if range_match:
+            start_month = _MONTHS[range_match.group(1)]
+            end_month = _MONTHS[range_match.group(2)]
+            return f"{_month_text(year, start_month)}/{_month_text(year, end_month)}"
+        month_match = re.search(r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b", text)
+        if month_match:
+            month = _MONTHS[month_match.group(1)]
+            return _month_text(year, month)
+        if re.search(r"\b(mid[- ]?year|midyear)\b", text):
+            return _month_text(year, 7)
+        if re.search(r"\b(end|year[- ]?end|year[- ]?ended|dec(?:ember)?\s+31)\b", text):
+            return _month_text(year, 12)
+        if re.search(r"\b(start|beginning|year[- ]?start|january\s+1)\b", text):
+            return _month_text(year, 1)
+        if re.search(r"\b(ytd|year[- ]?to[- ]?date|year[- ]?through)\b", text):
+            return f"{_month_text(year, 1)}/{_month_text(year, 12)}"
+        # Population's year-only value is commonly a point estimate but its
+        # month is not known.  Do not silently turn it into July.
+        if str(metric).casefold() == "population":
+            # The explicit unknown suffix prevents this point estimate from
+            # being mistaken for an annual January-to-December measurement.
+            return f"{year}-unknown"
+        return f"{_month_text(year, 1)}/{_month_text(year, 12)}"
+
+    return text
+
+
+def _period(statistic: dict[str, Any], fallback: Any, metric: str = "") -> str:
+    start = str(statistic.get("period_start") or "").strip()
+    end = str(statistic.get("period_end") or "").strip()
+    raw = f"{start}/{end}" if start and end else (statistic.get("measured_period") or fallback)
+    return _canonical_period_text(raw, metric)
+
+
+def _raw_period(statistic: dict[str, Any], fallback: Any) -> str:
+    start = str(statistic.get("period_start") or "").strip()
+    end = str(statistic.get("period_end") or "").strip()
     if start and end:
         return f"{start}/{end}"
-    return " ".join(str(statistic.get("measured_period") or fallback or "").split()).casefold()
+    return " ".join(str(statistic.get("measured_period") or fallback or "").split())
 
 
 def _unit_factor(unit: str) -> float:
@@ -160,6 +339,29 @@ def _unit_factor(unit: str) -> float:
     for token in re.findall(r"[a-z]+", normalized):
         factor *= factors.get(token, 1.0)
     return factor
+
+
+def _comparison_value(metric: str, raw_value: Any, unit: str) -> Decimal:
+    converted = Decimal(str(raw_value)) * Decimal(str(_unit_factor(unit)))
+    metric_name = str(metric or "").casefold()
+    if metric_name == "population":
+        absolute = abs(converted)
+        # Keep very small synthetic/test populations meaningful rather than
+        # collapsing every value below one thousand to zero.  The first
+        # population tier still applies from one thousand upward.
+        if absolute < Decimal("1000"):
+            return converted
+        quantum = Decimal("1000") if absolute < Decimal("1000000") else (
+            Decimal("10000") if absolute < Decimal("10000000") else Decimal("100000")
+        )
+    else:
+        quantum = ROUNDING_METRICS.get(metric_name)
+    if quantum is None:
+        return converted
+    # Decimal.quantize controls decimal exponent, not multiples (quantizing
+    # to Decimal("1000") would only remove decimals).  Divide first so 1,000,
+    # 10,000 and 100,000 are genuine increments and ties are half-up.
+    return (converted / quantum).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * quantum
 
 
 def _group_unit(unit: str) -> str:
@@ -193,52 +395,82 @@ def _claim_dimensions(finding: dict[str, Any]) -> list[dict[str, Any]]:
         except (TypeError, ValueError):
             continue
         unit = str(statistic.get("unit") or "").strip()
-        normalized = raw_value * _unit_factor(unit)
-        period = _period(statistic, finding.get("effective_date"))
+        normalized = _comparison_value(str(metric), raw_value, unit)
+        # Article/effective publication dates are deliberately not used as a
+        # measured period fallback.  A missing measured period stays missing
+        # rather than being assigned the publication month.
+        period = _period(statistic, None, str(metric))
+        raw_period = _raw_period(statistic, None)
         if not period:
             continue
         dimensions.append({
             "iso3": iso3, "metric": str(metric), "period": period,
+            "raw_period": raw_period, "normalized_period": period,
             "unit": unit, "group_unit": _group_unit(unit),
             "definition": str(statistic.get("definition") or "").strip(),
-            "value": raw_value, "normalized_value": normalized,
+            "value": raw_value, "raw_value": raw_value,
+            "normalized_value": float(normalized),
         })
     return dimensions
 
 
 def _reconcile_normalized_groups(conn: sqlite3.Connection) -> None:
-    """Merge pre-normalization unit groups into their canonical identities."""
+    """Idempotently migrate old groups to canonical periods, units and values."""
     rows = conn.execute(
-        "SELECT id, iso3, metric, observation_period, unit, definition FROM observation_groups ORDER BY id"
+        "SELECT id, iso3, metric, observation_period, raw_observation_period, unit, definition "
+        "FROM observation_groups ORDER BY id"
     ).fetchall()
-    grouped: dict[tuple[str, str, str, str, str], list[tuple[Any, ...]]] = {}
-    for group_id, iso3, metric, period, unit, definition in rows:
-        key = (iso3, metric, period, _group_unit(unit), definition)
-        grouped.setdefault(key, []).append((group_id, iso3, metric, period, unit, definition))
-    for key, candidates in grouped.items():
-        canonical_unit = key[3]
-        destination_row = next((row for row in candidates if _group_unit(row[4]) == row[4] == canonical_unit), candidates[0])
-        destination = int(destination_row[0])
-        # Canonicalize the surviving group itself.  Prefer an existing
-        # canonical row above so this UPDATE cannot collide with a UNIQUE key.
-        if destination_row[4] != canonical_unit:
-            conn.execute("UPDATE observation_groups SET unit = ? WHERE id = ?", (canonical_unit, destination))
-        for group_id, _iso3, _metric, _period, _unit, _definition in candidates:
-            if int(group_id) == destination:
-                continue
-            old_clusters = conn.execute(
-                "SELECT id, normalized_value FROM value_clusters WHERE observation_group_id = ?",
-                (group_id,),
-            ).fetchall()
-            for old_cluster, normalized_value in old_clusters:
-                new_cluster, _ = _find_cluster(conn, destination, float(normalized_value))
-                conn.execute("UPDATE metric_claims SET observation_group_id = ?, value_cluster_id = ? WHERE value_cluster_id = ?", (destination, new_cluster, old_cluster))
-                conn.execute("DELETE FROM value_clusters WHERE id = ?", (old_cluster,))
-            conn.execute("DELETE FROM observation_groups WHERE id = ?", (group_id,))
-        clusters = conn.execute("SELECT id FROM value_clusters WHERE observation_group_id = ?", (destination,)).fetchall()
-        for (cluster_id,) in clusters:
+    destinations: dict[tuple[str, str, str, str, str], int] = {}
+    for group_id, iso3, metric, period, raw_period, unit, definition in rows:
+        canonical_period = _canonical_period_text(period, metric)
+        canonical_unit = _group_unit(unit)
+        key = (iso3, metric, canonical_period, canonical_unit, definition)
+        destination = destinations.get(key)
+        if destination is None:
+            existing = conn.execute(
+                "SELECT id FROM observation_groups WHERE iso3 = ? AND metric = ? "
+                "AND observation_period = ? AND unit = ? AND definition = ? ORDER BY id LIMIT 1",
+                key,
+            ).fetchone()
+            if existing:
+                destination = int(existing[0])
+            else:
+                destination = int(group_id)
+            destinations[key] = destination
+            conn.execute(
+                "UPDATE observation_groups SET observation_period = ?, normalized_period = ?, "
+                "raw_observation_period = COALESCE(raw_observation_period, ?) , unit = ? WHERE id = ?",
+                (canonical_period, canonical_period, raw_period or period, canonical_unit, destination),
+            )
+
+        claims = conn.execute(
+            "SELECT id, value, unit, raw_observation_period, value_cluster_id FROM metric_claims "
+            "WHERE observation_group_id = ? ORDER BY id", (int(group_id),)
+        ).fetchall()
+        for claim_id, raw_value, claim_unit, claim_raw_period, old_cluster in claims:
+            # Existing claims may have retained a pre-Phase-4 raw period.  If
+            # not, the old group period is the only available source value.
+            raw_claim_period = claim_raw_period or raw_period or period
+            comparison = _comparison_value(metric, raw_value, claim_unit or unit)
+            cluster_id, _ = _find_cluster(conn, destination, float(comparison))
+            conn.execute(
+                "UPDATE metric_claims SET observation_group_id = ?, value_cluster_id = ?, "
+                "observation_period = ?, normalized_period = ?, raw_observation_period = ?, "
+                "raw_value = COALESCE(raw_value, value), normalized_value = ? WHERE id = ?",
+                (destination, cluster_id, canonical_period, canonical_period, raw_claim_period,
+                 float(comparison), int(claim_id)),
+            )
+        if int(group_id) != destination:
+            conn.execute("DELETE FROM value_clusters WHERE observation_group_id = ?", (int(group_id),))
+            conn.execute("DELETE FROM observation_groups WHERE id = ?", (int(group_id),))
+
+    # Remove any orphaned clusters left by a merge, then refresh score and
+    # primary selection state for every surviving group.
+    conn.execute("DELETE FROM value_clusters WHERE id NOT IN (SELECT DISTINCT value_cluster_id FROM metric_claims)")
+    for (group_id,) in conn.execute("SELECT id FROM observation_groups").fetchall():
+        for (cluster_id,) in conn.execute("SELECT id FROM value_clusters WHERE observation_group_id = ?", (group_id,)).fetchall():
             _recalculate_cluster(conn, int(cluster_id))
-        _auto_select_group(conn, destination)
+        _auto_select_group(conn, int(group_id))
 
 
 def assess_source(finding: dict[str, Any], *, classification: str | None = None,
@@ -281,8 +513,10 @@ def _get_or_create(conn: sqlite3.Connection, table: str, columns: tuple[str, ...
 def _find_cluster(conn: sqlite3.Connection, group_id: int, normalized_value: float) -> tuple[int, float]:
     rows = conn.execute("SELECT id, normalized_value FROM value_clusters WHERE observation_group_id = ?", (group_id,)).fetchall()
     for cluster_id, existing in rows:
-        tolerance = max(1e-9, abs(float(existing)) * ROUNDING_RELATIVE_TOLERANCE)
-        if math.isclose(float(existing), normalized_value, rel_tol=1e-9, abs_tol=tolerance):
+        # Values have already been converted and rounded by metric.  Exact
+        # comparison here makes the grouping rule deterministic and removes
+        # the former blanket 0.5% tolerance.
+        if Decimal(str(existing)) == Decimal(str(normalized_value)):
             return int(cluster_id), float(existing)
     key = _cluster_key(normalized_value)
     cursor = conn.execute(
@@ -345,6 +579,10 @@ def sync_finding_claims(conn: sqlite3.Connection, finding_id: int, finding: dict
     claim_ids = []
     for item in _claim_dimensions(finding):
         group_id = _get_or_create(conn, "observation_groups", ("iso3", "metric", "observation_period", "unit", "definition"), (item["iso3"], item["metric"], item["period"], item["group_unit"], item["definition"]))
+        conn.execute(
+            "UPDATE observation_groups SET raw_observation_period = COALESCE(raw_observation_period, ?), normalized_period = ? WHERE id = ?",
+            (item["raw_period"], item["normalized_period"], group_id),
+        )
         cluster_id, _ = _find_cluster(conn, group_id, item["normalized_value"])
         existing = conn.execute("SELECT id FROM metric_claims WHERE source_document_id = ? AND finding_id = ? AND metric = ? AND observation_period = ? AND value = ?", (document_id, finding_id, item["metric"], item["period"], item["value"])).fetchone()
         if existing:
@@ -352,13 +590,14 @@ def sync_finding_claims(conn: sqlite3.Connection, finding_id: int, finding: dict
         else:
             cursor = conn.execute("""INSERT INTO metric_claims(
                 source_document_id, finding_id, observation_group_id, value_cluster_id,
-                iso3, metric, observation_period, unit, definition, value,
+                iso3, metric, observation_period, raw_observation_period, normalized_period,
+                unit, definition, value, raw_value, normalized_value,
                 underlying_source,
                 source_classification, automated_classification, automated_reason,
                 assessment_model, assessment_prompt_version, assessment_rule_version, assessed_at,
                 evidence_points, decision_origin, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (document_id, finding_id, group_id, cluster_id, item["iso3"], item["metric"], item["period"], item["unit"], item["definition"], item["value"], str(finding.get("underlying_source") or "other"), assessment["classification"], assessment["classification"], assessment["reason"], assessment["model"], assessment["prompt_version"], assessment["rule_version"], assessment["assessed_at"], assessment["points"], assessment["decision_origin"], _now()))
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (document_id, finding_id, group_id, cluster_id, item["iso3"], item["metric"], item["period"], item["raw_period"], item["normalized_period"], item["unit"], item["definition"], item["value"], item["raw_value"], item["normalized_value"], str(finding.get("underlying_source") or "other"), assessment["classification"], assessment["classification"], assessment["reason"], assessment["model"], assessment["prompt_version"], assessment["rule_version"], assessment["assessed_at"], assessment["points"], assessment["decision_origin"], _now()))
             claim_id = int(cursor.lastrowid)
         claim_ids.append(claim_id)
         _recalculate_cluster(conn, cluster_id)
@@ -383,17 +622,22 @@ def _migrate_legacy_findings(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE source_documents SET source_url = ? WHERE id = ?", (source_url, source_doc))
         for item in _claim_dimensions(finding):
             group = _get_or_create(conn, "observation_groups", ("iso3", "metric", "observation_period", "unit", "definition"), (item["iso3"], item["metric"], item["period"], item["group_unit"], item["definition"]))
+            conn.execute(
+                "UPDATE observation_groups SET raw_observation_period = COALESCE(raw_observation_period, ?), normalized_period = ? WHERE id = ?",
+                (item["raw_period"], item["normalized_period"], group),
+            )
             cluster, _ = _find_cluster(conn, group, item["normalized_value"])
             conn.execute("""INSERT OR IGNORE INTO metric_claims(
                 source_document_id, finding_id, observation_group_id, value_cluster_id,
-                iso3, metric, observation_period, unit, definition, value,
+                iso3, metric, observation_period, raw_observation_period, normalized_period,
+                unit, definition, value, raw_value, normalized_value,
                 source_classification, automated_classification, automated_reason,
                 evidence_points, raw_points, effective_points, display_disposition,
                 decision_origin, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'legacy_unreviewed', NULL,
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'legacy_unreviewed', NULL,
                         'Retained legacy finding; no historical assessment inferred.', 0, 0, 0,
                         'approved_secondary', 'migration', ?)""",
-                (source_doc, finding_id, group, cluster, item["iso3"], item["metric"], item["period"], item["unit"], item["definition"], item["value"], _now()))
+                (source_doc, finding_id, group, cluster, item["iso3"], item["metric"], item["period"], item["raw_period"], item["normalized_period"], item["unit"], item["definition"], item["value"], item["raw_value"], item["normalized_value"], _now()))
             _recalculate_cluster(conn, cluster)
             _auto_select_group(conn, group)
 

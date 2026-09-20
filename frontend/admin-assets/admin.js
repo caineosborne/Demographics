@@ -1186,7 +1186,14 @@ function renderClaimReviewRows(items) {
     const identity = document.createElement("td");
     identity.textContent = `#${claim.id} · ${claim.metric || "metric"}`;
     if (Number(claim.conflicting_cluster_count || 0) > 0) { const conflict = document.createElement("span"); conflict.className = "status-pill failed"; conflict.textContent = " conflict"; identity.append(conflict); }
-    const value = document.createElement("td"); value.textContent = `${claim.value ?? "—"} · ${claim.observation_period || "period not specified"}`;
+    const value = document.createElement("td");
+    const reported = document.createElement("span"); reported.className = "claim-reported-value";
+    reported.textContent = `Reported: ${claim.raw_value ?? claim.value ?? "—"} ${claim.unit || ""} · ${claim.raw_period || claim.raw_observation_period || claim.reported_period || claim.observation_period || "period not specified"}`.replace(/\s+·/, " ·").trim();
+    const comparison = document.createElement("small"); comparison.className = "claim-comparison-value";
+    const comparisonValue = claim.comparison_value ?? claim.rounded_value ?? claim.normalized_value;
+    const comparisonPeriod = claim.comparison_period || claim.normalized_period || claim.observation_period;
+    comparison.textContent = `Comparison: ${comparisonValue ?? "—"} ${claim.comparison_unit || claim.normalized_unit || claim.unit || ""} · ${comparisonPeriod || "period not specified"}`.replace(/\s+·/, " ·").trim();
+    value.append(reported, comparison);
     const evidence = document.createElement("td"); evidence.textContent = `${claim.effective_points ?? 0} effective · ${claim.raw_points ?? 0} raw · ${claim.supporting_document_count ?? 0} source${Number(claim.supporting_document_count) === 1 ? "" : "s"}`;
     const classification = document.createElement("td");
     const classSelect = document.createElement("select"); classSelect.className = "claim-review-select";

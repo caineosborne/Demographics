@@ -1165,6 +1165,23 @@ meaning in place:
   different values remain separate clusters within the observation group and
   constitute a conflict.
 
+**Normalization refinement — complete (2026-09-20):** Comparison uses the
+measured period at monthly resolution; article publication dates are never
+used as the measured period. Point dates and month labels normalize to
+`YYYY-MM`, inclusive ranges to `YYYY-MM/YYYY-MM`, and annual flow claims to
+`YYYY-01/YYYY-12`. YTD claims retain their actual start and end months.
+Explicit mid-year and year-end population claims map to July and December;
+ambiguous year-only population claims remain `YYYY-unknown` and are not
+assigned an invented month. The original period and value are retained in
+`raw_observation_period` and `raw_value`, alongside `normalized_period` and
+`normalized_value` used for comparison and graph clustering.
+
+Comparison values use Decimal half-up rounding after unit conversion:
+population below 1 million to the nearest 1,000, 1–under 10 million to the
+nearest 10,000, and 10 million or more to the nearest 100,000; births, deaths,
+natural change, and net migration to the nearest 1,000; and TFR to the nearest
+0.1. The raw extraction remains unchanged.
+
 Canonical URL uniqueness remains the only rule that rejects a source document
 outright. Different URLs create additional documents and claims. Do not invent
 missing legacy corroborating sources.

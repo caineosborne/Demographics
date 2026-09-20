@@ -87,11 +87,11 @@ class Phase4ClaimsTests(unittest.TestCase):
 
     def test_materially_different_values_are_separate_conflicting_clusters(self):
         phase4_claims.sync_finding_claims(
-            self.conn, 1, _finding("https://a.example/report", 100.0),
+            self.conn, 1, _finding("https://a.example/report", 100_000.0),
             classification="official_publisher",
         )
         phase4_claims.sync_finding_claims(
-            self.conn, 2, _finding("https://b.example/report", 110.0),
+            self.conn, 2, _finding("https://b.example/report", 110_000.0),
             classification="secondary_attributed",
         )
         claims = phase4_claims.list_claims(self.conn, iso3="JPN", metric="population")
@@ -131,11 +131,11 @@ class Phase4ClaimsTests(unittest.TestCase):
 
     def test_rejection_removes_active_conflict_but_preserves_audit_claim(self):
         phase4_claims.sync_finding_claims(
-            self.conn, 1, _finding("https://a.example/report", 100.0),
+            self.conn, 1, _finding("https://a.example/report", 100_000.0),
             classification="official_publisher",
         )
         phase4_claims.sync_finding_claims(
-            self.conn, 2, _finding("https://b.example/report", 110.0),
+            self.conn, 2, _finding("https://b.example/report", 110_000.0),
             classification="secondary_attributed",
         )
         claims = phase4_claims.list_claims(self.conn, iso3="JPN", metric="population")
