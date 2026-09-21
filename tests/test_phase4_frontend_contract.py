@@ -16,6 +16,7 @@ def test_phase4_review_controls_are_present_without_changing_graph_defaults():
     assert "display_rejected" not in renderer
     assert 'value="show_all" data-graph-mode checked' in template
     assert "data-claims-include-rejected" in template
+    assert "data-claims-filter" in template
     assert "claims-table" in template
     assert "merge_equivalent" in admin
     assert "separate_definition" in admin
@@ -23,6 +24,8 @@ def test_phase4_review_controls_are_present_without_changing_graph_defaults():
     assert "body.classification = classSelect.value" in admin
     assert "body.definition = definition.value.trim()" in admin
     assert "include_rejected=true" in admin
+    assert 'promote.textContent = "Promote"' in admin
+    assert 'remove.textContent = "Remove"' in admin
 
 
 def test_phase4_frontend_cluster_modes_keep_rejected_claims_out_of_graphs():
@@ -60,6 +63,7 @@ def test_phase4_frontend_preserves_month_resolution_and_raw_comparison_context()
     assert "Observation period (monthly comparison)" in renderer
     assert "claim.normalized_value" in admin
     assert "Reported / comparison value and period" in template
+    assert "graph-cluster-details" not in renderer
 
     source = renderer.encode("utf-8")
     encoded = base64.b64encode(source).decode("ascii")

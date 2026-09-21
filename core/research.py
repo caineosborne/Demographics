@@ -207,6 +207,7 @@ TAVILY_EXCLUDED_DOMAINS = (
     'georank.org',
     'macrotrends.net',
     'statspanda.com',
+    'ourworldindata.org',
     'worldpopulationclock.net',
 )
 LOW_VALUE_TERMS = {

@@ -444,12 +444,12 @@ function clusterTooltipDetails(point, metric) {
   return `Value cluster ${point.id}\nMetric: ${GRAPH_METRICS[metric].label}\nReported value: ${rawValue}\nComparison value: ${comparisonValue}\nReported period: ${point.rawPeriod}\nComparison period: ${point.comparisonPeriod}\nEvidence: ${point.effectivePoints} effective (${point.rawPoints} raw)\nSupporting documents: ${point.sourceCount}\nClassification: ${SOURCE_CLASS_LABELS[point.sourceType] || point.sourceType}\nDisposition: ${point.disposition}\nDecision origin: ${decisionOrigin}${conflict}\nReason: ${reason}\nSources:\n${documents}`;
 }
 
-function marker(chart, point, markerType, color, metric, { onClusterToggle = () => {} } = {}) {
+function marker(chart, point, markerType, color, metric) {
   if (point.cluster) {
     const band = evidenceBand(point.effectivePoints);
     const scale = band.size / 7;
     const conflictHalo = point.conflict ? svgElement("circle", { cx: 0, cy: 0, r: 11, fill: "none", stroke: "#c44f3f", "stroke-width": 2.5, "stroke-dasharray": "3 2", class: "graph-conflict-halo" }) : null;
-    const markerGroup = svgElement("g", { class: `graph-cluster-marker marker-${markerType} evidence-${band === EVIDENCE_BANDS.strong ? "strong" : band === EVIDENCE_BANDS.supported ? "supported" : "limited"}${point.conflict ? " conflict" : ""}`, tabindex: "0", "data-cluster-id": point.id, role: "button", "aria-label": clusterTooltipDetails(point, metric).replaceAll("\n", " · ") });
+    const markerGroup = svgElement("g", { class: `graph-cluster-marker marker-${markerType} evidence-${band === EVIDENCE_BANDS.strong ? "strong" : band === EVIDENCE_BANDS.supported ? "supported" : "limited"}${point.conflict ? " conflict" : ""}`, tabindex: "0", "data-cluster-id": point.id, role: "img", "aria-label": clusterTooltipDetails(point, metric).replaceAll("\n", " · ") });
     if (conflictHalo) markerGroup.append(conflictHalo);
     const content = svgElement("g", { transform: `scale(${scale})` });
     if (markerType === "diamond") content.append(svgElement("path", { d: "M 0 -7 L 7 0 L 0 7 L -7 0 Z", fill: color, stroke: color, "stroke-width": 1.5 }));
@@ -460,8 +460,6 @@ function marker(chart, point, markerType, color, metric, { onClusterToggle = () 
     const title = svgElement("title"); title.textContent = clusterTooltipDetails(point, metric); markerGroup.append(title);
     markerGroup.setAttribute("transform", `translate(${point.px} ${point.py})`);
     addTooltipInteractions(markerGroup, chart, clusterTooltipDetails(point, metric));
-    markerGroup.addEventListener("click", () => onClusterToggle(point.id));
-    markerGroup.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onClusterToggle(point.id); } });
     return markerGroup;
   }
   const finding = point.item.finding || {};
@@ -622,30 +620,14 @@ export function renderMetricGraph(container, payload, metric, { hiddenFindingIds
     const pathTitle = svgElement("title"); pathTitle.textContent = label; path.append(pathTitle); svg.append(path);
     positioned.forEach((point) => referencePoint(svg, chart, point, label, color, metric));
   });
-  const detailId = `graph-sources-${String(payload.iso3 || payload.country || "country").replace(/[^a-z0-9_-]/gi, "-")}-${metric}`;
-  const sourceDetails = document.createElement("div"); sourceDetails.className = "graph-source-details"; sourceDetails.id = detailId;
-  const toggleCluster = (clusterIdValue) => {
-    const detail = [...sourceDetails.querySelectorAll("[data-cluster-details]")].find((item) => item.dataset.clusterDetails === String(clusterIdValue));
-    if (detail) { detail.open = !detail.open; if (detail.open) detail.scrollIntoView({ block: "nearest" }); }
-  };
   clusters.forEach((point) => {
     const positioned = { ...point, px: xPosition(point.x), py: yPosition(point.y) };
     const className = SOURCE_CLASS_MARKERS[point.sourceType] || "cross";
     const color = SOURCE_CLASS_COLORS[point.sourceType] || SOURCE_CLASS_COLORS.secondary_unattributed;
-    svg.append(marker(chart, positioned, className, color, metric, { onClusterToggle: toggleCluster }));
-    const details = document.createElement("details"); details.className = "graph-cluster-details"; details.dataset.clusterDetails = point.id;
-    const summary = document.createElement("summary"); summary.textContent = `${point.comparisonValue === null ? formatValue(point.y, metric) : point.comparisonValue.toLocaleString()} · ${point.comparisonPeriod} · ${point.effectivePoints} evidence points · ${point.sourceCount} source${point.sourceCount === 1 ? "" : "s"}${point.conflict ? " · unresolved conflict" : ""}`; details.append(summary);
-    const metadata = document.createElement("p"); metadata.className = "graph-cluster-metadata"; metadata.textContent = `${SOURCE_CLASS_LABELS[point.sourceType] || point.sourceType} · ${point.disposition} · raw ${point.rawPoints} · ${point.cluster?.decision_origin || "automated_assessment"}`; details.append(metadata);
-    const reason = point.cluster?.automated_reason || point.cluster?.assessment_reason || point.cluster?.reason;
-    if (reason) { const reasonNode = document.createElement("p"); reasonNode.className = "graph-cluster-reason"; reasonNode.textContent = `Assessment: ${reason}`; details.append(reasonNode); }
-    const sources = document.createElement("ul"); sources.className = "graph-source-list";
-    if (point.documents.length) point.documents.forEach((source) => { const item = document.createElement("li"); if (source.url) { const link = document.createElement("a"); link.href = source.url; link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = source.label; item.append(link); } else item.textContent = source.label; sources.append(item); });
-    else { const item = document.createElement("li"); item.textContent = "No supporting source documents returned."; sources.append(item); }
-    details.append(sources); sourceDetails.append(details);
+    svg.append(marker(chart, positioned, className, color, metric));
   });
   findings.forEach((point) => { const positioned = { ...point, px: xPosition(point.x), py: yPosition(point.y) }; const className = SOURCE_CLASS_MARKERS[point.item.source_type] || "cross"; const color = SOURCE_CLASS_COLORS[point.item.source_type] || SOURCE_CLASS_COLORS.secondary_unattributed; const node = marker(chart, positioned, className, color, metric); node.addEventListener("click", () => onFindingSelect(point.id)); node.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onFindingSelect(point.id); } }); svg.append(node); });
   chart.append(svg); container.append(chart);
-  if (clusters.length) chart.append(sourceDetails);
   addLegend(chart, alternate.filter((item) => item.points.length).map((item) => item.revision));
 }
 

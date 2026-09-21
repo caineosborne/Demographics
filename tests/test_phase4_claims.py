@@ -291,6 +291,26 @@ class Phase4ClaimsTests(unittest.TestCase):
         self.assertEqual(claim["unit"], "million")
         self.assertEqual(claim["normalized_value"], 1_000_000.0)
 
+    def test_already_normalized_count_uses_source_value_without_double_scaling(self):
+        finding = _finding("https://scaled.example/report", 27_900_000.0, unit="million people")
+        finding["statistics"]["population"]["source_value"] = 27.9
+        phase4_claims.sync_finding_claims(
+            self.conn, 1, finding, classification="official_publisher"
+        )
+        claim = phase4_claims.list_claims(self.conn, iso3="JPN", metric="population")[0]
+        self.assertEqual(claim["value"], 27.9)
+        self.assertEqual(claim["normalized_value"], 27_900_000.0)
+
+    def test_base_value_is_not_reduced_to_an_unlabelled_table_source_value(self):
+        finding = _finding("https://table.example/report", 27_724_700.0, unit="")
+        finding["statistics"]["population"]["source_value"] = 27_724.7
+        phase4_claims.sync_finding_claims(
+            self.conn, 1, finding, classification="official_publisher"
+        )
+        claim = phase4_claims.list_claims(self.conn, iso3="JPN", metric="population")[0]
+        self.assertEqual(claim["value"], 27_724.7)
+        self.assertEqual(claim["normalized_value"], 27_700_000.0)
+
     def test_removed_metric_claim_is_rejected_but_retained_for_audit(self):
         finding = _finding("https://a.example/report", 100.0)
         finding["statistics"]["births"] = {"value": 10.0, "measured_period": "2025"}

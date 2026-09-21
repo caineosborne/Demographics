@@ -110,6 +110,7 @@ const fixtureFetch = async (path, options = {}) => {
 const api = createApiClient({ fetchImpl: fixtureMode ? fixtureFetch : window.fetch.bind(window) });
 let countryChoices = [];
 let findingsSort = { key: "id", direction: "descending" };
+let claimReviewItems = [];
 
 const RESEARCH_POLL_INTERVAL_MS = 5000;
 const RESEARCH_POLL_MAX_ATTEMPTS = 180;
@@ -1176,11 +1177,18 @@ function renderClaimReviewRows(items) {
   if (!card || !body) return;
   card.hidden = false;
   body.replaceChildren();
-  if (!items.length) {
+  const query = String($(`[data-claims-filter]`)?.value || "").trim().toLowerCase();
+  const visibleItems = !query ? items : items.filter((claim) => [
+    claim.id, claim.metric, claim.raw_value, claim.value, claim.normalized_value,
+    claim.raw_period, claim.normalized_period, claim.observation_period,
+    claim.unit, claim.source_url, claim.canonical_url,
+  ].some((value) => String(value ?? "").toLowerCase().includes(query)));
+  if (!visibleItems.length) {
     body.innerHTML = '<tr><td colspan="7" class="empty-cell">No Phase 4 claims are available for this country.</td></tr>';
+    const status = $(`[data-claims-status]`); if (status) status.textContent = query ? `No claims match “${query}”.` : "No Phase 4 claims are available for this country.";
     return;
   }
-  items.forEach((claim) => {
+  visibleItems.forEach((claim) => {
     const row = document.createElement("tr");
     if (claim.display_disposition === "rejected") row.className = "claim-rejected-row";
     const identity = document.createElement("td");
@@ -1240,10 +1248,23 @@ function renderClaimReviewRows(items) {
       try { await api.request(`/api/v1/admin/claims/${encodeURIComponent(claim.id)}/undo`, { method: "POST", body: { actor: "local", reason: "Reverted in graph review." } }); await loadGraphs({ force: true }); }
       catch (error) { showGlobalError(error); undo.disabled = false; }
     });
-    actions.append(points, reason, save, undo);
+    const promote = document.createElement("button"); promote.type = "button"; promote.className = "quiet-button"; promote.textContent = "Promote"; promote.title = "Make this claim the primary value for its observation.";
+    promote.addEventListener("click", async () => {
+      promote.disabled = true;
+      try { await api.request(`/api/v1/admin/claims/${encodeURIComponent(claim.id)}`, { method: "PUT", body: { actor: "local", disposition: "primary", reason: "Promoted in graph review." } }); await loadGraphs({ force: true }); }
+      catch (error) { showGlobalError(error); promote.disabled = false; }
+    });
+    const remove = document.createElement("button"); remove.type = "button"; remove.className = "quiet-button danger-button"; remove.textContent = "Remove"; remove.title = "Reject this claim from graph display while retaining its audit record.";
+    remove.addEventListener("click", async () => {
+      if (!window.confirm(`Remove claim #${claim.id} from graph display? It remains available in the rejected-claims audit.`)) return;
+      remove.disabled = true;
+      try { await api.request(`/api/v1/admin/claims/${encodeURIComponent(claim.id)}`, { method: "PUT", body: { actor: "local", disposition: "rejected", reason: "Removed in graph review." } }); await loadGraphs({ force: true }); }
+      catch (error) { showGlobalError(error); remove.disabled = false; }
+    });
+    actions.append(points, reason, save, undo, promote, remove);
     row.append(identity, value, evidence, classification, disposition, grouping, actions); body.append(row);
   });
-  const status = $(`[data-claims-status]`); if (status) status.textContent = `${items.length} claim${items.length === 1 ? "" : "s"} returned. Conflicts are marked inline; overrides are audited and reversible.`;
+  const status = $(`[data-claims-status]`); if (status) status.textContent = `${visibleItems.length}${query ? ` of ${items.length}` : ""} claim${visibleItems.length === 1 ? "" : "s"} shown. Conflicts are marked inline; overrides are audited and reversible.`;
 }
 
 async function loadClaimReview(iso3, includeRejected = false) {
@@ -1252,7 +1273,8 @@ async function loadClaimReview(iso3, includeRejected = false) {
   try {
     const include = includeRejected ? "&include_rejected=true" : "";
     const payload = await api.request(`/api/v1/claims?iso3=${encodeURIComponent(iso3)}&mode=all${include}`);
-    renderClaimReviewRows(payload.items || []);
+    claimReviewItems = payload.items || [];
+    renderClaimReviewRows(claimReviewItems);
   } catch (error) {
     card.hidden = false;
     const status = $(`[data-claims-status]`); if (status) status.textContent = `Claims could not be loaded: ${error.message}`;
@@ -1514,6 +1536,7 @@ function wire() {
     const iso3 = $(`[data-graph-country]`)?.value || "";
     if (iso3) loadClaimReview(iso3, Boolean($(`[data-claims-include-rejected]`)?.checked));
   });
+  $(`[data-claims-filter]`)?.addEventListener("input", () => renderClaimReviewRows(claimReviewItems));
   $(`[data-load-graphs]`)?.addEventListener("click", () => loadGraphs({ force: true }));
   $(`[data-refresh-graphs]`)?.addEventListener("click", () => loadGraphs({ force: true }));
   $(`[data-analysis-form]`)?.addEventListener("submit", (event) => { event.preventDefault(); submitJob(event.currentTarget, "analysis"); });

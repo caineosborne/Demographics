@@ -631,8 +631,8 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(payload['max_results'], 4)
         self.assertEqual(payload['query'], 'custom query')
         self.assertEqual(payload['exclude_domains'], [
-            'findeasy.in', 'georank.org', 'macrotrends.net', 'statspanda.com',
-            'worldpopulationclock.net',
+            'findeasy.in', 'georank.org', 'macrotrends.net', 'ourworldindata.org',
+            'statspanda.com', 'worldpopulationclock.net',
         ])
         self.assertEqual(rows[0]['snippet'], 'Snippet')
 

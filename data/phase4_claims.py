@@ -180,6 +180,7 @@ def ensure_schema(conn: sqlite3.Connection, *, migrate_legacy: bool = True) -> N
     if migrate_legacy:
         _migrate_legacy_findings(conn)
     _reconcile_normalized_groups(conn)
+    _repair_claim_scale_from_findings(conn)
 
 
 def _canonical_url(url: str) -> str:
@@ -391,11 +392,25 @@ def _claim_dimensions(finding: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(statistic, dict) or statistic.get("value") is None:
             continue
         try:
-            raw_value = float(statistic["value"])
+            stored_value = float(statistic["value"])
         except (TypeError, ValueError):
             continue
+        # The extraction contract stores a count metric in base units while
+        # source_value preserves the number printed by the publisher.  Phase
+        # 4 clusters on the latter after applying its displayed unit.  Using
+        # value here would multiply already-normalised counts a second time
+        # (for example, 27,900,000 "million people" became 27.9 trillion).
+        try:
+            reported_value = float(statistic.get("source_value"))
+        except (TypeError, ValueError):
+            reported_value = stored_value
         unit = str(statistic.get("unit") or "").strip()
-        normalized = _comparison_value(str(metric), raw_value, unit)
+        # A displayed scale such as “million people” is reconstructed from
+        # source_value. With no scale, value is already the base comparison
+        # value; source_value may instead be a monthly/quarterly or table
+        # display value and must not shrink the plotted observation.
+        normalized_input = reported_value if _unit_factor(unit) != 1.0 else stored_value
+        normalized = _comparison_value(str(metric), normalized_input, unit)
         # Article/effective publication dates are deliberately not used as a
         # measured period fallback.  A missing measured period stays missing
         # rather than being assigned the publication month.
@@ -408,10 +423,52 @@ def _claim_dimensions(finding: dict[str, Any]) -> list[dict[str, Any]]:
             "raw_period": raw_period, "normalized_period": period,
             "unit": unit, "group_unit": _group_unit(unit),
             "definition": str(statistic.get("definition") or "").strip(),
-            "value": raw_value, "raw_value": raw_value,
+            "value": reported_value, "raw_value": reported_value,
             "normalized_value": float(normalized),
         })
     return dimensions
+
+
+def _repair_claim_scale_from_findings(conn: sqlite3.Connection) -> None:
+    """Correct historical Phase 4 claims created before source_value was used.
+
+    This is deliberately a narrow, idempotent data repair. Only claims whose
+    stored finding supplies an explicit source_value are moved; unannotated
+    legacy records retain their original representation.
+    """
+    rows = conn.execute("SELECT id, finding_json FROM webpage_findings").fetchall()
+    affected_clusters: set[int] = set()
+    affected_groups: set[int] = set()
+    for finding_id, payload in rows:
+        try:
+            finding = json.loads(payload or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        for item in _claim_dimensions(finding):
+            statistic = (finding.get("statistics") or {}).get(item["metric"]) or {}
+            if statistic.get("source_value") is None:
+                continue
+            claims = conn.execute(
+                "SELECT id, observation_group_id, value_cluster_id, value, raw_value, normalized_value "
+                "FROM metric_claims WHERE finding_id = ? AND metric = ? AND observation_period = ?",
+                (int(finding_id), item["metric"], item["period"]),
+            ).fetchall()
+            for claim_id, group_id, cluster_id, value, raw_value, normalized_value in claims:
+                if (value == item["value"] and raw_value == item["raw_value"]
+                        and normalized_value == item["normalized_value"]):
+                    continue
+                destination, _ = _find_cluster(conn, int(group_id), item["normalized_value"])
+                conn.execute(
+                    "UPDATE metric_claims SET value = ?, raw_value = ?, normalized_value = ?, value_cluster_id = ? WHERE id = ?",
+                    (item["value"], item["raw_value"], item["normalized_value"], destination, int(claim_id)),
+                )
+                affected_clusters.update({int(cluster_id), destination})
+                affected_groups.add(int(group_id))
+    for cluster_id in affected_clusters:
+        _recalculate_cluster(conn, cluster_id)
+    for group_id in affected_groups:
+        _auto_select_group(conn, group_id)
+    conn.execute("DELETE FROM value_clusters WHERE id NOT IN (SELECT DISTINCT value_cluster_id FROM metric_claims)")
 
 
 def _reconcile_normalized_groups(conn: sqlite3.Connection) -> None:
