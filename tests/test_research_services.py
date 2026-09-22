@@ -59,6 +59,14 @@ class ResearchServiceTests(unittest.TestCase):
         settings = start.call_args.args[0]
         self.assertEqual(settings['categories'][0]['topic'], 'news')
 
+    def test_country_hunt_default_result_limit_is_fifteen(self):
+        with patch.object(research_services, '_country_context', return_value={'iso3': 'JPN', 'label': 'Japan'}), \
+             patch.object(research_services.research_store, 'upsert_country_hunt_queue'), \
+             patch.object(research_services, '_start_research', return_value={'run_id': 'run-1', 'status': 'running'}) as start:
+            research_services.start_country_hunt('jpn')
+
+        self.assertEqual(start.call_args.args[0]['categories'][0]['max_results'], 15)
+
     def test_bulk_country_hunt_rejects_more_than_one_hundred_countries(self):
         with self.assertRaisesRegex(ValueError, 'between 1 and 100'):
             research_services.start_bulk_country_hunt(['JPN'] * 101)

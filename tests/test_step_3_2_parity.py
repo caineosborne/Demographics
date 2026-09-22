@@ -117,6 +117,9 @@ class Step32ParityTests(unittest.TestCase):
         self.assertIn('"Russian Federation" OR "Russia"', api.categories[0].query)
         self.assertNotIn('Soviet', api.categories[0].query)
 
+        moldova = research_services.country_hunt_settings({"iso3": "MDA", "label": "Republic of Moldova"})
+        self.assertIn('"Republic of Moldova" OR "Moldova"', moldova.categories[0].query)
+
     def test_bulk_hunt_is_bounded_per_country_in_both_treatments(self):
         with patch.object(research_ui, "countries_missing_recent_data", return_value=["Japan", "Australia"]):
             gradio, countries = research_ui.bulk_country_hunt_settings("J", 31, 2, 1)

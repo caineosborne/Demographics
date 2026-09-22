@@ -85,6 +85,7 @@ class ResearchTests(unittest.TestCase):
     def test_recommended_searches_target_demographic_release_language(self):
         categories = {category.name: category for category in recommended_categories(2026)}
         self.assertEqual(categories['Population'].topic, 'news')
+        self.assertEqual(categories['Population'].max_results, 15)
         self.assertEqual(categories['Population'].time_range, 'day')
         self.assertEqual(categories['Population'].search_depth, 'advanced')
         self.assertIn('"annual vital statistics"', categories['Births, deaths and fertility'].query)

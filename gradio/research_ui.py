@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 import gradio as gr
 import pandas as pd
 
-from core.research import BossAgent, CRITERIA, DEFAULT_SETTINGS, ResearchStopRequested, SearchSettings, recommended_categories
+from core.research import BossAgent, CRITERIA, DEFAULT_SETTINGS, RESEARCH_DEFAULTS, ResearchStopRequested, SearchSettings, recommended_categories
 from core import research_store as store
 from data.tools import list_country_names, list_webpage_findings
 from data import tools
@@ -26,6 +26,7 @@ HUNT_QUERY = ('"{country}" (population OR births OR deaths OR fertility OR migra
               '("official statistics" OR "statistical office" OR census OR release)')
 COUNTRY_HUNT_ALIASES = {
     'Russian Federation': ('Russia',),
+    'Republic of Moldova': ('Moldova',),
     'Türkiye': ('Turkey',),
     'Republic of Korea': ('South Korea',),
     'United States of America': ('United States', 'USA'),
@@ -108,7 +109,7 @@ def parse_settings(rows, search_topic, search_window, reddit_enabled, reddit_lim
     return result
 
 
-def country_hunt_settings(country: str, *, max_results: int = 12) -> dict:
+def country_hunt_settings(country: str, *, max_results: int = int(RESEARCH_DEFAULTS['country_hunt_result_limit'])) -> dict:
     """Create a focused, one-year search without changing saved discovery controls."""
     country = str(country or '').strip()
     if country not in set(list_country_names()):

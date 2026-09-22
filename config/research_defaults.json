@@ -1,0 +1,13 @@
+{
+  "discovery_category_result_limit": 15,
+  "country_hunt_result_limit": 15,
+  "bulk_country_hunt_result_limit": 15,
+  "tavily_exclude_domains": [
+    "findeasy.in",
+    "georank.org",
+    "macrotrends.net",
+    "ourworldindata.org",
+    "statspanda.com",
+    "worldpopulationclock.net"
+  ]
+}

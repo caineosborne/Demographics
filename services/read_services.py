@@ -284,13 +284,16 @@ def _phase4_graph_clusters(iso3: str) -> list[dict[str, Any]]:
             "claim_ids": [],
         })
         cluster["claim_ids"].append(claim["id"])
-        cluster["source_documents"].append({
-            "id": claim["source_document_id"],
-            "url": claim["source_url"],
-            "canonical_url": claim["canonical_url"],
-            "classification": claim["source_classification"],
-            "display_disposition": claim["display_disposition"],
-        })
+        # A document can contribute more than one claim to one value cluster,
+        # but it remains one supporting document and one tooltip source.
+        if not any(document["id"] == claim["source_document_id"] for document in cluster["source_documents"]):
+            cluster["source_documents"].append({
+                "id": claim["source_document_id"],
+                "url": claim["source_url"],
+                "canonical_url": claim["canonical_url"],
+                "classification": claim["source_classification"],
+                "display_disposition": claim["display_disposition"],
+            })
         # Preserve the strongest classification and the effective disposition
         # when multiple documents support one cluster.
         rank = {"official_publisher": 4, "secondary_attributed": 3,

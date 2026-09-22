@@ -29,11 +29,33 @@ from data import tools
 from core.temporal_context import temporal_context
 
 
+_RESEARCH_DEFAULTS_PATH = Path(__file__).resolve().parents[1] / 'config' / 'research_defaults.json'
+_FALLBACK_RESEARCH_DEFAULTS = {
+    'discovery_category_result_limit': 15,
+    'country_hunt_result_limit': 15,
+    'bulk_country_hunt_result_limit': 15,
+    'tavily_exclude_domains': [],
+}
+
+
+def _research_defaults() -> dict:
+    """Load the small, user-editable set of research defaults."""
+    try:
+        configured = json.loads(_RESEARCH_DEFAULTS_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        configured = {}
+    return {**_FALLBACK_RESEARCH_DEFAULTS, **configured}
+
+
+RESEARCH_DEFAULTS = _research_defaults()
+DEFAULT_DISCOVERY_RESULT_LIMIT = int(RESEARCH_DEFAULTS['discovery_category_result_limit'])
+
+
 class SearchCategory(BaseModel):
     name: str = Field(min_length=1)
     query: str = Field(min_length=1)
     topic: Literal['general', 'news', 'finance'] = 'general'
-    max_results: int = Field(default=10, ge=1, le=20)
+    max_results: int = Field(default=DEFAULT_DISCOVERY_RESULT_LIMIT, ge=1, le=20)
     time_range: Literal['day', 'week', 'month', 'year', 'all'] = 'day'
     search_depth: Literal['basic', 'advanced', 'fast', 'ultra-fast'] = 'basic'
     include_domains: list[str] = Field(default_factory=list, max_length=300)
@@ -109,14 +131,17 @@ def recommended_categories(year: int | None = None) -> list[SearchCategory]:
     return [
         SearchCategory(
             name='Population', topic='news', time_range='day', search_depth='advanced',
+            max_results=DEFAULT_DISCOVERY_RESULT_LIMIT,
             query=f'{year} "national population estimate" census statistical release',
         ),
         SearchCategory(
             name='Births, deaths and fertility', topic='news', time_range='day', search_depth='advanced',
+            max_results=DEFAULT_DISCOVERY_RESULT_LIMIT,
             query=f'{year} "annual vital statistics" births deaths "total fertility rate" national',
         ),
         SearchCategory(
             name='Migration', topic='news', time_range='day', search_depth='advanced',
+            max_results=DEFAULT_DISCOVERY_RESULT_LIMIT,
             query=f'{year} "annual net international migration" immigration emigration national statistics',
         ),
     ]
@@ -202,14 +227,7 @@ LOW_VALUE_DOMAINS = {
 # search result, retrieval, or model review on a publisher that cannot be an
 # independent demographic source.  Page-level WPP provenance checks remain
 # necessary for every other publisher.
-TAVILY_EXCLUDED_DOMAINS = (
-    'findeasy.in',
-    'georank.org',
-    'macrotrends.net',
-    'statspanda.com',
-    'ourworldindata.org',
-    'worldpopulationclock.net',
-)
+TAVILY_EXCLUDED_DOMAINS = tuple(RESEARCH_DEFAULTS['tavily_exclude_domains'])
 LOW_VALUE_TERMS = {
     'methodology', 'understanding', 'explainer', 'what is', 'faq', 'frequently asked',
     'job growth', 'employment report', 'wages', 'waterfowl', 'margins of error',
@@ -258,16 +276,22 @@ def publisher_domain(url: str) -> str:
     return extracted.top_domain_under_public_suffix or hostname
 
 
-def tavily_links(category):
-    key = os.getenv('TAVILY_API_KEY')
-    if not key:
-        raise ValueError('Set TAVILY_API_KEY in .env to enable Tavily search.')
-    payload = category.model_dump(exclude={'name', 'enabled'})
+def tavily_request_parameters(category):
+    """Build the exact Tavily parameters used for both audit logging and I/O."""
+    payload = category.model_dump(exclude={'name', 'enabled', 'country_iso3'})
     payload['exclude_domains'] = sorted({
         *payload.get('exclude_domains', []), *TAVILY_EXCLUDED_DOMAINS,
     })
     if payload['time_range'] == 'all':
         payload.pop('time_range')
+    return payload
+
+
+def tavily_links(category):
+    key = os.getenv('TAVILY_API_KEY')
+    if not key:
+        raise ValueError('Set TAVILY_API_KEY in .env to enable Tavily search.')
+    payload = tavily_request_parameters(category)
     with requests.post('https://api.tavily.com/search', headers={'Authorization': f'Bearer {key}'},
                        json={**payload, 'include_raw_content': False, 'include_answer': False}, timeout=60) as response:
         response.raise_for_status()
@@ -589,8 +613,9 @@ class BossAgent:
             for provider, category, arguments in jobs:
                 yield run_id, f'Extract links: {provider} / {category}'
                 request_details = (
-                    arguments.model_dump(mode='json')
-                    if hasattr(arguments, 'model_dump') else arguments
+                    tavily_request_parameters(arguments)
+                    if provider == 'tavily' else
+                    (arguments.model_dump(mode='json') if hasattr(arguments, 'model_dump') else arguments)
                 )
                 yield run_id, (
                     f'API request: provider={provider} category={category} '

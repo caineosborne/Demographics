@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from urllib.parse import urlsplit
 
 from services import read_services, admin_services, research_services, claim_services
+from core.research import RESEARCH_DEFAULTS
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,13 +291,13 @@ class ResearchStartRequest(BaseModel):
 
 class CountryHuntRequest(BaseModel):
     country_iso3: str
-    max_results: int = 12
+    max_results: int = int(RESEARCH_DEFAULTS['country_hunt_result_limit'])
     topic: Literal['general', 'news'] = 'general'
 
 
 class BulkCountryHuntRequest(BaseModel):
     country_iso3s: list[str]
-    max_results: int = 5
+    max_results: int = int(RESEARCH_DEFAULTS['bulk_country_hunt_result_limit'])
     topic: Literal['general', 'news'] = 'general'
 
 

@@ -18,7 +18,7 @@ from services import admin_services
 from core import research_store
 from data import tools
 from langchain_core.messages import HumanMessage
-from core.research import BossAgent, CRITERIA, DEFAULT_SETTINGS, SearchSettings
+from core.research import BossAgent, CRITERIA, DEFAULT_SETTINGS, RESEARCH_DEFAULTS, SearchSettings
 
 
 HUNT_QUERY = ('"{country}" (population OR births OR deaths OR fertility OR migration) '
@@ -40,6 +40,7 @@ COUNTRY_HUNT_UN_REPUBLISHER_DOMAINS = (
 # it is not a free-form query expansion mechanism.
 COUNTRY_HUNT_ALIASES = {
     'Russian Federation': ('Russia',),
+    'Republic of Moldova': ('Moldova',),
     'Türkiye': ('Turkey',),
     'Republic of Korea': ('South Korea',),
     'United States of America': ('United States', 'USA'),
@@ -391,7 +392,7 @@ def save_research_settings(settings: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def start_country_hunt(country_iso3: str, *, max_results: int = 12,
+def start_country_hunt(country_iso3: str, *, max_results: int = int(RESEARCH_DEFAULTS['country_hunt_result_limit']),
                        topic: str = 'general') -> dict[str, Any]:
     context = _country_context(country_iso3)
     settings = country_hunt_settings(context, max_results, topic=topic)
@@ -403,7 +404,7 @@ def start_country_hunt(country_iso3: str, *, max_results: int = 12,
     return result
 
 
-def country_hunt_settings(context: dict[str, str], max_results: int = 12,
+def country_hunt_settings(context: dict[str, str], max_results: int = int(RESEARCH_DEFAULTS['country_hunt_result_limit']),
                           *, topic: str = 'general') -> SearchSettings:
     if not 1 <= int(max_results) <= 20:
         raise ValueError('max_results must be between 1 and 20.')
@@ -424,7 +425,7 @@ def country_hunt_settings(context: dict[str, str], max_results: int = 12,
     )
 
 
-def start_bulk_country_hunt(country_iso3s: list[str], *, max_results: int = 5,
+def start_bulk_country_hunt(country_iso3s: list[str], *, max_results: int = int(RESEARCH_DEFAULTS['bulk_country_hunt_result_limit']),
                              topic: str = 'general') -> dict[str, Any]:
     if not country_iso3s or len(country_iso3s) > 100:
         raise ValueError('country_iso3s must contain between 1 and 100 countries.')

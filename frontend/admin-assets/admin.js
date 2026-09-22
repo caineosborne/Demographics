@@ -314,9 +314,9 @@ function renderCategoryEditors(categories) {
 function coreResearchCategories() {
   const year = new Date().getFullYear();
   return [
-    { name: "Population", topic: "news", time_range: "day", search_depth: "advanced", max_results: 10, query: `${year} "national population estimate" census statistical release` },
-    { name: "Births, deaths and fertility", topic: "news", time_range: "day", search_depth: "advanced", max_results: 10, query: `${year} "annual vital statistics" births deaths "total fertility rate" national` },
-    { name: "Migration", topic: "news", time_range: "day", search_depth: "advanced", max_results: 10, query: `${year} "annual net international migration" immigration emigration national statistics` },
+    { name: "Population", topic: "news", time_range: "day", search_depth: "advanced", max_results: 15, query: `${year} "national population estimate" census statistical release` },
+    { name: "Births, deaths and fertility", topic: "news", time_range: "day", search_depth: "advanced", max_results: 15, query: `${year} "annual vital statistics" births deaths "total fertility rate" national` },
+    { name: "Migration", topic: "news", time_range: "day", search_depth: "advanced", max_results: 15, query: `${year} "annual net international migration" immigration emigration national statistics` },
   ];
 }
 
@@ -328,7 +328,7 @@ function readCategoryEditors() {
   return $$(`[data-category-row], .category-row`).map((row) => {
     const value = (key) => $(`[data-category="${key}"]`, row)?.value?.trim() || "";
     const list = (key) => value(key).split(",").map((item) => item.trim()).filter(Boolean);
-    return { name: value("name"), query: value("query"), topic: "news", max_results: Number(value("max_results") || 10), time_range: value("time_range") || "day", search_depth: value("search_depth") || "basic", include_domains: list("include_domains"), exclude_domains: list("exclude_domains"), enabled: $(`[data-category="enabled"]`, row)?.checked !== false };
+    return { name: value("name"), query: value("query"), topic: "news", max_results: Number(value("max_results") || 15), time_range: value("time_range") || "day", search_depth: value("search_depth") || "basic", include_domains: list("include_domains"), exclude_domains: list("exclude_domains"), enabled: $(`[data-category="enabled"]`, row)?.checked !== false };
   });
 }
 
@@ -477,9 +477,10 @@ function renderResearchRunDetail(run, { resetLogVisibility = false, target = "cu
     return FINAL_CANDIDATE_STATES.has(candidate.status) || candidate.status?.startsWith("excluded_");
   }).length;
   const underReview = runCandidates.length - confirmedIn - confirmedOut;
-  const confirmedPercentage = runCandidates.length ? Math.round((confirmedIn / runCandidates.length) * 100) : 0;
+  const processed = confirmedIn + confirmedOut;
+  const processedPercentage = runCandidates.length ? Math.round((processed / runCandidates.length) * 100) : 0;
   $(`[data-run-detail-summary]`, detail).textContent =
-    `${runCandidates.length} candidates · ${confirmedIn} confirmed in · ${confirmedOut} confirmed out · ${underReview} under review · ${confirmedPercentage}% confirmed · ${activityEvents.length} activity log entr${activityEvents.length === 1 ? "y" : "ies"} · ${llmEvents.length} full LLM entr${llmEvents.length === 1 ? "y" : "ies"}.`;
+    `${runCandidates.length} candidates · ${confirmedIn} confirmed in · ${confirmedOut} confirmed out · ${underReview} under review · ${processedPercentage}% processed · ${activityEvents.length} activity log entr${activityEvents.length === 1 ? "y" : "ies"} · ${llmEvents.length} full LLM entr${llmEvents.length === 1 ? "y" : "ies"}.`;
   const stopButton = $(`[data-run-stop]`, detail);
   if (stopButton) {
     if (!stopButton.dataset.bound) {
@@ -698,7 +699,7 @@ async function submitCountryHunt(form, bulk = false) {
     const selected = bulk ? $$(`[data-gap-selection] input:checked`).map((input) => input.value) : [values.country_iso3];
     if (!selected.filter(Boolean).length) throw new Error("Choose at least one country.");
     const endpoint = bulk ? "/api/v1/research/bulk-country-hunts" : "/api/v1/research/country-hunts";
-    const body = bulk ? { country_iso3s: selected, max_results: Number(values.max_results || 5) } : { country_iso3: selected[0], max_results: Number(values.max_results || 12), topic: values.topic || "general" };
+    const body = bulk ? { country_iso3s: selected, max_results: Number(values.max_results || 15) } : { country_iso3: selected[0], max_results: Number(values.max_results || 15), topic: values.topic || "general" };
     const job = await api.request(endpoint, { method: "POST", body });
     runId = job.run_id || job.id;
     setState(state, "running", `Run ${runId} is running.`);
