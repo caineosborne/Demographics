@@ -228,9 +228,48 @@ class Step34ExtractionTests(unittest.TestCase):
                 'Japan population was 124.6 million in 2023.', empty.url,
                 {'submission_type': 'manual'},
             )
-        low.invoke.assert_called_once()
+        self.assertEqual(low.invoke.call_count, 2)
         medium.invoke.assert_not_called()
         self.assertIsNone(response['result'].statistics.population)
+
+    def test_empty_extraction_with_numeric_demographic_page_text_gets_one_correction(self):
+        empty = RelevantResult(
+            title='Article', url='https://example.test/article', source='Example', site_seen='example.test',
+            statistics={},
+        )
+        recovered = RelevantResult(
+            title='Article', url='https://example.test/article', source='Example', site_seen='example.test',
+            geography='Republic of Moldova', geography_iso3='MDA',
+            statistics={'population': {
+                'value': 2_400_000, 'source_value': 2.4,
+                'evidence_excerpt': 'The Republic of Moldova officially counted 2.4 million inhabitants in 2025.',
+                'metric_type': 'population', 'unit': 'million people',
+                'observation_status': 'reported', 'national_scope_status': 'national', 'measured_period': '2025',
+            }},
+        )
+        with patch('core.agents.research_llm') as low:
+            low.invoke.side_effect = [empty, recovered]
+            response = __import__('core.agents', fromlist=['extract_from_page_text']).extract_from_page_text(
+                'The Republic of Moldova officially counted 2.4 million inhabitants in 2025.', empty.url,
+                {'submission_type': 'manual'},
+            )
+        self.assertEqual(low.invoke.call_count, 2)
+        self.assertEqual(response['storage']['status'], 'validated')
+        self.assertEqual(response['result'].statistics.population.value, 2_400_000)
+
+    def test_empty_extraction_with_numeric_demographic_page_text_needs_review_after_correction(self):
+        empty = RelevantResult(
+            title='Article', url='https://example.test/article', source='Example', site_seen='example.test',
+            statistics={},
+        )
+        with patch('core.agents.research_llm') as low:
+            low.invoke.side_effect = [empty, empty]
+            response = __import__('core.agents', fromlist=['extract_from_page_text']).extract_from_page_text(
+                'The Republic of Moldova officially counted 2.4 million inhabitants in 2025.', empty.url,
+                {'submission_type': 'manual'},
+            )
+        self.assertEqual(low.invoke.call_count, 2)
+        self.assertEqual(response['storage']['status'], 'needs_review')
 
     def test_partial_or_unclear_low_data_does_not_use_medium_model_retry(self):
         partial = RelevantResult(

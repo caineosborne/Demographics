@@ -1331,19 +1331,20 @@ def has_numeric_evidence_without_value(finding: dict) -> bool:
     )
 
 
-def has_demographic_summary_without_metrics(finding: dict) -> bool:
-    """Detect a summary that cites a number but has no structured metric."""
-    if has_useful_numeric_datapoint(finding):
-        return False
-    summary = str(finding.get("summary") or "")
-    return bool(
-        _evidence_numbers(summary)
-        and re.search(
-            r"\b(population|births?|deaths?|migration|fertility|arrivals?|departures?)\b",
-            summary,
-            re.IGNORECASE,
-        )
-    )
+def page_has_demographic_number(page_text: str) -> bool:
+    """Whether page text warrants one extraction correction attempt.
+
+    This deliberately does not extract, classify, or validate a value. It is
+    only a small signal that the model should be asked once more when its
+    otherwise empty structured response disagrees with the retrieved text.
+    """
+    return bool(re.search(
+        r"(?:\b(?:population|inhabitants?|residents?|births?|deaths?|fertility|"
+        r"migration|immigration|emigration|arrivals?|departures?)\b.{0,160}?\d"
+        r"|\d.{0,160}?\b(?:population|inhabitants?|residents?|births?|deaths?|"
+        r"fertility|migration|immigration|emigration|arrivals?|departures?)\b)",
+        str(page_text or ""), re.IGNORECASE | re.DOTALL,
+    ))
 
 
 def extraction_retry_messages(extraction_messages, result: RelevantResult | None):
@@ -1471,8 +1472,9 @@ Retrieved page text:
         # when another useful metric remains. Explicit reviewer edits are handled
         # permissively by the manual draft service.
         validation = validate_extracted_result(result)
-        if has_demographic_summary_without_metrics(result.model_dump(mode='json')):
-            report_activity("[Research agent] correcting summary-only numeric extraction")
+        if (not has_useful_numeric_datapoint(result.model_dump(mode='json'))
+                and page_has_demographic_number(page_text)):
+            report_activity("[Research agent] correcting empty extraction with numeric demographic page text")
             correction_messages = extraction_retry_messages(extraction_messages, result)
             correction_started = perf_counter()
             corrected = invoke_llm_with_timeout('extraction_correction', research_llm, correction_messages)
@@ -1507,8 +1509,12 @@ Retrieved page text:
     mark_partial_periods(result)
     finding = result.model_dump(mode='json')
     if not has_useful_numeric_datapoint(finding):
-        storage = {'status': 'excluded_no_data',
-                   'reason': 'No useful numeric demographic data points; finding was not saved.'}
+        if page_has_demographic_number(page_text):
+            storage = {'status': 'needs_review',
+                       'reason': 'Retrieved page text contains demographic numbers, but extraction did not structure a usable metric.'}
+        else:
+            storage = {'status': 'excluded_no_data',
+                       'reason': 'No useful numeric demographic data points; finding was not saved.'}
     else:
         # Manual submissions are a flexible intake path.  Keep deterministic
         # extraction diagnostics with the result, but do not make an article
@@ -1646,8 +1652,9 @@ def research_agent(state: State):
         validation = validate_extracted_result(
             result, retain_rejected_metrics=bool(provenance.get('permission_first_bulk'))
         )
-        if has_demographic_summary_without_metrics(result.model_dump(mode='json')):
-            report_activity("[Research agent] correcting summary-only numeric extraction")
+        if (not has_useful_numeric_datapoint(result.model_dump(mode='json'))
+                and page_has_demographic_number(retrieved_page_text)):
+            report_activity("[Research agent] correcting empty extraction with numeric demographic page text")
             correction_messages = extraction_retry_messages(extraction_messages, result)
             correction_started = perf_counter()
             corrected = invoke_llm_with_timeout('extraction_correction', research_llm, correction_messages)
@@ -1722,6 +1729,16 @@ def research_agent(state: State):
     # partial migration period). Its stored comparison caveat makes that
     # distinction visible without discarding the source document.
     if not has_useful_numeric_datapoint(finding):
+        if page_has_demographic_number(retrieved_page_text):
+            report_activity("[Research agent] extraction needs review: numeric demographic page text was not structured")
+            return {
+                "messages": new_messages,
+                "result": result,
+                "storage": {
+                    "status": "needs_review",
+                    "reason": "Retrieved page text contains demographic numbers, but extraction did not structure a usable metric.",
+                },
+            }
         report_activity("[Research agent] excluded: no extractable demographic data points")
         return {
             "messages": new_messages,
